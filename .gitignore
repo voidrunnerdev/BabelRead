@@ -16,6 +16,7 @@
 local.properties
 .env
 debug.keystore
+my-upload-key.jks
 
 # Bilincli olarak takip edilmeyen yerel klasorler
 .aistudio/

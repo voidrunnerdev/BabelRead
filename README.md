@@ -1,7 +1,7 @@
 # BabelRead
 
 [![APK derlemesi](https://github.com/voidrunnerdev/BabelRead/actions/workflows/build-apk.yml/badge.svg)](https://github.com/voidrunnerdev/BabelRead/actions/workflows/build-apk.yml)
-[![Son sürüm](https://img.shields.io/github/v/release/voidrunnerdev/BabelRead?label=son%20s%C3%BCr%C3%BCm)](https://github.com/voidrunnerdev/BabelRead/releases/latest)
+[![Son sürüm](https://img.shields.io/github/v/release/voidrunnerdev/BabelRead?include_prereleases&label=son%20s%C3%BCr%C3%BCm)](https://github.com/voidrunnerdev/BabelRead/releases)
 [![Lisans: MIT](https://img.shields.io/badge/lisans-MIT-blue.svg)](LICENSE)
 [![Android 7.0+](https://img.shields.io/badge/Android-7.0%2B-3DDC84.svg)](https://developer.android.com)
 
@@ -13,7 +13,7 @@ BabelRead, manga, manhwa ve webtoon okumak için geliştirilmiş açık kaynak b
 
 En güncel APK için [Releases](https://github.com/voidrunnerdev/BabelRead/releases/latest) sayfasını kullan. APK'yı indirdikten sonra cihazda "bilinmeyen kaynaklardan yükleme" iznini vererek kurabilirsin.
 
-Sürümler aynı hata ayıklama anahtarıyla imzalanır; bu sayede yeni APK'yı eskisinin üzerine güncelleme olarak kurabilirsin.
+Sürümler aynı sürüm imzalama anahtarıyla imzalanır; bu sayede yeni APK'yı eskisinin üzerine güncelleme olarak kurabilirsin. İlk beta öncesi hata ayıklama imzalı test sürümünü kullandıysan, imza değiştiği için önce onu kaldırman gerekir.
 
 ## Özellikler
 
@@ -79,8 +79,20 @@ gradle :app:assembleDebug
 
 Hata ayıklama APK'sı `app/build/outputs/apk/debug/app-debug.apk` konumunda oluşur.
 
+### Sürüm APK'sı
+Sürüm APK'sı `assembleRelease` ile üretilir ve `my-upload-key.jks` dosyasıyla imzalanır:
+
+```bash
+KEYSTORE_PATH=/yol/my-upload-key.jks \
+STORE_PASSWORD=... \
+KEY_PASSWORD=... \
+gradle :app:assembleRelease
+```
+
+İmza anahtarı depoda tutulmaz. CI, anahtarı `BABELREAD_KEYSTORE_BASE64`, `BABELREAD_STORE_PASSWORD` ve `BABELREAD_KEY_PASSWORD` secret'larından okur.
+
 ### GitHub Actions
-`main` dalına yapılan her push, `.github/workflows/build-apk.yml` iş akışını tetikler ve imzalı bir hata ayıklama APK'sı üretir. APK, iş akışı çalıştırmasının **Artifacts** bölümünden indirilebilir.
+`.github/workflows/build-apk.yml` yalnızca `v*` etiketi push edildiğinde veya elle çalıştırıldığında tetiklenir. `assembleRelease` ile imzalı sürüm APK'sı üretir, APK'yı artifact olarak yükler ve etiketli çalışmalarda GitHub Release'e ekler.
 
 ## Modeller
 
