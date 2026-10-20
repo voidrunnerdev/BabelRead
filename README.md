@@ -1,12 +1,19 @@
 # BabelRead
 
 [![APK derlemesi](https://github.com/voidrunnerdev/BabelRead/actions/workflows/build-apk.yml/badge.svg)](https://github.com/voidrunnerdev/BabelRead/actions/workflows/build-apk.yml)
+[![Son sürüm](https://img.shields.io/github/v/release/voidrunnerdev/BabelRead?label=son%20s%C3%BCr%C3%BCm)](https://github.com/voidrunnerdev/BabelRead/releases/latest)
 [![Lisans: MIT](https://img.shields.io/badge/lisans-MIT-blue.svg)](LICENSE)
 [![Android 7.0+](https://img.shields.io/badge/Android-7.0%2B-3DDC84.svg)](https://developer.android.com)
 
 BabelRead, manga, manhwa ve webtoon okumak için geliştirilmiş açık kaynak bir Android uygulamasıdır. Mihon/Keiyoushi eklentilerini destekler; kütüphane, çevrimdışı indirme, cihaz üstü konuşma balonu tespiti ve isteğe bağlı çeviri özelliklerini tek yerde toplar.
 
 > **Beta:** BabelRead aktif geliştirme aşamasındadır. Hatalar olabilir; bazı özellikler değişebilir veya kaldırılabilir.
+
+## İndirme
+
+En güncel APK için [Releases](https://github.com/voidrunnerdev/BabelRead/releases/latest) sayfasını kullan. APK'yı indirdikten sonra cihazda "bilinmeyen kaynaklardan yükleme" iznini vererek kurabilirsin.
+
+Sürümler aynı hata ayıklama anahtarıyla imzalanır; bu sayede yeni APK'yı eskisinin üzerine güncelleme olarak kurabilirsin.
 
 ## Özellikler
 
