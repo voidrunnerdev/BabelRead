@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BabelRead</string>
+    <string name="nav_library">Kütüphane</string>
+    <string name="nav_discover">Keşfet</string>
+    <string name="nav_settings">Ayarlar</string>
+    <string name="ai_bubble_detector">Koharu Baloncuk Tespiti</string>
+    <string name="translate_bubbles">Baloncukları Çevir</string>
+</resources>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="file" path="downloads/" />
+    <exclude domain="file" path="local_imports/" />
+    <exclude domain="file" path="models/" />
+    <exclude domain="file" path="datastore/manga_settings.preferences_pb" />
+    <exclude domain="external" path="downloads/" />
+    <exclude domain="external" path="local_imports/" />
+    <exclude domain="external" path="models/" />
+    <exclude domain="sharedpref" path="secure_api_keys.xml" />
+    <exclude domain="sharedpref" path="secure_api_keys_fallback.xml" />
+</full-backup-content>
