@@ -20,12 +20,12 @@ BabelRead, manga, manhwa ve webtoon okumak için geliştirilmiş açık kaynak b
 - **Balon tespiti:** Uygulamayla gelen RT-DETR-v2 ONNX modeli konuşma balonlarını, diyalog ve ses efekti metinlerini ayırır.
 - **OCR:** Google ML Kit ile Latin, Japonca, Korece ve Çince metin tanıma.
 - **Çeviri motorları:** Otomatik, Google, DeepL, ML Kit ve isteğe bağlı Gemini desteği.
-- **Kişisel sözlük:** Bir çeviriye uzun basıp kendi karşılığını kaydedebilirsin; sonraki okumalarda bu düzeltme kullanılır.
+- **Çeviri düzeltmeleri:** Bir çeviriye uzun basıp kendi karşılığını kaydedebilirsin; düzeltme kalıcı olarak saklanır ve sonraki okumalarda kullanılır.
 - **Yerinde çeviri:** Çevrilmiş balona dokunarak orijinal metni görebilirsin.
 
 ### Kütüphane ve okuyucu
 - Favori, geçmiş ve indirilen bölümler için yerel veritabanı.
-- Webtoon için dikey kaydırma; manga için yatay tek/çift sayfa modu.
+- Webtoon için dikey kaydırma, manga için yatay sayfa modu.
 - Balon opaklığı, oval balon ve şeffaf altyazı stilleri.
 - Bölümleri indirip çevrimdışı okuma.
 - Yeni bölüm bildirimleri ve periyodik güncelleme kontrolü.
