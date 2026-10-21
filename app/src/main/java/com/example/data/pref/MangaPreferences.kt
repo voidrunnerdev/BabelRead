@@ -3,6 +3,7 @@ package com.example.data.pref
 import android.content.Context
 import android.content.SharedPreferences
 import com.example.data.web.WebSite
+import com.example.i18n.AppLanguages
 import com.example.i18n.TranslationLanguages
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
@@ -129,6 +130,7 @@ class MangaPreferences(private val context: Context) {
         val YOLO_AI_ENABLED = booleanPreferencesKey("yolo_ai_enabled")
         val CONFIDENCE_THRESHOLD = floatPreferencesKey("confidence_threshold")
         val DEBUG_MODE = booleanPreferencesKey("debug_mode")
+        val UI_LANGUAGE = stringPreferencesKey("ui_language")
         val HIDDEN_MANGA_IDS = stringSetPreferencesKey("hidden_manga_ids")
         val WEB_SITES = stringPreferencesKey("web_sites")
         val WEB_MANGA_PAGES = stringPreferencesKey("web_manga_pages")
@@ -173,6 +175,7 @@ class MangaPreferences(private val context: Context) {
     val yoloAiEnabled: Flow<Boolean> = context.dataStore.data.map { it[YOLO_AI_ENABLED] ?: true }
     val confidenceThreshold: Flow<Float> = context.dataStore.data.map { it[CONFIDENCE_THRESHOLD] ?: 0.35f }
     val debugMode: Flow<Boolean> = context.dataStore.data.map { it[DEBUG_MODE] ?: false }
+    val uiLanguage: Flow<String> = context.dataStore.data.map { it[UI_LANGUAGE] ?: AppLanguages.SYSTEM }
     val hiddenMangaIds: Flow<Set<String>> = context.dataStore.data.map { it[HIDDEN_MANGA_IDS] ?: emptySet() }
     val pinnedSources: Flow<Set<String>> = context.dataStore.data.map { it[PINNED_SOURCES] ?: emptySet() }
     val extensionRepos: Flow<Set<String>> = context.dataStore.data.map { it[EXTENSION_REPOS] ?: emptySet() }
@@ -327,6 +330,10 @@ class MangaPreferences(private val context: Context) {
 
     suspend fun setDebugMode(value: Boolean) {
         context.dataStore.edit { it[DEBUG_MODE] = value }
+    }
+
+    suspend fun setUiLanguage(value: String) {
+        context.dataStore.edit { it[UI_LANGUAGE] = value }
     }
 
     suspend fun setHiddenMangaIds(value: Set<String>) {

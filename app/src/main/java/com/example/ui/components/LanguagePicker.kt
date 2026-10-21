@@ -20,7 +20,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
+import androidx.compose.material3.Text as MaterialText
+import com.example.i18n.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +40,7 @@ data class LanguagePickerOption(
     val code: String,
     val title: String,
     val nativeName: String? = null,
+    val translateTitle: Boolean = true,
 )
 
 @Composable
@@ -184,14 +186,23 @@ private fun LanguageRow(
             .padding(horizontal = 20.dp, vertical = 12.dp),
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                option.title,
-                color = Color.White,
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.sp,
-            )
-            if (!option.nativeName.isNullOrBlank() && option.nativeName != option.title) {
+            if (option.translateTitle) {
                 Text(
+                    option.title,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                )
+            } else {
+                MaterialText(
+                    option.title,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 15.sp,
+                )
+            }
+            if (!option.nativeName.isNullOrBlank() && option.nativeName != option.title) {
+                MaterialText(
                     option.nativeName,
                     color = Color(0xFF9E9E9E),
                     fontSize = 12.sp,

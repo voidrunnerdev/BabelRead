@@ -6,6 +6,7 @@ import android.content.SharedPreferences
 import androidx.preference.PreferenceManager
 import com.example.data.net.WebViewCookieJar
 import com.example.extensions.ExtensionManager
+import com.example.i18n.UiTranslations
 import eu.kanade.tachiyomi.network.NetworkHelper
 import kotlinx.serialization.SerialFormat
 import kotlinx.serialization.StringFormat
@@ -24,6 +25,7 @@ class BabelReadApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         registerInjektServices()
+        UiTranslations.load(this)
         ExtensionManager.init(this)
     }
 

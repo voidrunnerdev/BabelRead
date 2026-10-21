@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -35,6 +36,10 @@ import androidx.navigation.navArgument
 import coil.Coil
 import coil.ImageLoader
 import com.example.data.parser.NetworkManager
+import com.example.i18n.AppLanguageState
+import com.example.i18n.AppLanguages
+import com.example.i18n.LocalAppLanguage
+import com.example.i18n.Text
 import com.example.ui.screens.*
 import com.example.ui.theme.MyApplicationTheme
 import com.example.viewmodel.MangaViewModel
@@ -56,8 +61,16 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             MyApplicationTheme {
-                val navController = rememberNavController()
                 val viewModel: MangaViewModel = viewModel()
+                val uiLanguage by viewModel.preferences.uiLanguage.collectAsState(initial = AppLanguages.SYSTEM)
+                val appLanguage = remember(uiLanguage) { AppLanguages.resolve(uiLanguage) }
+                SideEffect { AppLanguageState.current = appLanguage }
+                CompositionLocalProvider(
+                    LocalAppLanguage provides appLanguage,
+                    androidx.compose.ui.platform.LocalLayoutDirection provides
+                        if (appLanguage.rtl) LayoutDirection.Rtl else LayoutDirection.Ltr
+                ) {
+                val navController = rememberNavController()
                 val navBackStackEntry by navController.currentBackStackEntryAsState()
                 val currentRoute = navBackStackEntry?.destination?.route
 
@@ -364,6 +377,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                     }
+                }
                 }
             }
         }

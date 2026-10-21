@@ -24,6 +24,8 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.example.BuildConfig
+import com.example.i18n.AppLanguages
+import com.example.i18n.Text
 import com.example.i18n.TranslationLanguages
 import com.example.ui.components.LanguagePickerDialog
 import com.example.ui.components.LanguagePickerOption
@@ -37,6 +39,8 @@ fun SettingsScreen(viewModel: MangaViewModel) {
     val scrollState = rememberScrollState()
     val uriHandler = LocalUriHandler.current
 
+    val uiLanguage by viewModel.preferences.uiLanguage.collectAsState(initial = AppLanguages.SYSTEM)
+    var showAppLanguagePicker by remember { mutableStateOf(false) }
     val readingMode by viewModel.readingDirection.collectAsState()
     val pageQuality by viewModel.pageQuality.collectAsState()
     val brightnessLock by viewModel.brightnessLock.collectAsState()
@@ -125,7 +129,32 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            // 1. YAPAY ZEKA & MODEL DURUMU
+            // 1. UYGULAMA DİLİ
+            SettingsCategoryHeader(title = "Dil", icon = Icons.Default.Language)
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    SettingsLanguageRow(
+                        label = "Uygulama Dili",
+                        value = if (uiLanguage == AppLanguages.SYSTEM) {
+                            "Sistem varsayılanı"
+                        } else {
+                            AppLanguages.resolve(uiLanguage).nativeName
+                        },
+                        onClick = { showAppLanguagePicker = true }
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "Telefonunuzun dili kullanılır. Desteklenmeyen bir dilde uygulama İngilizce açılır.",
+                        color = Color.Gray,
+                        fontSize = 11.sp,
+                        lineHeight = 14.sp
+                    )
+                }
+            }
+
+            // 2. YAPAY ZEKA & MODEL DURUMU
             SettingsCategoryHeader(title = "Yapay Zeka & Balon Algılama Motoru", icon = Icons.Default.Psychology)
             Card(
                 colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
@@ -769,6 +798,31 @@ fun SettingsScreen(viewModel: MangaViewModel) {
 
             Spacer(modifier = Modifier.height(40.dp))
         }
+    }
+
+    if (showAppLanguagePicker) {
+        val options = buildList {
+            add(LanguagePickerOption(code = AppLanguages.SYSTEM, title = "Sistem varsayılanı"))
+            AppLanguages.popular.forEach { lang ->
+                add(
+                    LanguagePickerOption(
+                        code = lang.code,
+                        title = lang.nativeName,
+                        translateTitle = false,
+                    )
+                )
+            }
+        }
+        LanguagePickerDialog(
+            title = "Dil Seçimi",
+            options = options,
+            selectedCode = uiLanguage,
+            onSelect = {
+                coroutineScope.launch { viewModel.preferences.setUiLanguage(it) }
+                showAppLanguagePicker = false
+            },
+            onDismiss = { showAppLanguagePicker = false },
+        )
     }
 
     if (showSourceLanguagePicker) {
