@@ -3563,8 +3563,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     return@launch
                 }
-                val chapterLists = mangas.associateWith { manga ->
-                    chapterDao.getChaptersByMangaIdSync(manga.id).sortedWith(
+                val chapterLists = mangas.associate { manga ->
+                    manga.id to chapterDao.getChaptersByMangaIdSync(manga.id).sortedWith(
                         compareBy<ChapterEntity> { it.chapterNumber }.thenBy { it.title }
                     )
                 }

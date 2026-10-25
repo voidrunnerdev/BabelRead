@@ -818,7 +818,7 @@ class LocalMangaImporter(
                     importFolderAsManga(group.folder, group.title, importId, onProgress)
                 } else {
                     importDocumentsAsManga(
-                        documents = group.files,
+                        documents = group.files.map { it.uri },
                         mangaTitle = group.title,
                         importId = importId,
                         onProgress = onProgress
