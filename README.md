@@ -22,7 +22,7 @@ Sürümler aynı sürüm imzalama anahtarıyla imzalanır; bu sayede yeni APK'y�
 - **Eklenti mağazası:** GitHub tabanlı depoları ekleyerek indeksi tarar, güncellemeleri kontrol eder.
 - **Dil bazlı varyantlar:** Çok dilli eklentilerde (ör. MangaDex) yalnızca istediğin dil kaynaklarını kurar; seçim kaynak kimliği yerine dil üzerinden eşlenir.
 - **Yerel içerik:** CBZ, ZIP, CBR, RAR ve PDF dosyalarını ya da cihazdaki klasörleri kütüphaneye ekler.
-- **Toplu içe aktarma:** Bir kütüphane klasöründeki her alt klasörü ayrı manga olarak; birden fazla arşiv veya PDF'yi ayrı manga ya da tek manganın sıralı bölümleri olarak ekler.
+- **Toplu CBZ içe aktarma:** Bir kütüphane klasörünün her alt klasöründeki CBZ dosyalarını ayrı manga olarak; ayrıca birden fazla arşiv veya PDF'yi ayrı manga ya da tek manganın sıralı bölümleri olarak ekler. Toplu kütüphane taraması yalnızca CBZ dosyalarını işler.
 - **Manga birleştirme:** Kütüphanede çoklu seçim yaparak serileri tek manga altında sıralı bölümlerle birleştirir.
 
 ### Çeviri ve OCR

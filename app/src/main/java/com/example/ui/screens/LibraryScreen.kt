@@ -604,8 +604,8 @@ fun LibraryScreen(
                         }
                         Spacer(modifier = Modifier.width(16.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Kütüphane Klasörü (Toplu)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                            Text("Her doğrudan alt klasör ayrı manga olarak içe aktarılır", color = Color.Gray, fontSize = 12.sp)
+                            Text("Kütüphane Klasörü (CBZ)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text("Yalnızca CBZ dosyaları içe aktarılır; her doğrudan alt klasör ayrı manga olur", color = Color.Gray, fontSize = 12.sp)
                         }
                     }
                 }

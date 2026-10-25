@@ -97,6 +97,11 @@ class LocalMangaImporter(
                     lower.endsWith(".rar") ||
                     lower.endsWith(".pdf")
         }
+
+        fun isCbzFileName(name: String): Boolean {
+            val lower = name.lowercase().trim()
+            return !lower.startsWith(".") && lower.endsWith(".cbz")
+        }
     }
 
     private fun getFileName(uri: Uri): String {
@@ -163,7 +168,7 @@ class LocalMangaImporter(
         return candidate
     }
 
-    private fun collectImagesRecursive(
+    private fun collectCbzFilesRecursive(
         folder: DocumentFile,
         prefix: String = "",
         depth: Int = 0
@@ -174,70 +179,26 @@ class LocalMangaImporter(
             val name = child.name?.trim().orEmpty()
             if (name.isBlank() || name.startsWith(".")) return@forEach
             if (child.isDirectory) {
-                out += collectImagesRecursive(child, "$prefix$name/", depth + 1)
-            } else if (isImageFileName(name)) {
+                out += collectCbzFilesRecursive(child, "$prefix$name/", depth + 1)
+            } else if (isCbzFileName(name)) {
                 out += child to "$prefix$name"
             }
         }
         return out.sortedWith { a, b -> NaturalOrderComparator.compare(a.second, b.second) }
     }
 
-    private fun collectDocumentsRecursive(
-        folder: DocumentFile,
-        prefix: String = "",
-        depth: Int = 0
-    ): List<Pair<DocumentFile, String>> {
-        if (depth > 8) return emptyList()
-        val out = mutableListOf<Pair<DocumentFile, String>>()
-        folder.listFiles().forEach { child ->
-            val name = child.name?.trim().orEmpty()
-            if (name.isBlank() || name.startsWith(".")) return@forEach
-            if (child.isDirectory) {
-                out += collectDocumentsRecursive(child, "$prefix$name/", depth + 1)
-            } else if (isArchiveOrPdfFileName(name)) {
-                out += child to "$prefix$name"
-            }
-        }
-        return out.sortedWith { a, b -> NaturalOrderComparator.compare(a.second, b.second) }
-    }
-
-    private fun hasSupportedContent(folder: DocumentFile, depth: Int = 0): Boolean {
+    private fun hasCbzContent(folder: DocumentFile, depth: Int = 0): Boolean {
         if (depth > 8) return false
         return folder.listFiles().any { child ->
             val name = child.name?.trim().orEmpty()
             if (name.isBlank() || name.startsWith(".")) {
                 false
             } else if (child.isDirectory) {
-                hasSupportedContent(child, depth + 1)
+                hasCbzContent(child, depth + 1)
             } else {
-                isImageFileName(name) || isArchiveOrPdfFileName(name)
+                isCbzFileName(name)
             }
         }
-    }
-
-    private fun copyImageDocuments(
-        images: List<Pair<DocumentFile, String>>,
-        targetDir: File
-    ): List<File> {
-        if (images.isEmpty()) return emptyList()
-        targetDir.mkdirs()
-        val saved = mutableListOf<File>()
-        images.sortedWith { a, b -> NaturalOrderComparator.compare(a.second, b.second) }
-            .forEachIndexed { index, (document, relativeName) ->
-                val safeName = "p_${String.format("%04d", index + 1)}_${safeStorageSegment(relativeName)}"
-                val destFile = File(targetDir, safeName)
-                runCatching {
-                    context.contentResolver.openInputStream(document.uri)?.use { inStream ->
-                        FileOutputStream(destFile).use { outStream ->
-                            inStream.copyTo(outStream)
-                        }
-                    }
-                }
-                if (destFile.exists() && destFile.length() > 0) {
-                    saved.add(destFile)
-                }
-            }
-        return saved
     }
 
     private fun extractDocumentPages(
@@ -765,16 +726,15 @@ class LocalMangaImporter(
         val directories = children
             .filter { it.isDirectory }
             .sortedWith { a, b -> NaturalOrderComparator.compare(a.name ?: "", b.name ?: "") }
-        val rootImages = children.filter { it.isFile && isImageFileName(it.name ?: "") }
-        val rootDocuments = children
-            .filter { it.isFile && isArchiveOrPdfFileName(it.name ?: "") }
+        val rootCbzFiles = children
+            .filter { it.isFile && isCbzFileName(it.name ?: "") }
             .sortedWith { a, b -> NaturalOrderComparator.compare(a.name ?: "", b.name ?: "") }
 
         val groups = mutableListOf<FolderImportGroup>()
         var skippedItems = 0
         if (directories.isNotEmpty()) {
             directories.forEach { folder ->
-                if (hasSupportedContent(folder)) {
+                if (hasCbzContent(folder)) {
                     groups += FolderImportGroup(
                         title = folder.name?.trim().orEmpty().ifBlank { "Manga" },
                         folder = folder
@@ -783,23 +743,20 @@ class LocalMangaImporter(
                     skippedItems++
                 }
             }
-            rootDocuments.forEach { document ->
+            rootCbzFiles.forEach { document ->
                 groups += FolderImportGroup(
                     title = cleanTitle(document.name ?: "Manga"),
                     files = listOf(document)
                 )
             }
-            if (rootImages.isNotEmpty()) {
-                skippedItems += rootImages.size
-            }
-        } else if (rootDocuments.isNotEmpty() || rootImages.isNotEmpty()) {
+        } else if (rootCbzFiles.isNotEmpty()) {
             groups += FolderImportGroup(title = rootTitle, folder = treeDir)
         }
 
         if (groups.isEmpty()) {
             return@withContext BulkLocalImportResult(
                 false,
-                "Seçilen klasörde içe aktarılabilir manga bulunamadı."
+                "Seçilen klasörde CBZ dosyası bulunamadı."
             )
         }
 
@@ -851,7 +808,7 @@ class LocalMangaImporter(
                 append("Hiçbir manga içe aktarılamadı.")
             }
             if (failedCount > 0) append(" $failedCount manga atlandı.")
-            if (skippedItems > 0) append(" $skippedItems desteklenmeyen öğe atlandı.")
+            if (skippedItems > 0) append(" CBZ içermeyen $skippedItems klasör atlandı.")
             if (importedCount == 0 && firstError.isNotEmpty()) {
                 append(" ${firstError.toString().take(180)}")
             }
@@ -960,22 +917,9 @@ class LocalMangaImporter(
             var chapterSequence = 0
             var failedDocuments = 0
 
-            val directImages = folder.listFiles()
-                .filter { it.isFile && isImageFileName(it.name ?: "") }
-                .map { it to (it.name ?: "") }
-            if (directImages.isNotEmpty()) {
-                val targetDir = File(baseImportDir, "chapter_${chapterSequence++}")
-                val pages = copyImageDocuments(directImages, targetDir)
-                if (pages.isNotEmpty()) {
-                    chapterPagesMap[uniqueChapterTitle("Bölüm 1", usedTitles)] = pages.toMutableList()
-                }
-            }
-
-            val directDocuments = folder.listFiles()
-                .filter { it.isFile && isArchiveOrPdfFileName(it.name ?: "") }
-                .sortedWith { a, b -> NaturalOrderComparator.compare(a.name ?: "", b.name ?: "") }
-            directDocuments.forEach { document ->
-                val name = document.name ?: "Bölüm"
+            val cbzFiles = collectCbzFilesRecursive(folder)
+            cbzFiles.forEach { (document, relativeName) ->
+                val name = relativeName.substringAfterLast('/')
                 onProgress("$mangaTitle: $name işleniyor...")
                 val title = uniqueChapterTitle(cleanTitle(name), usedTitles)
                 val targetDir = File(baseImportDir, "chapter_${chapterSequence++}")
@@ -988,42 +932,11 @@ class LocalMangaImporter(
                 }
             }
 
-            val subFolders = folder.listFiles()
-                .filter { it.isDirectory }
-                .sortedWith { a, b -> NaturalOrderComparator.compare(a.name ?: "", b.name ?: "") }
-            subFolders.forEach { subFolder ->
-                val folderName = subFolder.name?.trim().orEmpty().ifBlank { "Bölüm" }
-                val images = collectImagesRecursive(subFolder)
-                if (images.isNotEmpty()) {
-                    val title = uniqueChapterTitle(folderName, usedTitles)
-                    val targetDir = File(baseImportDir, "chapter_${chapterSequence++}")
-                    val pages = copyImageDocuments(images, targetDir)
-                    if (pages.isNotEmpty()) {
-                        chapterPagesMap[title] = pages.toMutableList()
-                    }
-                }
-
-                val nestedDocuments = collectDocumentsRecursive(subFolder)
-                nestedDocuments.forEach { (document, relativeName) ->
-                    val name = relativeName.substringAfterLast('/')
-                    onProgress("$mangaTitle: $name işleniyor...")
-                    val title = uniqueChapterTitle(cleanTitle(name), usedTitles)
-                    val targetDir = File(baseImportDir, "chapter_${chapterSequence++}")
-                    val (pages, _) = extractDocumentPages(document.uri, targetDir, onProgress)
-                    if (pages.isEmpty()) {
-                        failedDocuments++
-                        targetDir.deleteRecursively()
-                    } else {
-                        chapterPagesMap[title] = pages.toMutableList()
-                    }
-                }
-            }
-
             if (chapterPagesMap.isEmpty()) {
                 baseImportDir.deleteRecursively()
                 return LocalImportResult(
                     false,
-                    "Klasörde okunabilir bölüm bulunamadı."
+                    "Klasörde okunabilir CBZ bölümü bulunamadı."
                 )
             }
 

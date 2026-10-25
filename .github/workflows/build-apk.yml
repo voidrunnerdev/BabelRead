@@ -76,7 +76,7 @@ jobs:
           cat > release-notes.md <<EOF
           **Erken beta sürümü.** Hatalar ve eksik özellikler olabilir.
 
-          - Kütüphane klasörlerini toplu içe aktarma eklendi; her alt klasör ayrı manga olarak eklenir.
+          - Kütüphane klasörlerini toplu CBZ içe aktarma eklendi; her alt klasördeki CBZ dosyaları ayrı manga olarak eklenir.
           - Birden fazla arşiv veya PDF'yi ayrı manga ya da tek manganın sıralı bölümleri olarak içe aktarma eklendi.
           - Kütüphanede çoklu seçim ve seçilen mangaları sıralı bölümlerle birleştirme eklendi.
           - Ayarlardan arayüz dili seçimi eklendi (10 popüler dil + sistem varsayılanı).
