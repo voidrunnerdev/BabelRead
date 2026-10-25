@@ -2,14 +2,20 @@ package com.example.ui.screens
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -54,6 +60,15 @@ fun LibraryScreen(
     val coroutineScope = rememberCoroutineScope()
     var showImportSheet by remember { mutableStateOf(false) }
     var mangaToDelete by remember { mutableStateOf<MangaEntity?>(null) }
+    var showSelectionMode by remember { mutableStateOf(false) }
+    var selectedMangaIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showMergeDialog by remember { mutableStateOf(false) }
+    var mergeTargetTitle by remember { mutableStateOf("") }
+    var orderedMergeMangas by remember { mutableStateOf<List<MangaEntity>>(emptyList()) }
+    var showArchiveImportDialog by remember { mutableStateOf(false) }
+    var pendingArchiveUris by remember { mutableStateOf<List<android.net.Uri>>(emptyList()) }
+    var importArchivesAsSingle by remember { mutableStateOf(false) }
+    var combinedArchiveTitle by remember { mutableStateOf("") }
 
     val archivePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -91,49 +106,150 @@ fun LibraryScreen(
         }
     }
 
+    val multipleArchivesPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<android.net.Uri> ->
+        if (uris.isNotEmpty()) {
+            pendingArchiveUris = uris
+            importArchivesAsSingle = false
+            combinedArchiveTitle = ""
+            showArchiveImportDialog = true
+        }
+    }
+
+    val bulkFolderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: android.net.Uri? ->
+        uri?.let {
+            viewModel.importLocalFolderBulk(it) { success, msg ->
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(msg)
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(mangas) {
+        val availableIds = mangas.mapTo(HashSet()) { it.id }
+        if (selectedMangaIds.any { it !in availableIds }) {
+            selectedMangaIds = selectedMangaIds.intersect(availableIds)
+        }
+    }
+
+    val toggleSelection: (MangaEntity) -> Unit = { manga ->
+        selectedMangaIds = if (manga.id in selectedMangaIds) {
+            selectedMangaIds - manga.id
+        } else {
+            selectedMangaIds + manga.id
+        }
+    }
+    val beginSelection: (MangaEntity) -> Unit = { manga ->
+        showSelectionMode = true
+        selectedMangaIds = selectedMangaIds + manga.id
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = "BabelRead Kütüphane",
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .clickable { onNavigateToHiddenMangas() }
-                            .testTag("library_logo_title")
-                    )
+                    if (showSelectionMode) {
+                        Text(
+                            text = "Seçili manga sayısı: ${selectedMangaIds.size}",
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    } else {
+                        Text(
+                            text = "BabelRead Kütüphane",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .clickable { onNavigateToHiddenMangas() }
+                                .testTag("library_logo_title")
+                        )
+                    }
+                },
+                navigationIcon = {
+                    if (showSelectionMode) {
+                        IconButton(
+                            onClick = {
+                                showSelectionMode = false
+                                selectedMangaIds = emptySet()
+                            },
+                            modifier = Modifier.testTag("clear_library_selection")
+                        ) {
+                            Icon(Icons.Default.Close, contentDescription = "Seçimi Kapat", tint = Color.White)
+                        }
+                    }
                 },
                 actions = {
-                    IconButton(
-                        onClick = { showImportSheet = true },
-                        modifier = Modifier.testTag("library_import_btn")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AddPhotoAlternate,
-                            contentDescription = "Cihazdan Manga Yükle",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    IconButton(
-                        onClick = { viewModel.toggleLayout() },
-                        modifier = Modifier.testTag("toggle_layout_button")
-                    ) {
-                        Icon(
-                            imageVector = if (isGridView) Icons.Default.List else Icons.Default.GridView,
-                            contentDescription = "Görünümü Değiştir",
-                            tint = Color.White
-                        )
-                    }
-                    IconButton(
-                        onClick = onNavigateToSettings,
-                        modifier = Modifier.testTag("library_settings")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Settings,
-                            contentDescription = "Ayarlar",
-                            tint = Color.White
-                        )
+                    if (showSelectionMode) {
+                        if (selectedMangaIds.size >= 2) {
+                            IconButton(
+                                onClick = {
+                                    val selected = mangas.filter { it.id in selectedMangaIds }
+                                    if (selected.size >= 2) {
+                                        orderedMergeMangas = selected
+                                        mergeTargetTitle = selected.first().title
+                                        showMergeDialog = true
+                                    }
+                                },
+                                modifier = Modifier.testTag("merge_selected_mangas")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CallMerge,
+                                    contentDescription = "Mangaları Birleştir",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        IconButton(
+                            onClick = { selectedMangaIds = mangas.mapTo(HashSet()) { it.id } },
+                            modifier = Modifier.testTag("select_all_mangas")
+                        ) {
+                            Icon(Icons.Default.SelectAll, contentDescription = "Tümünü Seç", tint = Color.White)
+                        }
+                    } else {
+                        if (mangas.isNotEmpty()) {
+                            IconButton(
+                                onClick = { showSelectionMode = true },
+                                modifier = Modifier.testTag("start_library_selection")
+                            ) {
+                                Icon(Icons.Default.Checklist, contentDescription = "Seç", tint = Color.White)
+                            }
+                        }
+                        IconButton(
+                            onClick = { showImportSheet = true },
+                            modifier = Modifier.testTag("library_import_btn")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AddPhotoAlternate,
+                                contentDescription = "Cihazdan Manga Yükle",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        IconButton(
+                            onClick = { viewModel.toggleLayout() },
+                            modifier = Modifier.testTag("toggle_layout_button")
+                        ) {
+                            Icon(
+                                imageVector = if (isGridView) Icons.Default.List else Icons.Default.GridView,
+                                contentDescription = "Görünümü Değiştir",
+                                tint = Color.White
+                            )
+                        }
+                        IconButton(
+                            onClick = onNavigateToSettings,
+                            modifier = Modifier.testTag("library_settings")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Settings,
+                                contentDescription = "Ayarlar",
+                                tint = Color.White
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -143,14 +259,16 @@ fun LibraryScreen(
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { showImportSheet = true },
-                icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                text = { Text("Manga Ekle", fontWeight = FontWeight.Bold) },
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = Color.White,
-                modifier = Modifier.testTag("fab_import_manga")
-            )
+            if (!showSelectionMode) {
+                ExtendedFloatingActionButton(
+                    onClick = { showImportSheet = true },
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    text = { Text("Manga Ekle", fontWeight = FontWeight.Bold) },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = Color.White,
+                    modifier = Modifier.testTag("fab_import_manga")
+                )
+            }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = Color(0xFF121212)
@@ -275,8 +393,21 @@ fun LibraryScreen(
                         items(mangas, key = { it.id }) { manga ->
                             LibraryGridCard(
                                 manga = manga,
+                                isSelectionMode = showSelectionMode,
+                                isSelected = manga.id in selectedMangaIds,
                                 onClick = {
-                                    onNavigateToDetail(manga.id, manga.sourceName)
+                                    if (showSelectionMode) {
+                                        toggleSelection(manga)
+                                    } else {
+                                        onNavigateToDetail(manga.id, manga.sourceName)
+                                    }
+                                },
+                                onLongClick = {
+                                    if (showSelectionMode) {
+                                        toggleSelection(manga)
+                                    } else {
+                                        beginSelection(manga)
+                                    }
                                 },
                                 onDeleteClick = {
                                     mangaToDelete = manga
@@ -294,8 +425,21 @@ fun LibraryScreen(
                         items(mangas, key = { it.id }) { manga ->
                             LibraryListCard(
                                 manga = manga,
+                                isSelectionMode = showSelectionMode,
+                                isSelected = manga.id in selectedMangaIds,
                                 onClick = {
-                                    onNavigateToDetail(manga.id, manga.sourceName)
+                                    if (showSelectionMode) {
+                                        toggleSelection(manga)
+                                    } else {
+                                        onNavigateToDetail(manga.id, manga.sourceName)
+                                    }
+                                },
+                                onLongClick = {
+                                    if (showSelectionMode) {
+                                        toggleSelection(manga)
+                                    } else {
+                                        beginSelection(manga)
+                                    }
                                 },
                                 onDeleteClick = {
                                     mangaToDelete = manga
@@ -328,7 +472,7 @@ fun LibraryScreen(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Telefonunuzdaki arşiv dosyalarını (.cbz, .zip, .cbr, .rar, .pdf), manga klasörlerini veya galerinizdeki sayfaları içe aktarın.",
+                    text = "Telefonunuzdaki arşivleri, manga klasörlerini, toplu kütüphane klasörlerini veya galerinizdeki sayfaları içe aktarın.",
                     fontSize = 13.sp,
                     color = Color.LightGray
                 )
@@ -362,6 +506,39 @@ fun LibraryScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text("Arşiv / Çizgi Roman Dosyası", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
                             Text(".cbz, .zip, .cbr, .rar veya .pdf formatındaki tek dosya mangalar", color = Color.Gray, fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Surface(
+                    onClick = {
+                        showImportSheet = false
+                        multipleArchivesPickerLauncher.launch(arrayOf("*/*"))
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF282828),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("import_multiple_archives_option")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(Color(0xFF29B6F6).copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.FileCopy, contentDescription = null, tint = Color(0xFF29B6F6))
+                        }
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Çoklu Arşiv / PDF", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text("Birden fazla dosyayı ayrı manga veya tek manganın bölümleri olarak ekleyin", color = Color.Gray, fontSize = 12.sp)
                         }
                     }
                 }
@@ -402,6 +579,39 @@ fun LibraryScreen(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
+                Surface(
+                    onClick = {
+                        showImportSheet = false
+                        bulkFolderPickerLauncher.launch(null)
+                    },
+                    shape = RoundedCornerShape(12.dp),
+                    color = Color(0xFF282828),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("import_bulk_folder_option")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(Color(0xFFAB47BC).copy(alpha = 0.2f), RoundedCornerShape(10.dp)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.LibraryBooks, contentDescription = null, tint = Color(0xFFAB47BC))
+                        }
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Kütüphane Klasörü (Toplu)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                            Text("Her doğrudan alt klasör ayrı manga olarak içe aktarılır", color = Color.Gray, fontSize = 12.sp)
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+
                 // Option 3: Multiple Images
                 Surface(
                     onClick = {
@@ -435,6 +645,324 @@ fun LibraryScreen(
                 }
             }
         }
+    }
+
+    if (showArchiveImportDialog && pendingArchiveUris.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { showArchiveImportDialog = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.FileCopy,
+                    contentDescription = null,
+                    tint = Color(0xFF29B6F6)
+                )
+            },
+            title = {
+                Text(
+                    text = "Çoklu Arşiv İçe Aktarma",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 430.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Seçilen dosya sayısı: ${pendingArchiveUris.size}",
+                        color = Color.LightGray,
+                        fontSize = 13.sp
+                    )
+                    Surface(
+                        onClick = { importArchivesAsSingle = false },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (!importArchivesAsSingle) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                        } else {
+                            Color(0xFF282828)
+                        },
+                        border = if (!importArchivesAsSingle) {
+                            BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+                        } else {
+                            null
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("archive_mode_separate")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = !importArchivesAsSingle,
+                                onClick = { importArchivesAsSingle = false }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text("Her Dosya Ayrı Manga", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text("Her dosya bağımsız bir manga olur", color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                    Surface(
+                        onClick = { importArchivesAsSingle = true },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (importArchivesAsSingle) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                        } else {
+                            Color(0xFF282828)
+                        },
+                        border = if (importArchivesAsSingle) {
+                            BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+                        } else {
+                            null
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("archive_mode_single")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = importArchivesAsSingle,
+                                onClick = { importArchivesAsSingle = true }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
+                                Text("Tek Manga, Sıralı Bölümler", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                Text("Tüm dosyalar tek manganın bölümleri olur", color = Color.Gray, fontSize = 11.sp)
+                            }
+                        }
+                    }
+                    if (importArchivesAsSingle) {
+                        OutlinedTextField(
+                            value = combinedArchiveTitle,
+                            onValueChange = { combinedArchiveTitle = it },
+                            label = { Text("Manga Adı") },
+                            singleLine = true,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("combined_archive_title")
+                        )
+                    }
+                    Text(
+                        text = "Bölüm sırası dosya adına göre doğal olarak sıralanır.",
+                        color = Color.Gray,
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val uris = pendingArchiveUris
+                        val single = importArchivesAsSingle
+                        val title = combinedArchiveTitle
+                        showArchiveImportDialog = false
+                        pendingArchiveUris = emptyList()
+                        viewModel.importLocalArchives(
+                            uris = uris,
+                            title = if (single) title else null,
+                            asSingleManga = single
+                        ) { _, msg ->
+                            coroutineScope.launch {
+                                snackbarHostState.showSnackbar(msg)
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_multi_archive_import")
+                ) {
+                    Text("İçe Aktar", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showArchiveImportDialog = false }) {
+                    Text("İptal", color = Color.Gray)
+                }
+            },
+            containerColor = Color(0xFF202020),
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    if (showMergeDialog && orderedMergeMangas.size >= 2) {
+        AlertDialog(
+            onDismissRequest = { showMergeDialog = false },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.CallMerge,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            },
+            title = {
+                Text(
+                    text = "Mangaları Birleştir",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 430.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Seçili manga sayısı: ${orderedMergeMangas.size}",
+                        color = Color.LightGray,
+                        fontSize = 13.sp
+                    )
+                    OutlinedTextField(
+                        value = mergeTargetTitle,
+                        onValueChange = { mergeTargetTitle = it },
+                        label = { Text("Birleştirilmiş Manga Adı") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("merge_target_title")
+                    )
+                    Text(
+                        text = "Bölüm Sıralaması",
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        orderedMergeMangas.forEachIndexed { index, manga ->
+                            Card(
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFF282828)),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.primary,
+                                        shape = CircleShape,
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Text(
+                                                text = "${index + 1}",
+                                                color = Color.White,
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 12.sp
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = manga.title,
+                                        color = Color.White,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(
+                                        onClick = {
+                                            if (index > 0) {
+                                                val mutable = orderedMergeMangas.toMutableList()
+                                                val previous = mutable[index - 1]
+                                                mutable[index - 1] = mutable[index]
+                                                mutable[index] = previous
+                                                orderedMergeMangas = mutable
+                                            }
+                                        },
+                                        enabled = index > 0,
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .testTag("merge_move_up_${manga.id}")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.ArrowUpward,
+                                            contentDescription = "Yukarı Taşı",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            if (index < orderedMergeMangas.lastIndex) {
+                                                val mutable = orderedMergeMangas.toMutableList()
+                                                val next = mutable[index + 1]
+                                                mutable[index + 1] = mutable[index]
+                                                mutable[index] = next
+                                                orderedMergeMangas = mutable
+                                            }
+                                        },
+                                        enabled = index < orderedMergeMangas.lastIndex,
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .testTag("merge_move_down_${manga.id}")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.ArrowDownward,
+                                            contentDescription = "Aşağı Taşı",
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Text(
+                        text = "Kaynak manga kayıtları kütüphaneden kaldırılır. Bölüm dosyaları yeni manga silinene kadar korunur. Bu işlem geri alınamaz.",
+                        color = Color.Gray,
+                        fontSize = 11.sp
+                    )
+                    Text(
+                        text = "İndirilmemiş çevrimiçi bölümler farklı kaynaklardan birleştirildiyse açılamayabilir.",
+                        color = Color.Gray,
+                        fontSize = 11.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val ids = orderedMergeMangas.map { it.id }
+                        val title = mergeTargetTitle.trim().ifBlank { orderedMergeMangas.first().title }
+                        showMergeDialog = false
+                        viewModel.mergeMangas(ids, title) { success, msg ->
+                            coroutineScope.launch {
+                                snackbarHostState.showSnackbar(msg)
+                            }
+                            if (success) {
+                                showSelectionMode = false
+                                selectedMangaIds = emptySet()
+                            }
+                        }
+                    },
+                    modifier = Modifier.testTag("confirm_merge_mangas")
+                ) {
+                    Text("Birleştir", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showMergeDialog = false }) {
+                    Text("İptal", color = Color.Gray)
+                }
+            },
+            containerColor = Color(0xFF202020),
+            shape = RoundedCornerShape(16.dp)
+        )
     }
 
     if (isImporting) {
@@ -525,10 +1053,14 @@ fun LibraryScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LibraryGridCard(
     manga: MangaEntity,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -536,9 +1068,13 @@ fun LibraryGridCard(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .testTag("manga_card_${manga.id}"),
         shape = RoundedCornerShape(12.dp),
+        border = if (isSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
         colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
     ) {
         Box(
@@ -582,54 +1118,74 @@ fun LibraryGridCard(
                 )
             }
 
-            // Sağ üst köşe: 3 nokta menü
-            Box(
-                modifier = Modifier
-                    .padding(6.dp)
-                    .align(Alignment.TopEnd)
-            ) {
-                IconButton(
-                    onClick = { menuExpanded = true },
+            if (isSelectionMode) {
+                Box(
                     modifier = Modifier
-                        .size(32.dp)
-                        .background(Color.Black.copy(alpha = 0.75f), RoundedCornerShape(16.dp))
-                        .testTag("manga_menu_${manga.id}")
+                        .padding(10.dp)
+                        .align(Alignment.TopEnd)
+                        .background(Color.Black.copy(alpha = 0.78f), CircleShape)
+                        .padding(4.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = "Seçenekler",
-                        tint = Color.White,
-                        modifier = Modifier.size(18.dp)
+                        imageVector = if (isSelected) {
+                            Icons.Default.CheckCircle
+                        } else {
+                            Icons.Default.RadioButtonUnchecked
+                        },
+                        contentDescription = if (isSelected) "Seçili" else "Seçili değil",
+                        tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.White,
+                        modifier = Modifier.size(24.dp)
                     )
                 }
-                DropdownMenu(
-                    expanded = menuExpanded,
-                    onDismissRequest = { menuExpanded = false },
-                    modifier = Modifier.background(Color(0xFF262626))
+            } else {
+                Box(
+                    modifier = Modifier
+                        .padding(6.dp)
+                        .align(Alignment.TopEnd)
                 ) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = "Kalıcı Olarak Sil",
-                                color = Color(0xFFFF5252),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.DeleteForever,
-                                contentDescription = null,
-                                tint = Color(0xFFFF5252),
-                                modifier = Modifier.size(20.dp)
-                            )
-                        },
-                        onClick = {
-                            menuExpanded = false
-                            onDeleteClick()
-                        },
-                        modifier = Modifier.testTag("menu_delete_${manga.id}")
-                    )
+                    IconButton(
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier
+                            .size(32.dp)
+                            .background(Color.Black.copy(alpha = 0.75f), RoundedCornerShape(16.dp))
+                            .testTag("manga_menu_${manga.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Seçenekler",
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                        modifier = Modifier.background(Color(0xFF262626))
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "Kalıcı Olarak Sil",
+                                    color = Color(0xFFFF5252),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteForever,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFF5252),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDeleteClick()
+                            },
+                            modifier = Modifier.testTag("menu_delete_${manga.id}")
+                        )
+                    }
                 }
             }
 
@@ -675,10 +1231,14 @@ fun LibraryGridCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LibraryListCard(
     manga: MangaEntity,
+    isSelectionMode: Boolean,
+    isSelected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onDeleteClick: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -687,9 +1247,13 @@ fun LibraryListCard(
         modifier = Modifier
             .fillMaxWidth()
             .height(110.dp)
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
             .testTag("manga_list_card_${manga.id}"),
         shape = RoundedCornerShape(8.dp),
+        border = if (isSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
         colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
     ) {
         Row(
@@ -754,49 +1318,68 @@ fun LibraryListCard(
                 }
             }
 
-            // Sağ taraf: 3 nokta menü
-            Box(
-                modifier = Modifier
-                    .padding(end = 8.dp)
-            ) {
-                IconButton(
-                    onClick = { menuExpanded = true },
-                    modifier = Modifier.testTag("list_menu_${manga.id}")
+            if (isSelectionMode) {
+                Box(
+                    modifier = Modifier
+                        .padding(end = 16.dp)
+                        .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                        .padding(4.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = "Seçenekler",
-                        tint = Color.LightGray
+                        imageVector = if (isSelected) {
+                            Icons.Default.CheckCircle
+                        } else {
+                            Icons.Default.RadioButtonUnchecked
+                        },
+                        contentDescription = if (isSelected) "Seçili" else "Seçili değil",
+                        tint = if (isSelected) MaterialTheme.colorScheme.primary else Color.LightGray,
+                        modifier = Modifier.size(24.dp)
                     )
                 }
-                DropdownMenu(
-                    expanded = menuExpanded,
-                    onDismissRequest = { menuExpanded = false },
-                    modifier = Modifier.background(Color(0xFF262626))
+            } else {
+                Box(
+                    modifier = Modifier
+                        .padding(end = 8.dp)
                 ) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = "Kalıcı Olarak Sil",
-                                color = Color(0xFFFF5252),
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 13.sp
-                            )
-                        },
-                        leadingIcon = {
-                            Icon(
-                                imageVector = Icons.Default.DeleteForever,
-                                contentDescription = null,
-                                tint = Color(0xFFFF5252),
-                                modifier = Modifier.size(20.dp)
-                            )
-                        },
-                        onClick = {
-                            menuExpanded = false
-                            onDeleteClick()
-                        },
-                        modifier = Modifier.testTag("list_menu_delete_${manga.id}")
-                    )
+                    IconButton(
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier.testTag("list_menu_${manga.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.MoreVert,
+                            contentDescription = "Seçenekler",
+                            tint = Color.LightGray
+                        )
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false },
+                        modifier = Modifier.background(Color(0xFF262626))
+                    ) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = "Kalıcı Olarak Sil",
+                                    color = Color(0xFFFF5252),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 13.sp
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.DeleteForever,
+                                    contentDescription = null,
+                                    tint = Color(0xFFFF5252),
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onDeleteClick()
+                            },
+                            modifier = Modifier.testTag("list_menu_delete_${manga.id}")
+                        )
+                    }
                 }
             }
         }

@@ -21,6 +21,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
+import java.util.UUID
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 
@@ -31,6 +32,14 @@ data class LocalImportResult(
     val mangaTitle: String? = null,
     val pageCount: Int = 0,
     val chapterCount: Int = 0
+)
+
+data class BulkLocalImportResult(
+    val success: Boolean,
+    val message: String,
+    val importedMangaIds: List<String> = emptyList(),
+    val importedCount: Int = 0,
+    val failedCount: Int = 0
 )
 
 object NaturalOrderComparator : Comparator<String> {
@@ -77,6 +86,16 @@ class LocalMangaImporter(
                     lower.endsWith(".webp") ||
                     lower.endsWith(".bmp") ||
                     lower.endsWith(".gif")
+        }
+
+        fun isArchiveOrPdfFileName(name: String): Boolean {
+            val lower = name.lowercase().trim()
+            if (lower.startsWith(".")) return false
+            return lower.endsWith(".cbz") ||
+                    lower.endsWith(".zip") ||
+                    lower.endsWith(".cbr") ||
+                    lower.endsWith(".rar") ||
+                    lower.endsWith(".pdf")
         }
     }
 
@@ -130,6 +149,162 @@ class LocalMangaImporter(
         }
     }
 
+    private fun newImportId(prefix: String): String =
+        "${prefix}_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(8)}"
+
+    private fun uniqueChapterTitle(rawTitle: String, used: MutableSet<String>): String {
+        val base = rawTitle.trim().ifBlank { "Bölüm" }
+        var candidate = base
+        var suffix = 2
+        while (!used.add(candidate)) {
+            candidate = "$base ($suffix)"
+            suffix++
+        }
+        return candidate
+    }
+
+    private fun collectImagesRecursive(
+        folder: DocumentFile,
+        prefix: String = "",
+        depth: Int = 0
+    ): List<Pair<DocumentFile, String>> {
+        if (depth > 8) return emptyList()
+        val out = mutableListOf<Pair<DocumentFile, String>>()
+        folder.listFiles().forEach { child ->
+            val name = child.name?.trim().orEmpty()
+            if (name.isBlank() || name.startsWith(".")) return@forEach
+            if (child.isDirectory) {
+                out += collectImagesRecursive(child, "$prefix$name/", depth + 1)
+            } else if (isImageFileName(name)) {
+                out += child to "$prefix$name"
+            }
+        }
+        return out.sortedWith { a, b -> NaturalOrderComparator.compare(a.second, b.second) }
+    }
+
+    private fun collectDocumentsRecursive(
+        folder: DocumentFile,
+        prefix: String = "",
+        depth: Int = 0
+    ): List<Pair<DocumentFile, String>> {
+        if (depth > 8) return emptyList()
+        val out = mutableListOf<Pair<DocumentFile, String>>()
+        folder.listFiles().forEach { child ->
+            val name = child.name?.trim().orEmpty()
+            if (name.isBlank() || name.startsWith(".")) return@forEach
+            if (child.isDirectory) {
+                out += collectDocumentsRecursive(child, "$prefix$name/", depth + 1)
+            } else if (isArchiveOrPdfFileName(name)) {
+                out += child to "$prefix$name"
+            }
+        }
+        return out.sortedWith { a, b -> NaturalOrderComparator.compare(a.second, b.second) }
+    }
+
+    private fun hasSupportedContent(folder: DocumentFile, depth: Int = 0): Boolean {
+        if (depth > 8) return false
+        return folder.listFiles().any { child ->
+            val name = child.name?.trim().orEmpty()
+            if (name.isBlank() || name.startsWith(".")) {
+                false
+            } else if (child.isDirectory) {
+                hasSupportedContent(child, depth + 1)
+            } else {
+                isImageFileName(name) || isArchiveOrPdfFileName(name)
+            }
+        }
+    }
+
+    private fun copyImageDocuments(
+        images: List<Pair<DocumentFile, String>>,
+        targetDir: File
+    ): List<File> {
+        if (images.isEmpty()) return emptyList()
+        targetDir.mkdirs()
+        val saved = mutableListOf<File>()
+        images.sortedWith { a, b -> NaturalOrderComparator.compare(a.second, b.second) }
+            .forEachIndexed { index, (document, relativeName) ->
+                val safeName = "p_${String.format("%04d", index + 1)}_${safeStorageSegment(relativeName)}"
+                val destFile = File(targetDir, safeName)
+                runCatching {
+                    context.contentResolver.openInputStream(document.uri)?.use { inStream ->
+                        FileOutputStream(destFile).use { outStream ->
+                            inStream.copyTo(outStream)
+                        }
+                    }
+                }
+                if (destFile.exists() && destFile.length() > 0) {
+                    saved.add(destFile)
+                }
+            }
+        return saved
+    }
+
+    private fun extractDocumentPages(
+        uri: Uri,
+        targetDir: File,
+        onProgress: (String) -> Unit
+    ): Pair<List<File>, String?> {
+        val rawFileName = getFileName(uri)
+        val tempFile = File(context.cacheDir, "temp_import_${UUID.randomUUID()}.tmp")
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(tempFile).use { out ->
+                    input.copyTo(out)
+                }
+            } ?: return Pair(emptyList(), "Dosyaya erişilemedi veya izin reddedildi.")
+            if (!tempFile.exists() || tempFile.length() == 0L) {
+                return Pair(emptyList(), "Seçilen dosya boş veya okunamadı.")
+            }
+
+            val chapterPagesMap = mutableMapOf<String, MutableList<File>>()
+            when (detectFormat(tempFile)) {
+                "zip" -> extractZip(tempFile, targetDir, chapterPagesMap, onProgress)
+                "rar" -> extractRar(tempFile, targetDir, chapterPagesMap, onProgress)
+                "rar5" -> return Pair(
+                    emptyList(),
+                    "Bu arşiv RAR5 biçiminde. Uygulama yalnızca RAR4 açabiliyor."
+                )
+                "pdf" -> extractPdf(tempFile, targetDir, chapterPagesMap, onProgress)
+                "image" -> {
+                    targetDir.mkdirs()
+                    val destFile = File(
+                        targetDir,
+                        "p_0001_${safeStorageSegment(rawFileName)}"
+                    )
+                    tempFile.copyTo(destFile, overwrite = true)
+                    chapterPagesMap.getOrPut("Bölüm 1") { mutableListOf() }.add(destFile)
+                }
+                else -> {
+                    val extracted = runCatching {
+                        extractZip(tempFile, targetDir, chapterPagesMap, onProgress)
+                    }.isSuccess
+                    if (!extracted || chapterPagesMap.isEmpty()) {
+                        runCatching {
+                            extractRar(tempFile, targetDir, chapterPagesMap, onProgress)
+                        }
+                    }
+                }
+            }
+
+            val pages = chapterPagesMap.entries
+                .sortedWith { a, b -> NaturalOrderComparator.compare(a.key, b.key) }
+                .flatMap { entry ->
+                    entry.value.sortedWith { a, b -> NaturalOrderComparator.compare(a.name, b.name) }
+                }
+            return if (pages.isEmpty()) {
+                Pair(emptyList(), "Dosyada okunabilir resim bulunamadı.")
+            } else {
+                Pair(pages, null)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Document extraction error for $rawFileName", e)
+            return Pair(emptyList(), e.localizedMessage ?: e.message ?: "İçe aktarma hatası")
+        } finally {
+            tempFile.delete()
+        }
+    }
+
     private fun detectFormat(file: File): String {
         if (!file.exists() || file.length() < 4) return "unknown"
         val bytes = ByteArray(8)
@@ -171,7 +346,7 @@ class LocalMangaImporter(
     suspend fun importArchiveOrDocument(uri: Uri, onProgress: (String) -> Unit = {}): LocalImportResult = withContext(Dispatchers.IO) {
         val rawFileName = getFileName(uri)
         val title = cleanTitle(rawFileName)
-        val importId = "local_manga_${System.currentTimeMillis()}"
+        val importId = newImportId("local_manga")
         val baseImportDir = File(context.filesDir, "local_imports/$importId").apply { mkdirs() }
         val tempFile = File(context.cacheDir, "temp_import_${System.currentTimeMillis()}.tmp")
 
@@ -452,7 +627,7 @@ class LocalMangaImporter(
             ?: return@withContext LocalImportResult(false, "Klasöre erişilemedi.")
         val rawTitle = treeDir.name ?: "Yerel Manga"
         val title = cleanTitle(rawTitle)
-        val importId = "local_folder_${System.currentTimeMillis()}"
+        val importId = newImportId("local_folder")
         val baseImportDir = File(context.filesDir, "local_imports/$importId").apply { mkdirs() }
 
         try {
@@ -535,7 +710,7 @@ class LocalMangaImporter(
         if (uris.isEmpty()) return@withContext LocalImportResult(false, "Hiç resim seçilmedi.")
         val firstFileName = getFileName(uris.first())
         val title = customTitle?.trim()?.ifBlank { null } ?: cleanTitle(firstFileName)
-        val importId = "local_images_${System.currentTimeMillis()}"
+        val importId = newImportId("local_images")
         val baseImportDir = File(context.filesDir, "local_imports/$importId/Bölüm_1").apply { mkdirs() }
 
         try {
@@ -570,6 +745,347 @@ class LocalMangaImporter(
             Log.e(TAG, "Multi images import error", e)
             baseImportDir.parentFile?.deleteRecursively()
             return@withContext LocalImportResult(false, "Resim içe aktarma hatası: ${e.localizedMessage ?: e.message}")
+        }
+    }
+
+    private data class FolderImportGroup(
+        val title: String,
+        val folder: DocumentFile? = null,
+        val files: List<DocumentFile> = emptyList()
+    )
+
+    suspend fun importFolderLibrary(
+        treeUri: Uri,
+        onProgress: (String) -> Unit = {}
+    ): BulkLocalImportResult = withContext(Dispatchers.IO) {
+        val treeDir = DocumentFile.fromTreeUri(context, treeUri)
+            ?: return@withContext BulkLocalImportResult(false, "Klasöre erişilemedi.")
+        val rootTitle = cleanTitle(treeDir.name ?: "Yerel Kütüphane")
+        val children = treeDir.listFiles()
+        val directories = children
+            .filter { it.isDirectory }
+            .sortedWith { a, b -> NaturalOrderComparator.compare(a.name ?: "", b.name ?: "") }
+        val rootImages = children.filter { it.isFile && isImageFileName(it.name ?: "") }
+        val rootDocuments = children
+            .filter { it.isFile && isArchiveOrPdfFileName(it.name ?: "") }
+            .sortedWith { a, b -> NaturalOrderComparator.compare(a.name ?: "", b.name ?: "") }
+
+        val groups = mutableListOf<FolderImportGroup>()
+        var skippedItems = 0
+        if (directories.isNotEmpty()) {
+            directories.forEach { folder ->
+                if (hasSupportedContent(folder)) {
+                    groups += FolderImportGroup(
+                        title = folder.name?.trim().orEmpty().ifBlank { "Manga" },
+                        folder = folder
+                    )
+                } else {
+                    skippedItems++
+                }
+            }
+            rootDocuments.forEach { document ->
+                groups += FolderImportGroup(
+                    title = cleanTitle(document.name ?: "Manga"),
+                    files = listOf(document)
+                )
+            }
+            if (rootImages.isNotEmpty()) {
+                skippedItems += rootImages.size
+            }
+        } else if (rootDocuments.isNotEmpty() || rootImages.isNotEmpty()) {
+            groups += FolderImportGroup(title = rootTitle, folder = treeDir)
+        }
+
+        if (groups.isEmpty()) {
+            return@withContext BulkLocalImportResult(
+                false,
+                "Seçilen klasörde içe aktarılabilir manga bulunamadı."
+            )
+        }
+
+        var importedCount = 0
+        var failedCount = 0
+        var pageCount = 0
+        var chapterCount = 0
+        val importedIds = mutableListOf<String>()
+        val firstError = StringBuilder()
+
+        groups.forEachIndexed { index, group ->
+            onProgress("Toplu klasör: ${index + 1}/${groups.size} - ${group.title}")
+            val importId = newImportId("local_bulk")
+            val result = try {
+                if (group.folder != null) {
+                    importFolderAsManga(group.folder, group.title, importId, onProgress)
+                } else {
+                    importDocumentsAsManga(
+                        documents = group.files,
+                        mangaTitle = group.title,
+                        importId = importId,
+                        onProgress = onProgress
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Bulk folder group failed: ${group.title}", e)
+                LocalImportResult(
+                    false,
+                    "İçe aktarma hatası: ${e.localizedMessage ?: e.message}"
+                )
+            }
+            if (result.success) {
+                importedCount++
+                pageCount += result.pageCount
+                chapterCount += result.chapterCount
+                result.mangaId?.let(importedIds::add)
+            } else {
+                failedCount++
+                if (firstError.isEmpty()) firstError.append(result.message)
+            }
+        }
+
+        val message = buildString {
+            if (importedCount > 0) {
+                append("Toplu içe aktarma tamamlandı: $importedCount manga eklendi")
+                if (chapterCount > 0) append(" ($chapterCount bölüm, $pageCount sayfa)")
+                append(".")
+            } else {
+                append("Hiçbir manga içe aktarılamadı.")
+            }
+            if (failedCount > 0) append(" $failedCount manga atlandı.")
+            if (skippedItems > 0) append(" $skippedItems desteklenmeyen öğe atlandı.")
+            if (importedCount == 0 && firstError.isNotEmpty()) {
+                append(" ${firstError.toString().take(180)}")
+            }
+        }
+        BulkLocalImportResult(
+            success = importedCount > 0,
+            message = message,
+            importedMangaIds = importedIds,
+            importedCount = importedCount,
+            failedCount = failedCount + skippedItems
+        )
+    }
+
+    suspend fun importMultipleArchives(
+        uris: List<Uri>,
+        customTitle: String? = null,
+        asSingleManga: Boolean,
+        onProgress: (String) -> Unit = {}
+    ): BulkLocalImportResult = withContext(Dispatchers.IO) {
+        val selected = uris
+            .distinct()
+            .map { it to getFileName(it) }
+            .sortedWith { a, b -> NaturalOrderComparator.compare(a.second, b.second) }
+        if (selected.isEmpty()) {
+            return@withContext BulkLocalImportResult(false, "Hiç dosya seçilmedi.")
+        }
+
+        val supported = selected.filter { isArchiveOrPdfFileName(it.second) }
+        val skippedUnsupported = selected.size - supported.size
+        if (supported.isEmpty()) {
+            return@withContext BulkLocalImportResult(
+                false,
+                "Seçilen dosyalarda desteklenen arşiv veya PDF bulunamadı."
+            )
+        }
+
+        if (asSingleManga) {
+            val title = customTitle?.trim()?.ifBlank { null }
+                ?: cleanTitle(supported.first().second)
+            val result = importDocumentsAsManga(
+                documents = supported.map { it.first },
+                mangaTitle = title,
+                importId = newImportId("local_multi"),
+                onProgress = onProgress
+            )
+            val suffix = if (skippedUnsupported > 0) {
+                " $skippedUnsupported desteklenmeyen dosya atlandı."
+            } else {
+                ""
+            }
+            return@withContext BulkLocalImportResult(
+                success = result.success,
+                message = result.message + suffix,
+                importedMangaIds = listOfNotNull(result.mangaId),
+                importedCount = if (result.success) 1 else 0,
+                failedCount = skippedUnsupported
+            )
+        }
+
+        var importedCount = 0
+        var failedCount = skippedUnsupported
+        val importedIds = mutableListOf<String>()
+        var firstError = ""
+        supported.forEachIndexed { index, (uri, name) ->
+            onProgress("Dosya ${index + 1}/${supported.size} aktarılıyor: $name")
+            val result = importArchiveOrDocument(uri, onProgress)
+            if (result.success) {
+                importedCount++
+                result.mangaId?.let(importedIds::add)
+            } else {
+                failedCount++
+                if (firstError.isBlank()) firstError = result.message
+            }
+        }
+
+        val message = buildString {
+            if (importedCount > 0) {
+                append("$importedCount manga ayrı ayrı eklendi.")
+            } else {
+                append("Hiçbir manga içe aktarılamadı.")
+            }
+            if (failedCount > 0) append(" $failedCount dosya atlandı.")
+            if (importedCount == 0 && firstError.isNotBlank()) {
+                append(" ${firstError.take(180)}")
+            }
+        }
+        BulkLocalImportResult(
+            success = importedCount > 0,
+            message = message,
+            importedMangaIds = importedIds,
+            importedCount = importedCount,
+            failedCount = failedCount
+        )
+    }
+
+    private suspend fun importFolderAsManga(
+        folder: DocumentFile,
+        mangaTitle: String,
+        importId: String,
+        onProgress: (String) -> Unit
+    ): LocalImportResult {
+        val baseImportDir = File(context.filesDir, "local_imports/$importId").apply { mkdirs() }
+        try {
+            val chapterPagesMap = linkedMapOf<String, MutableList<File>>()
+            val usedTitles = mutableSetOf<String>()
+            var chapterSequence = 0
+            var failedDocuments = 0
+
+            val directImages = folder.listFiles()
+                .filter { it.isFile && isImageFileName(it.name ?: "") }
+                .map { it to (it.name ?: "") }
+            if (directImages.isNotEmpty()) {
+                val targetDir = File(baseImportDir, "chapter_${chapterSequence++}")
+                val pages = copyImageDocuments(directImages, targetDir)
+                if (pages.isNotEmpty()) {
+                    chapterPagesMap[uniqueChapterTitle("Bölüm 1", usedTitles)] = pages.toMutableList()
+                }
+            }
+
+            val directDocuments = folder.listFiles()
+                .filter { it.isFile && isArchiveOrPdfFileName(it.name ?: "") }
+                .sortedWith { a, b -> NaturalOrderComparator.compare(a.name ?: "", b.name ?: "") }
+            directDocuments.forEach { document ->
+                val name = document.name ?: "Bölüm"
+                onProgress("$mangaTitle: $name işleniyor...")
+                val title = uniqueChapterTitle(cleanTitle(name), usedTitles)
+                val targetDir = File(baseImportDir, "chapter_${chapterSequence++}")
+                val (pages, _) = extractDocumentPages(document.uri, targetDir, onProgress)
+                if (pages.isEmpty()) {
+                    failedDocuments++
+                    targetDir.deleteRecursively()
+                } else {
+                    chapterPagesMap[title] = pages.toMutableList()
+                }
+            }
+
+            val subFolders = folder.listFiles()
+                .filter { it.isDirectory }
+                .sortedWith { a, b -> NaturalOrderComparator.compare(a.name ?: "", b.name ?: "") }
+            subFolders.forEach { subFolder ->
+                val folderName = subFolder.name?.trim().orEmpty().ifBlank { "Bölüm" }
+                val images = collectImagesRecursive(subFolder)
+                if (images.isNotEmpty()) {
+                    val title = uniqueChapterTitle(folderName, usedTitles)
+                    val targetDir = File(baseImportDir, "chapter_${chapterSequence++}")
+                    val pages = copyImageDocuments(images, targetDir)
+                    if (pages.isNotEmpty()) {
+                        chapterPagesMap[title] = pages.toMutableList()
+                    }
+                }
+
+                val nestedDocuments = collectDocumentsRecursive(subFolder)
+                nestedDocuments.forEach { (document, relativeName) ->
+                    val name = relativeName.substringAfterLast('/')
+                    onProgress("$mangaTitle: $name işleniyor...")
+                    val title = uniqueChapterTitle(cleanTitle(name), usedTitles)
+                    val targetDir = File(baseImportDir, "chapter_${chapterSequence++}")
+                    val (pages, _) = extractDocumentPages(document.uri, targetDir, onProgress)
+                    if (pages.isEmpty()) {
+                        failedDocuments++
+                        targetDir.deleteRecursively()
+                    } else {
+                        chapterPagesMap[title] = pages.toMutableList()
+                    }
+                }
+            }
+
+            if (chapterPagesMap.isEmpty()) {
+                baseImportDir.deleteRecursively()
+                return LocalImportResult(
+                    false,
+                    "Klasörde okunabilir bölüm bulunamadı."
+                )
+            }
+
+            val result = saveMangaAndChapters(importId, mangaTitle, chapterPagesMap)
+            return if (result.success && failedDocuments > 0) {
+                result.copy(message = result.message + " $failedDocuments dosya atlandı.")
+            } else {
+                result
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Bulk manga folder import error", e)
+            baseImportDir.deleteRecursively()
+            return LocalImportResult(false, "Klasör içe aktarma hatası: ${e.localizedMessage ?: e.message}")
+        }
+    }
+
+    private suspend fun importDocumentsAsManga(
+        documents: List<Uri>,
+        mangaTitle: String,
+        importId: String,
+        onProgress: (String) -> Unit
+    ): LocalImportResult {
+        val baseImportDir = File(context.filesDir, "local_imports/$importId").apply { mkdirs() }
+        try {
+            val uriWithNames = documents
+                .map { it to getFileName(it) }
+                .sortedWith { a, b -> NaturalOrderComparator.compare(a.second, b.second) }
+            val chapterPagesMap = linkedMapOf<String, MutableList<File>>()
+            val usedTitles = mutableSetOf<String>()
+            var failedDocuments = 0
+
+            uriWithNames.forEachIndexed { index, (uri, name) ->
+                onProgress("$mangaTitle: $name işleniyor...")
+                val title = uniqueChapterTitle(cleanTitle(name), usedTitles)
+                val targetDir = File(baseImportDir, "chapter_${index + 1}")
+                val (pages, _) = extractDocumentPages(uri, targetDir, onProgress)
+                if (pages.isEmpty()) {
+                    failedDocuments++
+                    targetDir.deleteRecursively()
+                } else {
+                    chapterPagesMap[title] = pages.toMutableList()
+                }
+            }
+
+            if (chapterPagesMap.isEmpty()) {
+                baseImportDir.deleteRecursively()
+                return LocalImportResult(
+                    false,
+                    "Seçilen dosyalarda okunabilir sayfa bulunamadı."
+                )
+            }
+
+            val result = saveMangaAndChapters(importId, mangaTitle, chapterPagesMap)
+            return if (result.success && failedDocuments > 0) {
+                result.copy(message = result.message + " $failedDocuments dosya atlandı.")
+            } else {
+                result
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Combined archive import error", e)
+            baseImportDir.deleteRecursively()
+            return LocalImportResult(false, "Arşiv içe aktarma hatası: ${e.localizedMessage ?: e.message}")
         }
     }
 

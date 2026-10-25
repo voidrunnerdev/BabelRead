@@ -367,6 +367,29 @@ class MangaPreferences(private val context: Context) {
         }
     }
 
+    suspend fun replaceHistoryEntries(
+        sourceMangaIds: Set<String>,
+        target: ReadingHistoryEntry?
+    ) {
+        if (sourceMangaIds.isEmpty()) return
+        context.dataStore.edit { prefs ->
+            val existing = parseHistory(prefs[READING_HISTORY])
+            val updated = buildList {
+                if (target != null) add(target)
+                addAll(
+                    existing.filterNot {
+                        it.mangaId in sourceMangaIds || (target != null && it.mangaId == target.mangaId)
+                    }
+                )
+            }.take(100)
+            if (updated.isEmpty()) {
+                prefs.remove(READING_HISTORY)
+            } else {
+                prefs[READING_HISTORY] = JSONArray().apply { updated.forEach { put(it.toJson()) } }.toString()
+            }
+        }
+    }
+
     suspend fun clearHistory() {
         context.dataStore.edit { it.remove(READING_HISTORY) }
     }

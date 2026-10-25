@@ -29,6 +29,7 @@ import com.example.extensions.languageCode
 import com.example.i18n.TranslationLanguages
 import com.example.service.BubbleBox
 import com.example.service.BubbleDetector
+import com.example.service.BulkLocalImportResult
 import com.example.service.LocalMangaImporter
 import com.example.service.TextBlockObj
 import com.example.service.TranslationRequest
@@ -3460,6 +3461,55 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun importLocalFolderBulk(treeUri: Uri, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+        viewModelScope.launch {
+            _isImporting.value = true
+            _importStatusText.value = "Toplu klasör taranıyor..."
+            try {
+                val res: BulkLocalImportResult = localMangaImporter.importFolderLibrary(treeUri) { status ->
+                    _importStatusText.value = status
+                }
+                onResult(res.success, res.message)
+            } catch (e: Exception) {
+                onResult(false, "Toplu klasör aktarma hatası: ${e.localizedMessage ?: e.message}")
+            } finally {
+                _isImporting.value = false
+                _importStatusText.value = ""
+            }
+        }
+    }
+
+    fun importLocalArchives(
+        uris: List<Uri>,
+        title: String? = null,
+        asSingleManga: Boolean,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            _isImporting.value = true
+            _importStatusText.value = if (asSingleManga) {
+                "Arşivler tek manga olarak hazırlanıyor..."
+            } else {
+                "Arşivler ayrı ayrı aktarılıyor..."
+            }
+            try {
+                val res: BulkLocalImportResult = localMangaImporter.importMultipleArchives(
+                    uris = uris,
+                    customTitle = title,
+                    asSingleManga = asSingleManga
+                ) { status ->
+                    _importStatusText.value = status
+                }
+                onResult(res.success, res.message)
+            } catch (e: Exception) {
+                onResult(false, "Arşiv aktarma hatası: ${e.localizedMessage ?: e.message}")
+            } finally {
+                _isImporting.value = false
+                _importStatusText.value = ""
+            }
+        }
+    }
+
     fun importLocalImages(uris: List<Uri>, title: String? = null, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
         viewModelScope.launch {
             _isImporting.value = true
@@ -3489,6 +3539,136 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun clearPersonalGrammarCorrections() {
         viewModelScope.launch {
             correctionDao.clearAll()
+        }
+    }
+
+    fun mergeMangas(
+        orderedMangaIds: List<String>,
+        targetTitle: String,
+        onFinished: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val ids = orderedMangaIds.distinct()
+                if (ids.size < 2) {
+                    withContext(Dispatchers.Main) {
+                        onFinished(false, "Birleştirmek için en az 2 manga seçin.")
+                    }
+                    return@launch
+                }
+                val mangas = ids.mapNotNull { mangaDao.getMangaById(it) }
+                if (mangas.size != ids.size) {
+                    withContext(Dispatchers.Main) {
+                        onFinished(false, "Seçilen manga kayıtlarından bazıları bulunamadı.")
+                    }
+                    return@launch
+                }
+                val chapterLists = mangas.associateWith { manga ->
+                    chapterDao.getChaptersByMangaIdSync(manga.id).sortedWith(
+                        compareBy<ChapterEntity> { it.chapterNumber }.thenBy { it.title }
+                    )
+                }
+                val emptyTitles = mangas
+                    .filter { chapterLists[it.id].orEmpty().isEmpty() }
+                    .map { it.title }
+                if (emptyTitles.isNotEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        onFinished(
+                            false,
+                            "Bölümü olmayan manga birleştirilemez: ${emptyTitles.joinToString(", ").take(160)}"
+                        )
+                    }
+                    return@launch
+                }
+
+                val first = mangas.first()
+                val mergedId = "local_merged_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
+                val mergedTitle = targetTitle.trim().ifBlank { first.title }
+                val mergedCover = mangas.firstOrNull { it.coverUrl.isNotBlank() }?.coverUrl.orEmpty()
+                val mergedSource = first.sourceName.ifBlank { "Cihaz / Yerel Mangalar" }
+                val existingHistory = preferences.readingHistory.first()
+                val latestHistory = existingHistory
+                    .filter { it.mangaId in ids }
+                    .maxByOrNull { it.updatedAt }
+
+                val mergedManga = MangaEntity(
+                    id = mergedId,
+                    title = mergedTitle,
+                    coverUrl = mergedCover,
+                    author = first.author.ifBlank { "Koleksiyon" },
+                    artist = first.artist.ifBlank { "Koleksiyon" },
+                    description = "$mergedTitle - ${mangas.size} eserin tek bir manga altında birleştirilmiş hâli.",
+                    status = first.status,
+                    rating = first.rating,
+                    sourceName = mergedSource,
+                    originLanguage = first.originLanguage,
+                    availableLanguages = first.availableLanguages,
+                    isFavorite = true,
+                    addedAt = System.currentTimeMillis()
+                )
+
+                val mergedChapters = mutableListOf<ChapterEntity>()
+                var nextChapterNumber = 1.0
+                mangas.forEach { manga ->
+                    chapterLists[manga.id].orEmpty().forEach { chapter ->
+                        mergedChapters += chapter.copy(
+                            mangaId = mergedId,
+                            chapterNumber = nextChapterNumber
+                        )
+                        nextChapterNumber += 1.0
+                    }
+                }
+
+                database.withTransaction {
+                    mangaDao.insertManga(mergedManga)
+                    chapterDao.upsertChapters(mergedChapters)
+                    mangas.forEach { manga ->
+                        queueDao.reassignMangaForQueue(
+                            oldMangaId = manga.id,
+                            newMangaId = mergedId,
+                            newTitle = mergedTitle,
+                            newCover = mergedCover
+                        )
+                        chapterDao.deleteChaptersForManga(manga.id)
+                        mangaDao.deleteMangaById(manga.id)
+                    }
+                }
+
+                val sourceIds = ids.toSet()
+                val mergedHistory = latestHistory?.copy(
+                    mangaId = mergedId,
+                    title = mergedTitle,
+                    coverUrl = mergedCover,
+                    sourceName = mergedSource
+                )
+                runCatching { preferences.replaceHistoryEntries(sourceIds, mergedHistory) }
+                runCatching {
+                    val hidden = preferences.hiddenMangaIds.first()
+                    if (hidden.any { it in sourceIds }) {
+                        preferences.setHiddenMangaIds(hidden - sourceIds)
+                    }
+                }
+                if (mergedSource.startsWith("Web: ")) {
+                    runCatching {
+                        val page = preferences.webMangaPages.first()[first.id]
+                        if (!page.isNullOrBlank()) {
+                            preferences.setWebMangaPage(mergedId, page)
+                        }
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    onFinished(
+                        true,
+                        "'$mergedTitle' oluşturuldu: ${mangas.size} manga, ${mergedChapters.size} bölüm birleştirildi."
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e("BabelRead_Merge", "Manga merge failed", e)
+                withContext(Dispatchers.Main) {
+                    onFinished(false, "Manga birleştirilemedi: ${e.localizedMessage ?: e.message}")
+                }
+            }
         }
     }
 

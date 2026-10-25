@@ -128,6 +128,14 @@ interface DownloadQueueDao {
     @Query("DELETE FROM download_queue WHERE mangaId = :mangaId")
     suspend fun deleteQueueItemsForManga(mangaId: String)
 
+    @Query("UPDATE download_queue SET mangaId = :newMangaId, mangaTitle = :newTitle, mangaCover = :newCover WHERE mangaId = :oldMangaId")
+    suspend fun reassignMangaForQueue(
+        oldMangaId: String,
+        newMangaId: String,
+        newTitle: String,
+        newCover: String
+    )
+
     @Query("DELETE FROM download_queue WHERE status = 'Tamamlandı'")
     suspend fun clearCompleted()
 

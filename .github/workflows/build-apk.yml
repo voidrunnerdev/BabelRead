@@ -76,6 +76,9 @@ jobs:
           cat > release-notes.md <<EOF
           **Erken beta sürümü.** Hatalar ve eksik özellikler olabilir.
 
+          - Kütüphane klasörlerini toplu içe aktarma eklendi; her alt klasör ayrı manga olarak eklenir.
+          - Birden fazla arşiv veya PDF'yi ayrı manga ya da tek manganın sıralı bölümleri olarak içe aktarma eklendi.
+          - Kütüphanede çoklu seçim ve seçilen mangaları sıralı bölümlerle birleştirme eklendi.
           - Ayarlardan arayüz dili seçimi eklendi (10 popüler dil + sistem varsayılanı).
           - BabelRead hiçbir manga içeriği veya eklenti deposu barındırmaz; tüm içerik kullanıcının eklediği kaynaklardan gelir.
           - Eklenen eklentiler ve depolar kullanıcıya aittir; kullanım sorumluluğu kullanıcıdadır.

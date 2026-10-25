@@ -12,8 +12,8 @@ android {
     applicationId = "com.babelread.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 2
-    versionName = "0.1.1-beta"
+    versionCode = 3
+    versionName = "0.1.2-beta"
 
     ndk {
       abiFilters += listOf("x86_64", "arm64-v8a")
