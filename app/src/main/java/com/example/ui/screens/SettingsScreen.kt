@@ -47,6 +47,7 @@ fun SettingsScreen(viewModel: MangaViewModel) {
     val keepScreenOn by viewModel.keepScreenOn.collectAsState()
 
     val translationEngine by viewModel.preferences.translationEngine.collectAsState(initial = "Otomatik")
+    val ocrEngine by viewModel.preferences.ocrEngine.collectAsState(initial = "ML Kit")
     val translationBubbleStyle by viewModel.translationBubbleStyle.collectAsState()
     val translationOpacity by viewModel.translationOpacity.collectAsState()
     val geminiApiKey by viewModel.preferences.geminiApiKey.collectAsState(initial = "")
@@ -443,6 +444,37 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                     if (engineNotice != null) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(engineNotice, color = Color(0xFFFFB74D), fontSize = 11.sp)
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("OCR Motoru", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        listOf("ML Kit", "PP-OCRv5").forEach { e ->
+                            val isSel = ocrEngine == e
+                            Button(
+                                onClick = { viewModel.setOcrEngine(e) },
+                                modifier = Modifier.weight(1f),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = if (isSel) MaterialTheme.colorScheme.primary else Color(0xFF2C2C2C)
+                                ),
+                                contentPadding = PaddingValues(horizontal = 4.dp)
+                            ) {
+                                Text(e, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            if (yoloAiEnabled) {
+                                "PP-OCRv5 deneysel: yalnızca İngilizce ve Japonca; RT-DETR metin kutuları kullanılır."
+                            } else {
+                                "PP-OCRv5 için RT-DETR açık olmalı; şu anda tüm sayfa OCR'ı devre dışı."
+                            },
+                            color = Color(0xFFFFB74D),
+                            fontSize = 11.sp
+                        )
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))

@@ -100,6 +100,7 @@ class ExampleRobolectricTest {
         canvas.drawRect(50f, 50f, 80f, 70f, textPaint)
 
         val service = com.example.service.TranslationService(
+            context = ApplicationProvider.getApplicationContext(),
             correctionDao = object : com.example.data.db.TranslationCorrectionDao {
                 override suspend fun getCorrectionForText(originalText: String): com.example.data.db.TranslationCorrectionEntity? = null
                 override suspend fun insertCorrection(correction: com.example.data.db.TranslationCorrectionEntity) {}
@@ -126,6 +127,7 @@ class ExampleRobolectricTest {
     @Test
     fun `test OCR artifact cleaning preserves meaningful digits`() {
         val service = com.example.service.TranslationService(
+            context = ApplicationProvider.getApplicationContext(),
             correctionDao = object : com.example.data.db.TranslationCorrectionDao {
                 override suspend fun getCorrectionForText(originalText: String): com.example.data.db.TranslationCorrectionEntity? = null
                 override suspend fun insertCorrection(correction: com.example.data.db.TranslationCorrectionEntity) {}
@@ -157,6 +159,7 @@ class ExampleRobolectricTest {
     @Test
     fun `test dialogue validation rejects SFX and garbage`() {
         val service = com.example.service.TranslationService(
+            context = ApplicationProvider.getApplicationContext(),
             correctionDao = object : com.example.data.db.TranslationCorrectionDao {
                 override suspend fun getCorrectionForText(originalText: String): com.example.data.db.TranslationCorrectionEntity? = null
                 override suspend fun insertCorrection(correction: com.example.data.db.TranslationCorrectionEntity) {}

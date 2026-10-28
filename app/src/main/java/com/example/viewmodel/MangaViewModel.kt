@@ -64,7 +64,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val translationCacheDao = database.translationCacheDao()
 
     val preferences = MangaPreferences(context)
-    val translationService = TranslationService(correctionDao)
+    val translationService = TranslationService(correctionDao, context)
     val bubbleDetector = BubbleDetector(context)
     val localMangaImporter = LocalMangaImporter(context, mangaDao, chapterDao)
     val webSiteStore = WebSiteStore(preferences, viewModelScope)
@@ -1892,6 +1892,33 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setOcrEngine(engine: String) {
+        viewModelScope.launch {
+            if (preferences.ocrEngine.first() == engine) return@launch
+            preferences.setOcrEngine(engine)
+
+            val currentIdx = _currentPageIndex.value
+            val sequence = translationSequenceJob
+            translationSequenceJob = null
+            sequence?.cancelAndJoin()
+            val oldJobs = translationJobs.values.toList()
+            translationJobs.clear()
+            oldJobs.forEach { it.cancelAndJoin() }
+            inProgressPages.clear()
+            translationPipelineCursor = 0
+            _translatedPagesMap.value = emptyMap()
+            _maskedPagesMap.value = emptyMap()
+            _isTranslationLoading.value = false
+
+            if (_translationActive.value && _activeChapter.value != null) {
+                if (currentIdx in 0 until _readerPages.value.size) {
+                    translatePageIfNeeded(currentIdx, forceReload = true)
+                }
+                startSequentialTranslation()
+            }
+        }
+    }
+
     fun setTranslationTargetLanguage(code: String) {
         val resolved = TranslationLanguages.find(code)?.code ?: return
         viewModelScope.launch {
@@ -1989,9 +2016,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     /** Çeviri önbelleği dil bazlı ayrılır: aynı sayfa farklı hedef dillerde ayrı saklanır. */
     private suspend fun translationCacheId(chapterId: String): Pair<String, String> {
         val target = preferences.translationTargetLang.first()
+        val ocrEngine = preferences.ocrEngine.first()
         val sourceDisplay = resolveSourceDisplayForCache()
         val sourceCode = TranslationLanguages.codeForDisplayName(sourceDisplay) ?: "en"
-        return "$chapterId|$sourceCode>$target" to target
+        return "$chapterId|$sourceCode>$target|$ocrEngine" to target
     }
 
     private suspend fun loadCachedTranslation(pageIdx: Int, generation: Long): Boolean {
@@ -2235,6 +2263,50 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         return pruned
     }
 
+    /**
+     * PP-OCRv5 recognition is line-oriented, so prefer the detector's
+     * text_bubble boxes over the larger balloon boxes. The line segmenter
+     * splits each text block into line crops. If the model returned no text
+     * boxes, fall back to balloon boxes.
+     */
+    private fun buildPpOcrV5Regions(bubbles: List<BubbleBox>, width: Int, height: Int): List<Rect> {
+        if (bubbles.isEmpty() || width <= 0 || height <= 0) return emptyList()
+
+        fun areaOf(rect: Rect): Long = rect.width().toLong() * rect.height()
+        fun overlapArea(a: Rect, b: Rect): Long {
+            val w = (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0)
+            val h = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0)
+            return w.toLong() * h
+        }
+
+        fun dedupe(rects: List<Rect>): List<Rect> {
+            val result = mutableListOf<Rect>()
+            for (rect in rects) {
+                if (rect.isEmpty) continue
+                val duplicate = result.any { existing ->
+                    overlapArea(existing, rect).toFloat() >=
+                        minOf(areaOf(existing), areaOf(rect)).toFloat() * 0.70f
+                }
+                if (duplicate) continue
+                result.add(rect)
+            }
+            return result
+        }
+
+        val textLabels = setOf("text_bubble", "dialogue_text", "text")
+        val textRects = bubbles.filter { it.label in textLabels }
+            .map { it.toPixelRect(width, height) }
+            .filter { !it.isEmpty }
+        if (textRects.isNotEmpty()) return dedupe(textRects)
+
+        val balloonLabels = setOf("bubble", "balloon")
+        return dedupe(
+            bubbles.filter { it.label in balloonLabels }
+                .map { it.toPixelRect(width, height) }
+                .filter { !it.isEmpty }
+        )
+    }
+
     fun translatePageIfNeeded(pageIdx: Int, forceReload: Boolean = false) {
         Log.d("TR", "translatePageIfNeeded çağrıldı: sayfa=$pageIdx, forceReload=$forceReload")
         val generation = readerGeneration.get()
@@ -2261,6 +2333,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 val targetLangCode = preferences.translationTargetLang.first()
+                val ocrEngine = preferences.ocrEngine.first()
                 val sourcePref = preferences.translationSourceLang.first()
                 val forcedSourceCode = if (sourcePref == TranslationLanguages.AUTO) null else sourcePref
                 val metadataOriginLang = _readerManga.value?.originLanguage ?: run {
@@ -2273,6 +2346,18 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 val originLang = forcedSourceCode?.let {
                     TranslationLanguages.turkishName(it) ?: metadataOriginLang
                 } ?: metadataOriginLang
+
+                val originCode = TranslationLanguages.codeForDisplayName(originLang)
+                if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
+                    if (originCode == "zh" || originCode == "ko") {
+                        Log.d("TR", "PP-OCRv5: $originLang kaynağı sessizce atlandı (sayfa=$pageIdx)")
+                        return@launch
+                    }
+                    if (originCode != "en" && originCode != "ja") {
+                        emitTranslationNotice("PP-OCRv5 yalnızca İngilizce ve Japonca kaynakları destekler.")
+                        return@launch
+                    }
+                }
 
                 val prefEngine = preferences.translationEngine.first()
                 val apiK = preferences.geminiApiKey.first()
@@ -2309,10 +2394,20 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     // (text_free) yazılar şimdilik çevrilmez ve maskelenmez.
                     val regionMode = yoloEnabled && bubbleDetector.isAiModelReady()
                     val bubbleOcrRegions = if (regionMode) {
-                        buildBubbleOcrRegions(yoloBubbles, bitmap.width, bitmap.height)
+                        if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
+                            buildPpOcrV5Regions(yoloBubbles, bitmap.width, bitmap.height)
+                        } else {
+                            buildBubbleOcrRegions(yoloBubbles, bitmap.width, bitmap.height)
+                        }
                     } else {
                         emptyList()
                     }
+                    if (ocrEngine.equals("PP-OCRv5", ignoreCase = true) && !regionMode) {
+                        Log.w("TR", "PP-OCRv5 requires RT-DETR regions; page=$pageIdx skipped")
+                        emitTranslationNotice("PP-OCRv5 için RT-DETR açık olmalı; tüm sayfa OCR'ı desteklenmiyor.")
+                        return@launch
+                    }
+
                     var ocrTimeoutMs = 120000L
                     val ocrResult: List<TranslationService.RectAndText>? = if (regionMode) {
                         if (bubbleOcrRegions.isEmpty()) {
@@ -2325,7 +2420,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             Log.d("TR", "Bölge OCR başladı: sayfa=$pageIdx, ${bubbleOcrRegions.size} bölge (sayfa alanının %${regionArea * 100 / pageArea}'si)")
                             ocrExecutionMutex.withLock {
                                 withTimeoutOrNull(ocrTimeoutMs) {
-                                    translationService.performRegionOcr(bitmap, bubbleOcrRegions, originLang)
+                                    translationService.performRegionOcr(bitmap, bubbleOcrRegions, originLang, ocrEngine)
                                 }
                             }
                         }
@@ -2340,7 +2435,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         ocrTimeoutMs = (20000L + (estimatedOcrTiles - 1L) * 10000L).coerceAtMost(120000L)
                         ocrExecutionMutex.withLock {
                             withTimeoutOrNull(ocrTimeoutMs) {
-                                translationService.performOcr(bitmap, originLang)
+                                translationService.performOcr(bitmap, originLang, ocrEngine)
                             }
                         }
                     }

@@ -1,5 +1,6 @@
 package com.example.service
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -93,8 +94,11 @@ data class BubbleAnalysis(
 )
 
 class TranslationService(
-    private val correctionDao: TranslationCorrectionDao
+    private val correctionDao: TranslationCorrectionDao,
+    context: Context
 ) {
+    private val appContext = context.applicationContext
+    private val ppOcrV5Engine by lazy { PpOcrV5Engine(appContext) }
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -386,8 +390,20 @@ class TranslationService(
         }
     }
 
-    suspend fun performOcr(bitmap: Bitmap, originLanguage: String): List<RectAndText> =
-        performOcr(bitmap, originLanguage, applyPageMarginFilter = true)
+    suspend fun performOcr(
+        bitmap: Bitmap,
+        originLanguage: String,
+        ocrEngine: String = "ML Kit"
+    ): List<RectAndText> {
+        if (isPpOcrEngine(ocrEngine)) {
+            Log.w(TAG, "PP-OCRv5 is region-based; whole-page OCR requires RT-DETR regions")
+            return emptyList()
+        }
+        return performOcr(bitmap, originLanguage, applyPageMarginFilter = true)
+    }
+
+    private fun isPpOcrEngine(engine: String): Boolean =
+        engine.equals("PP-OCRv5", ignoreCase = true)
 
     private suspend fun performOcr(
         bitmap: Bitmap,
@@ -681,9 +697,25 @@ class TranslationService(
     suspend fun performRegionOcr(
         bitmap: Bitmap,
         regions: List<Rect>,
-        originLanguage: String
+        originLanguage: String,
+        ocrEngine: String = "ML Kit"
     ): List<RectAndText> = withContext(Dispatchers.Default) {
         if (bitmap.isRecycled || regions.isEmpty()) return@withContext emptyList()
+        if (isPpOcrEngine(ocrEngine)) {
+            if (!ppOcrV5Engine.isReady()) {
+                Log.e(TAG, "PP-OCRv5 recognizer is unavailable")
+                throw IllegalStateException("PP-OCRv5 recognizer could not be loaded")
+            }
+            val ppResults = mutableListOf<RectAndText>()
+            for (region in regions) {
+                ppResults.addAll(
+                    ppOcrV5Engine.recognizeBlock(bitmap, region, originLanguage).map {
+                        RectAndText(it.rect, cleanOcrArtifacts(it.text, originLanguage))
+                    }
+                )
+            }
+            return@withContext resolveCollidingBlocks(ppResults)
+        }
         val results = mutableListOf<RectAndText>()
         for (region in regions) {
             if (region.isEmpty) continue

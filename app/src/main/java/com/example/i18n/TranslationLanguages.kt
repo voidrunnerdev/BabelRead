@@ -76,8 +76,8 @@ object TranslationLanguages {
     ).mapNotNull(byCode::get)
 
     val sources: List<TranslationLanguage> = listOf(
-        "en", "tr", "es", "fr", "de", "it", "pt", "nl", "pl",
-        "cs", "ro", "hu", "sv", "da", "fi",
+        "en", "ja", "zh", "ko", "tr", "es", "fr", "de", "it", "pt",
+        "nl", "pl", "cs", "ro", "hu", "sv", "da", "fi",
     ).mapNotNull(byCode::get)
 
     fun find(code: String?): TranslationLanguage? =
