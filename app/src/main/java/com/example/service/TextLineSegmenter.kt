@@ -2,7 +2,7 @@ package com.example.service
 
 import android.graphics.Bitmap
 import android.graphics.Rect
-import kotlin.math.log
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.tanh
@@ -400,7 +400,7 @@ class TextLineSegmenter {
             val lineHeight = (y2 - y1 + 1).toDouble()
             areaSum += lineWidth * lineHeight
             val ratio = if (vertical) lineHeight / lineWidth else lineWidth / lineHeight
-            shapeScores.add(tanh(log(max(ratio, 1e-6))))
+            shapeScores.add(tanh(ln(max(ratio, 1e-6))))
         }
         if (areaSum <= 0.0 || shapeScores.isEmpty()) return -1_000_000.0
         val coverage = covered.toDouble() / totalInk
