@@ -1340,6 +1340,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         detectionPrefetchJob?.cancel()
         detectionPrefetchJob = null
         translationPipelineCursor = 0
+        prewarmPpOcrIfNeeded()
         translationJobs.values.forEach { it.cancel() }
         translationJobs.clear()
         inProgressPages.clear()
@@ -1516,6 +1517,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val translationJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
     private var translationSequenceJob: Job? = null
     private var detectionPrefetchJob: Job? = null
+    private var ppOcrPrewarmJob: Job? = null
     @Volatile private var readerVisible = false
     private val bitmapDecodeSemaphore = Semaphore(2)
     private val prefetchDecodeSemaphore = Semaphore(1)
@@ -1526,6 +1528,27 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     @Volatile private var translationPipelineCursor = 0
+
+    /**
+     * PP-OCRv5 model extraction and ORT session creation are blocking. Warm the
+     * engine up before page OCR so the first page does not pay that cost while
+     * holding the translation pipeline.
+     */
+    private fun prewarmPpOcrIfNeeded() {
+        if (ppOcrPrewarmJob?.isActive == true) return
+        ppOcrPrewarmJob = viewModelScope.launch(Dispatchers.IO + viewModelExceptionHandler) {
+            try {
+                if (preferences.ocrEngine.first().equals("PP-OCRv5", ignoreCase = true)) {
+                    translationService.prewarmOcrEngine("PP-OCRv5")
+                    Log.d("TR", "PP-OCRv5 prewarm tamamlandı")
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                Log.w("TR", "PP-OCRv5 prewarm başarısız: ${t.message}")
+            }
+        }
+    }
 
     /** Translate pages in chapter order so scrolling cannot reorder or cancel the work. */
     private fun startSequentialTranslation() {
@@ -1576,7 +1599,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     if (_detectedBubblesMap.value.containsKey(pageIndex)) continue
                     if (pageIndex < translationPipelineCursor) continue
 
-                    while (pageIndex > translationPipelineCursor + DETECTION_PREFETCH_AHEAD &&
+                    while (pageIndex > maxOf(translationPipelineCursor, _currentPageIndex.value) + DETECTION_PREFETCH_AHEAD &&
                         readerGeneration.get() == generation && _translationActive.value
                     ) {
                         delay(250)
@@ -1806,6 +1829,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleLiveTranslation(active: Boolean) {
         _translationActive.value = active
         if (active) {
+            prewarmPpOcrIfNeeded()
             startSequentialTranslation()
         } else {
             detectionPrefetchJob?.cancel()
@@ -1896,6 +1920,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             if (preferences.ocrEngine.first() == engine) return@launch
             preferences.setOcrEngine(engine)
+            if (engine.equals("PP-OCRv5", ignoreCase = true)) {
+                prewarmPpOcrIfNeeded()
+            }
 
             val currentIdx = _currentPageIndex.value
             val sequence = translationSequenceJob
@@ -2294,17 +2321,25 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         val textLabels = setOf("text_bubble", "dialogue_text", "text")
+        val balloonLabels = setOf("bubble", "balloon")
         val textRects = bubbles.filter { it.label in textLabels }
             .map { it.toPixelRect(width, height) }
             .filter { !it.isEmpty }
-        if (textRects.isNotEmpty()) return dedupe(textRects)
+        val balloonRects = bubbles.filter { it.label in balloonLabels }
+            .map { it.toPixelRect(width, height) }
+            .filter { !it.isEmpty }
 
-        val balloonLabels = setOf("bubble", "balloon")
-        return dedupe(
-            bubbles.filter { it.label in balloonLabels }
-                .map { it.toPixelRect(width, height) }
-                .filter { !it.isEmpty }
-        )
+        // Prefer tight text boxes, but never drop a balloon that has no text box.
+        // The detector does not guarantee a text_bubble detection for every balloon.
+        val candidates = mutableListOf<Rect>()
+        candidates.addAll(textRects)
+        for (balloon in balloonRects) {
+            val coveredByText = textRects.any { text ->
+                overlapArea(balloon, text) >= areaOf(text) * 0.5f
+            }
+            if (!coveredByText) candidates.add(balloon)
+        }
+        return dedupe(candidates)
     }
 
     fun translatePageIfNeeded(pageIdx: Int, forceReload: Boolean = false) {
@@ -3064,8 +3099,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     val maskedBitmap = maskResult.bitmap
 
                     Log.d("TR", "Maskeleme bitti sayfa=$pageIdx (${System.currentTimeMillis() - timingAfterTranslate}ms)")
-                    if (translationCanBeCached) storeMaskedPage(pageIdx, maskedBitmap, generation)
-                    if (translationCanBeCached) {
+                    // Show successful bubbles immediately, even when another block on
+                    // the page failed. Failed blocks keep their source text visible.
+                    if (finalBlocks.isNotEmpty() || mergedCandidates.isEmpty()) {
+                        storeMaskedPage(pageIdx, maskedBitmap, generation)
                         // Keep translation geometry for the whole chapter. The masked bitmap
                         // cache is intentionally smaller, so tying overlays to it made older
                         // translated pages disappear as the reader scrolled forward.
@@ -3073,7 +3110,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             if (readerGeneration.get() != generation) current else
                                 current + (pageIdx to finalBlocks)
                         }
+                    }
+                    if (translationCanBeCached) {
                         // Kalıcı önbellek: uygulama yeniden açıldığında beklemeden gösterilir.
+                        // Kısmi sonuçlar kalıcı cache'e yazılmaz; sonraki açılışta sayfa yeniden denenir.
                         persistTranslatedPage(pageIdx, finalBlocks, maskedBitmap)
                     }
                     if (translationCanBeCached) {

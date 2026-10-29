@@ -27,6 +27,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -405,6 +407,12 @@ class TranslationService(
     private fun isPpOcrEngine(engine: String): Boolean =
         engine.equals("PP-OCRv5", ignoreCase = true)
 
+    suspend fun prewarmOcrEngine(ocrEngine: String) {
+        if (isPpOcrEngine(ocrEngine)) {
+            ppOcrV5Engine.prewarm()
+        }
+    }
+
     private suspend fun performOcr(
         bitmap: Bitmap,
         originLanguage: String,
@@ -708,6 +716,7 @@ class TranslationService(
             }
             val ppResults = mutableListOf<RectAndText>()
             for (region in regions) {
+                currentCoroutineContext().ensureActive()
                 ppResults.addAll(
                     ppOcrV5Engine.recognizeBlock(bitmap, region, originLanguage).map {
                         RectAndText(it.rect, cleanOcrArtifacts(it.text, originLanguage))

@@ -9,6 +9,8 @@ import android.graphics.Matrix
 import android.graphics.Rect
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -56,6 +58,14 @@ class PpOcrV5Engine(context: Context) {
 
     fun isReady(): Boolean = (session != null && dictionary != null) || ensureInitialized()
 
+    /**
+     * Loads the recognizer ahead of the first page so model extraction and ORT
+     * session creation do not block the translation pipeline.
+     */
+    suspend fun prewarm(): Boolean = withContext(Dispatchers.IO) {
+        ensureInitialized()
+    }
+
     suspend fun recognizeBlock(
         bitmap: Bitmap,
         region: Rect,
@@ -68,6 +78,7 @@ class PpOcrV5Engine(context: Context) {
 
         val results = ArrayList<TranslationService.RectAndText>(lines.size)
         for (line in lines) {
+            currentCoroutineContext().ensureActive()
             val text = recognizeLine(bitmap, line.rect, line.vertical)
             if (!text.isNullOrBlank()) {
                 results.add(TranslationService.RectAndText(line.rect, text))
