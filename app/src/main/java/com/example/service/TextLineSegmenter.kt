@@ -77,7 +77,8 @@ class TextLineSegmenter {
         }
 
         val threshold = otsuThreshold(gray)
-        val backgroundIsLight = borderMedian(gray, w, h) >= threshold
+        val lightCount = gray.count { it >= threshold }
+        val backgroundIsLight = lightCount >= gray.size - lightCount
         val inkMask = BooleanArray(gray.size) { index ->
             if (backgroundIsLight) gray[index] < threshold else gray[index] > threshold
         }
@@ -97,9 +98,9 @@ class TextLineSegmenter {
             val horizontalScore = scoreLines(horizontalLines, cleanedMask, w, h, vertical = false, cropRect = cropRect)
             val verticalScore = scoreLines(verticalLines, cleanedMask, w, h, vertical = true, cropRect = cropRect)
             val aspectBias = when {
-                h > w * 1.20f -> 0.35
-                w > h * 1.20f -> -0.35
-                else -> 0.0
+                h >= w * 0.90f -> 0.55f
+                w > h * 1.30f -> -0.55f
+                else -> 0.0f
             }
             if (verticalLines.isNotEmpty() && verticalScore + aspectBias >= horizontalScore) {
                 verticalLines
@@ -161,21 +162,6 @@ class TextLineSegmenter {
         return bestThreshold.coerceIn(1, 254)
     }
 
-    private fun borderMedian(gray: IntArray, w: Int, h: Int): Int {
-        if (w <= 0 || h <= 0) return 255
-        val values = ArrayList<Int>(w * 2 + h * 2)
-        for (x in 0 until w) {
-            values.add(gray[x])
-            values.add(gray[(h - 1) * w + x])
-        }
-        for (y in 0 until h) {
-            values.add(gray[y * w])
-            values.add(gray[y * w + w - 1])
-        }
-        values.sort()
-        return values[values.size / 2]
-    }
-
     private data class ComponentStats(
         val area: Int,
         val left: Int,
@@ -231,6 +217,7 @@ class TextLineSegmenter {
         }
 
         val keep = BooleanArray(components.size)
+        val cropArea = w.toLong() * h
         val minArea = 2
         for (index in components.indices) {
             val component = components[index]
@@ -238,8 +225,16 @@ class TextLineSegmenter {
             val componentHeight = component.bottom - component.top + 1
             val isLongBorderLine = (componentWidth > w * 0.80f && componentHeight <= 3) ||
                 (componentHeight > h * 0.80f && componentWidth <= 3)
-            val isBackgroundBlob = component.area > (w * h * 0.45f)
-            keep[index] = component.area >= minArea && !isLongBorderLine && !isBackgroundBlob
+            val isBackgroundBlob = component.area.toLong() > cropArea / 5
+            val touchesEdge = component.left <= 0 || component.top <= 0 ||
+                component.right >= w - 1 || component.bottom >= h - 1
+            val isEdgeArtwork = touchesEdge && (
+                component.area.toLong() > cropArea / 1000 ||
+                    componentWidth > w * 0.40f ||
+                    componentHeight > h * 0.40f
+                )
+            keep[index] = component.area >= minArea && !isLongBorderLine &&
+                !isBackgroundBlob && !isEdgeArtwork
         }
 
         val cleaned = BooleanArray(mask.size)
@@ -291,8 +286,8 @@ class TextLineSegmenter {
                 }
             }
             if (right < left || pixels < 8 || right - left < 4 || y2 - y1 < 2) continue
-            val padX = 2
-            val padY = 1
+            val padX = 4
+            val padY = 2
             val rect = Rect(
                 cropRect.left + (left - padX).coerceAtLeast(0),
                 cropRect.top + (y1 - padY).coerceAtLeast(0),
@@ -343,8 +338,8 @@ class TextLineSegmenter {
                 }
             }
             if (bottom < top || pixels < 8 || bottom - top < 4 || x2 - x1 < 2) continue
-            val padX = 1
-            val padY = 2
+            val padX = 2
+            val padY = 4
             val rect = Rect(
                 cropRect.left + (x1 - padX).coerceAtLeast(0),
                 cropRect.top + (top - padY).coerceAtLeast(0),

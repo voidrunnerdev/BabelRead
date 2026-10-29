@@ -38,7 +38,13 @@ class PpOcrV5Engine(context: Context) {
         private const val REC_HEIGHT = 48
         private const val MIN_REC_WIDTH = 320
         private const val MAX_REC_WIDTH = 3200
+        private const val MIN_LINE_CONFIDENCE = 0.65f
     }
+
+    private data class LineResult(
+        val text: String,
+        val confidence: Float
+    )
 
     private val appContext = context.applicationContext
     private val lineSegmenter = TextLineSegmenter()
@@ -79,9 +85,13 @@ class PpOcrV5Engine(context: Context) {
         val results = ArrayList<TranslationService.RectAndText>(lines.size)
         for (line in lines) {
             currentCoroutineContext().ensureActive()
-            val text = recognizeLine(bitmap, line.rect, line.vertical)
-            if (!text.isNullOrBlank()) {
-                results.add(TranslationService.RectAndText(line.rect, text))
+            val recognized = recognizeLine(bitmap, line.rect, line.vertical) ?: continue
+            if (recognized.confidence < MIN_LINE_CONFIDENCE) {
+                Log.d(TAG, "PP-OCRv5 rejected low-confidence line: ${recognized.confidence}")
+                continue
+            }
+            if (recognized.text.isNotBlank()) {
+                results.add(TranslationService.RectAndText(line.rect, recognized.text))
             }
         }
         results
@@ -97,7 +107,7 @@ class PpOcrV5Engine(context: Context) {
         bitmap: Bitmap,
         rect: Rect,
         vertical: Boolean
-    ): String? = sessionMutex.withLock {
+    ): LineResult? = sessionMutex.withLock {
         val safeRect = Rect(rect)
         if (!safeRect.intersect(0, 0, bitmap.width, bitmap.height)) return@withLock null
         if (safeRect.width() < 4 || safeRect.height() < 4) return@withLock null
@@ -129,7 +139,7 @@ class PpOcrV5Engine(context: Context) {
         }
     }
 
-    private fun runRecognition(bitmap: Bitmap): String? {
+    private fun runRecognition(bitmap: Bitmap): LineResult? {
         val session = session ?: return null
         val dictionary = dictionary ?: return null
         if (bitmap.width <= 0 || bitmap.height <= 0) return null
@@ -190,9 +200,11 @@ class PpOcrV5Engine(context: Context) {
         timesteps: Int,
         classCount: Int,
         dictionary: List<String>
-    ): String {
+    ): LineResult {
         val builder = StringBuilder()
         var lastIndex = -1
+        var confidenceSum = 0.0
+        var confidenceCount = 0
         for (t in 0 until timesteps) {
             val base = t * classCount
             var bestIndex = 0
@@ -205,14 +217,26 @@ class PpOcrV5Engine(context: Context) {
                 }
             }
             if (bestIndex != 0 && bestIndex != lastIndex) {
-                when {
-                    bestIndex <= dictionary.size -> builder.append(dictionary[bestIndex - 1])
-                    bestIndex == dictionary.size + 1 -> builder.append(' ')
+                val token = when {
+                    bestIndex <= dictionary.size -> dictionary[bestIndex - 1]
+                    bestIndex == dictionary.size + 1 -> " "
+                    else -> null
+                }
+                if (token != null) {
+                    builder.append(token)
+                    confidenceSum += bestValue
+                    confidenceCount++
                 }
             }
             lastIndex = bestIndex
         }
-        return builder.toString().trim()
+        val text = builder.toString().trim()
+        val confidence = if (confidenceCount > 0) {
+            (confidenceSum / confidenceCount).toFloat()
+        } else {
+            0f
+        }
+        return LineResult(text, confidence)
     }
 
     private fun ensureInitialized(): Boolean {

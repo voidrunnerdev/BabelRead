@@ -719,8 +719,18 @@ class TranslationService(
             val ppResults = mutableListOf<RectAndText>()
             for (region in regions) {
                 currentCoroutineContext().ensureActive()
+                if (region.isEmpty) continue
+                val marginX = max(4, (region.width() * 0.04f).toInt())
+                val marginY = max(4, (region.height() * 0.04f).toInt())
+                val expanded = Rect(
+                    (region.left - marginX).coerceAtLeast(0),
+                    (region.top - marginY).coerceAtLeast(0),
+                    (region.right + marginX).coerceAtMost(bitmap.width),
+                    (region.bottom + marginY).coerceAtMost(bitmap.height)
+                )
+                if (expanded.width() < 8 || expanded.height() < 8) continue
                 ppResults.addAll(
-                    ppOcrV5Engine.recognizeBlock(bitmap, region, originLanguage).map {
+                    ppOcrV5Engine.recognizeBlock(bitmap, expanded, originLanguage).map {
                         RectAndText(it.rect, cleanOcrArtifacts(it.text, originLanguage))
                     }
                 )
