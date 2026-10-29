@@ -407,9 +407,11 @@ class TranslationService(
     private fun isPpOcrEngine(engine: String): Boolean =
         engine.equals("PP-OCRv5", ignoreCase = true)
 
-    suspend fun prewarmOcrEngine(ocrEngine: String) {
-        if (isPpOcrEngine(ocrEngine)) {
+    suspend fun prewarmOcrEngine(ocrEngine: String): Boolean {
+        return if (isPpOcrEngine(ocrEngine)) {
             ppOcrV5Engine.prewarm()
+        } else {
+            false
         }
     }
 

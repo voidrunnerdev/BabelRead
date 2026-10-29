@@ -1539,8 +1539,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         ppOcrPrewarmJob = viewModelScope.launch(Dispatchers.IO + viewModelExceptionHandler) {
             try {
                 if (preferences.ocrEngine.first().equals("PP-OCRv5", ignoreCase = true)) {
-                    translationService.prewarmOcrEngine("PP-OCRv5")
-                    Log.d("TR", "PP-OCRv5 prewarm tamamlandı")
+                    val ready = translationService.prewarmOcrEngine("PP-OCRv5")
+                    if (ready) {
+                        Log.d("TR", "PP-OCRv5 prewarm tamamlandı")
+                    } else {
+                        Log.w("TR", "PP-OCRv5 prewarm tamamlanamadı")
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e

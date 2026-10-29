@@ -14,7 +14,8 @@
 ## P0 hedefleri
 
 - [x] PP-OCRv5 modelini ilk sayfa OCR'ından önce arka planda yükle (prewarm).
-- [x] PP model yükleme/çıkarımı çeviri sırasını kilitlemesin.
+- [x] PP model yüklemesi ilk sayfanın OCR süresine eklenmesin.
+- [ ] Native `session.run` takılırsa çeviri sırasını kilitlemeyen ayrı işçi/fallback.
 - [x] PP OCR döngülerinde iptal kontrolleri bulunsun.
 - [x] Balon ön-taraması çeviri cursor'ına bağımlı kalmasın.
 - [x] Tek balon hatası tüm sayfayı görünmez yapmasın; başarılı balonlar gösterilsin.
@@ -36,3 +37,11 @@
 3. Yeşil build ve `BabelRead-release-apk` artifact'ini doğrula.
 4. APK'yı telefona kur; PP-OCRv5 ile ilk sayfa ve sonraki sayfaları test et.
 5. Sonuçları bu dosyaya not et.
+
+## İnceleme notu (commit 71556d4)
+
+- Prewarm, iptal kontrolleri, kısmi sayfa gösterimi ve PP bölge fallback'i eklendi.
+- Ancak `PpOcrV5Engine.recognizeLine` içindeki native `session.run` hâlâ iptal edilemiyor; model yükleme öne alındı ama çıkarım gerçekten takılırsa çeviri sırası yine bekleyebilir.
+- `startDetectionPrefetch` hâlâ `translationPipelineCursor` ile `maxOf` üzerinden ilişkili.
+- Kısmi sayfada başarısız balonun orijinal metni, başarılı komşu maskesiyle örtüşürse maskelenme riski var.
+- CI run `40862696715` inceleme sırasında iptal edildi; APK üretilmedi.
