@@ -2387,12 +2387,23 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 } ?: metadataOriginLang
 
                 val originCode = TranslationLanguages.codeForDisplayName(originLang)
+                // Yerel arşivlerde kaynak dil "Yerel" olarak saklanır ve kod
+                // karşılığı yoktur. PP-OCRv5 bu sayfaları Japonca varsayarak
+                // dikey metin segmentasyonunu çalıştırır; gerçek dil OCR
+                // sonrasında detectRealLanguage ile düzeltilir.
+                val localUnknownOrigin = originLang.equals("Yerel", ignoreCase = true) ||
+                    originLang.equals("Bilinmiyor", ignoreCase = true)
+                val ppOriginLang = when {
+                    originCode == "en" || originCode == "ja" -> originLang
+                    localUnknownOrigin -> "Japonca"
+                    else -> null
+                }
                 if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
                     if (originCode == "zh" || originCode == "ko") {
                         Log.d("TR", "PP-OCRv5: $originLang kaynağı sessizce atlandı (sayfa=$pageIdx)")
                         return@launch
                     }
-                    if (originCode != "en" && originCode != "ja") {
+                    if (ppOriginLang == null) {
                         emitTranslationNotice("PP-OCRv5 yalnızca İngilizce ve Japonca kaynakları destekler.")
                         return@launch
                     }
@@ -2459,7 +2470,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             Log.d("TR", "Bölge OCR başladı: sayfa=$pageIdx, ${bubbleOcrRegions.size} bölge (sayfa alanının %${regionArea * 100 / pageArea}'si)")
                             ocrExecutionMutex.withLock {
                                 withTimeoutOrNull(ocrTimeoutMs) {
-                                    translationService.performRegionOcr(bitmap, bubbleOcrRegions, originLang, ocrEngine)
+                                    translationService.performRegionOcr(
+                                        bitmap,
+                                        bubbleOcrRegions,
+                                        ppOriginLang ?: originLang,
+                                        ocrEngine
+                                    )
                                 }
                             }
                         }
@@ -3014,7 +3030,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         val detectedLang = if (forcedSourceCode != null) {
                             originLang
                         } else {
-                            translationService.detectRealLanguage(ocrBlocks, originLang)
+                            val ocrDefaultLang = if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
+                                ppOriginLang ?: originLang
+                            } else {
+                                originLang
+                            }
+                            translationService.detectRealLanguage(ocrBlocks, ocrDefaultLang)
                         }
                         val gemModel = preferences.geminiModel.first()
                         val engineIsMlKit = prefEngine.trim().let {

@@ -39,6 +39,7 @@ class PpOcrV5Engine(context: Context) {
         private const val MIN_REC_WIDTH = 320
         private const val MAX_REC_WIDTH = 3200
         private const val MIN_LINE_CONFIDENCE = 0.65f
+        private const val MIN_CJK_LINE_CONFIDENCE = 0.45f
     }
 
     private data class LineResult(
@@ -77,31 +78,66 @@ class PpOcrV5Engine(context: Context) {
         region: Rect,
         originLanguage: String
     ): List<TranslationService.RectAndText> = withContext(Dispatchers.Default) {
-        if (!supportsLanguage(originLanguage)) return@withContext emptyList()
+        val primaryLanguage = normalizeLanguage(originLanguage) ?: return@withContext emptyList()
         if (!ensureInitialized()) return@withContext emptyList()
-        val lines = lineSegmenter.segment(bitmap, region, originLanguage)
-        if (lines.isEmpty()) return@withContext emptyList()
 
-        val results = ArrayList<TranslationService.RectAndText>(lines.size)
-        for (line in lines) {
-            currentCoroutineContext().ensureActive()
-            val recognized = recognizeLine(bitmap, line.rect, line.vertical) ?: continue
-            if (recognized.confidence < MIN_LINE_CONFIDENCE) {
-                Log.d(TAG, "PP-OCRv5 rejected low-confidence line: ${recognized.confidence}")
-                continue
+        suspend fun recognize(language: String): List<TranslationService.RectAndText> {
+            val lines = lineSegmenter.segment(bitmap, region, language)
+            if (lines.isEmpty()) return emptyList()
+            val results = ArrayList<TranslationService.RectAndText>(lines.size)
+            for (line in lines) {
+                currentCoroutineContext().ensureActive()
+                val recognized = recognizeLine(bitmap, line.rect, line.vertical) ?: continue
+                if (!acceptsLine(recognized, language)) {
+                    Log.d(TAG, "PP-OCRv5 rejected low-confidence line: ${recognized.confidence} ($language)")
+                    continue
+                }
+                if (recognized.text.isNotBlank()) {
+                    results.add(TranslationService.RectAndText(line.rect, recognized.text))
+                }
             }
-            if (recognized.text.isNotBlank()) {
-                results.add(TranslationService.RectAndText(line.rect, recognized.text))
-            }
+            return results
         }
-        results
+
+        val primary = recognize(primaryLanguage)
+        if (primary.isNotEmpty()) return@withContext primary
+
+        // Source language may be unset, wrong, or the page may use the other
+        // writing direction. Retry once with the other supported direction
+        // before giving up on the block; this costs only an empty block.
+        val fallbackLanguage = if (isJapanese(primaryLanguage)) "İngilizce" else "Japonca"
+        val fallback = recognize(fallbackLanguage)
+        if (fallback.isNotEmpty()) {
+            Log.d(TAG, "PP-OCRv5 recovered empty block with $fallbackLanguage")
+        }
+        fallback
     }
 
-    private fun supportsLanguage(originLanguage: String): Boolean =
+    private fun acceptsLine(line: LineResult, language: String): Boolean {
+        if (line.text.isBlank()) return false
+        if (line.confidence >= MIN_LINE_CONFIDENCE) return true
+        if (!isJapanese(language)) return false
+        val hasCjk = line.text.any { ch ->
+            ch.code in 0x3040..0x9FAF || ch.code in 0xAC00..0xD7AF
+        }
+        return hasCjk && line.confidence >= MIN_CJK_LINE_CONFIDENCE
+    }
+
+    private fun isJapanese(language: String): Boolean =
+        language.equals("Japonca", ignoreCase = true) ||
+            language.equals("Japanese", ignoreCase = true)
+
+    private fun normalizeLanguage(originLanguage: String): String? = when {
         originLanguage.equals("İngilizce", ignoreCase = true) ||
-            originLanguage.equals("Japonca", ignoreCase = true) ||
-            originLanguage.equals("English", ignoreCase = true) ||
-            originLanguage.equals("Japanese", ignoreCase = true)
+            originLanguage.equals("English", ignoreCase = true) -> "İngilizce"
+        originLanguage.equals("Japonca", ignoreCase = true) ||
+            originLanguage.equals("Japanese", ignoreCase = true) -> "Japonca"
+        originLanguage.equals("Yerel", ignoreCase = true) ||
+            originLanguage.equals("Bilinmiyor", ignoreCase = true) ||
+            originLanguage.equals("Otomatik", ignoreCase = true) ||
+            originLanguage.equals("Auto", ignoreCase = true) -> "Japonca"
+        else -> null
+    }
 
     private suspend fun recognizeLine(
         bitmap: Bitmap,
