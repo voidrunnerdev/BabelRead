@@ -76,9 +76,9 @@ object CloudflareDetector {
         val lower = body.lowercase()
         return lower.contains("just a moment") ||
             lower.contains("cf-chl") ||
-            lower.contains("challenge-platform") ||
             lower.contains("__cf_chl") ||
-            lower.contains("attention required")
+            lower.contains("attention required") ||
+            lower.contains("checking your browser")
     }
 }
 
