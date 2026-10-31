@@ -112,6 +112,24 @@ data class PlacedOverlayBox(
     val boldBoost: Boolean = false
 )
 
+// Detector boxes are rectangles around rounded balloons. The largest
+// axis-aligned rectangle that is guaranteed to fit inside the inscribed
+// ellipse is about 70% of the detector box (1/sqrt(2)). Fitting text to the
+// full rectangle makes the first and last lines visibly spill outside the
+// balloon; always use this safe interior for layout and expansion.
+private fun bubbleTextSafeRect(bubble: Rect, fill: Float = 0.35f): Rect? {
+    if (bubble.isEmpty) return null
+    val centerX = bubble.exactCenterX()
+    val centerY = bubble.exactCenterY()
+    val safe = Rect(
+        (centerX - bubble.width() * fill).toInt().coerceAtLeast(bubble.left),
+        (centerY - bubble.height() * fill).toInt().coerceAtLeast(bubble.top),
+        (centerX + bubble.width() * fill).toInt().coerceAtMost(bubble.right),
+        (centerY + bubble.height() * fill).toInt().coerceAtMost(bubble.bottom)
+    )
+    return safe.takeUnless { it.isEmpty }
+}
+
 // Birbirine yakın/değen iki çeviri kutusu varsa, iki kutuyu da kesişim
 // bölgesinin orta hattına kadar geri çekerek birbirlerinin üzerine
 // çökmelerini engeller. Kutular orijinal boyutlarının %35'inden fazla
@@ -1201,7 +1219,15 @@ fun ReaderPageContainer(
                         // metin yerleşiminden önce ayrıştırılır ki iki çeviri
                         // birbirinin üzerine çökmesin.
                         val preparedBoxes = translatedBlocks.map { block ->
-                            if (block.isBubble) Rect(block.layoutBox) else Rect(block.boundingBox)
+                            if (!block.isBubble) {
+                                Rect(block.boundingBox)
+                            } else {
+                                val layout = Rect(block.layoutBox)
+                                bubbleTextSafeRect(block.bubbleBox)?.let { safe ->
+                                    val clamped = Rect(layout)
+                                    if (clamped.intersect(safe)) clamped else Rect(safe)
+                                } ?: layout
+                            }
                         }
                         val boldBoostFlags = separateNearbyBoxes(
                             preparedBoxes,
@@ -1266,18 +1292,7 @@ fun ReaderPageContainer(
                                     // container for expansion; retain the OCR-derived layout box.
                                     return Rect(targetBox)
                                 }
-                                val minSide = minOf(bubble.width(), bubble.height()).coerceAtLeast(0)
-                                val margin = (minSide * 0.04f).toInt()
-                                    .coerceAtMost(minSide / 4)
-                                    .coerceAtLeast(0)
-                                val inset = Rect(
-                                    bubble.left + margin,
-                                    bubble.top + margin,
-                                    bubble.right - margin,
-                                    bubble.bottom - margin
-                                )
-                                if (inset.isEmpty) return Rect(targetBox)
-                                return Rect(inset).apply { union(targetBox) }
+                                return bubbleTextSafeRect(bubble) ?: Rect(targetBox)
                             }
 
                             fun optimize(
@@ -1399,22 +1414,16 @@ fun ReaderPageContainer(
                                                 expanded.width(),
                                                 requiredWidthPx,
                                                 ceil(expanded.width() * 1.30f).toInt()
-                                            ).coerceAtMost(maxOf(safeBubble.width(), expanded.width()))
+                                            ).coerceAtMost(safeBubble.width())
                                             val nextHeight = maxOf(
                                                 expanded.height(),
                                                 requiredHeightPx,
                                                 ceil(expanded.height() * 1.30f).toInt()
-                                            ).coerceAtMost(maxOf(safeBubble.height(), expanded.height()))
+                                            ).coerceAtMost(safeBubble.height())
                                             val left = (anchorX - nextWidth / 2f).roundToInt()
-                                                .coerceIn(
-                                                    safeBubble.left,
-                                                    maxOf(safeBubble.left, safeBubble.right - nextWidth)
-                                                )
+                                                .coerceIn(safeBubble.left, safeBubble.right - nextWidth)
                                             val top = (anchorY - nextHeight / 2f).roundToInt()
-                                                .coerceIn(
-                                                    safeBubble.top,
-                                                    maxOf(safeBubble.top, safeBubble.bottom - nextHeight)
-                                                )
+                                                .coerceIn(safeBubble.top, safeBubble.bottom - nextHeight)
                                             val next = Rect(left, top, left + nextWidth, top + nextHeight)
                                             if (next == expanded) break
                                             expanded = next
@@ -1427,9 +1436,7 @@ fun ReaderPageContainer(
                                         // translation, try the complete safe balloon area. The
                                         // OCR box is an anchor, not a hard size limit for translated text.
                                         if (!opt.fitsInside) {
-                                            geo = geometryFor(
-                                                Rect(safeBubble).apply { union(expanded) }
-                                            )
+                                            geo = geometryFor(Rect(safeBubble))
                                             opt = optimize(geo)
                                         }
 

@@ -2525,9 +2525,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         val bubbleBounds: Rect = targetBox
                     )
                     val candidates = mutableListOf<BubbleCandidate>()
-                    // Modelin ham text_free/onomatopeya kutuları. Balon sınırı dar
-                    // kaldığında yerleşim alanını ve maske kapsamını büyütmek için
-                    // kullanılır (balon içinde kalan orijinal harf kalıntıları dahil).
+                    // Modelin ham text_free/onomatopeya kutuları. Bunlar yalnızca
+                    // maskeleme kapsamını genişletmek için kullanılır; balonun
+                    // yerleşim alanını büyütmek balon dışına taşmaya yol açar.
                     val pageAuxBoxes = mutableListOf<Rect>()
 
                     // Safety net: when OCR splits one balloon into several blocks,
@@ -2677,7 +2677,63 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                             }
                         }
-                        return working
+
+                        // A balloon can still end up with two OCR candidates when their
+                        // geometry does not look like adjacent fragments, yet both are
+                        // centered on the same safe layout box. Merge those candidates
+                        // before translation; otherwise both translations are drawn in
+                        // the same rectangle and overlap each other.
+                        val consolidated = mutableListOf<BubbleCandidate>()
+                        for (candidate in working) {
+                            val sameTargetIndex = consolidated.indexOfFirst { existing ->
+                                if (!sameBalloon(existing.bubbleBounds, candidate.bubbleBounds)) {
+                                    return@indexOfFirst false
+                                }
+                                val interW = (minOf(existing.targetBox.right, candidate.targetBox.right) -
+                                    maxOf(existing.targetBox.left, candidate.targetBox.left))
+                                    .coerceAtLeast(0)
+                                val interH = (minOf(existing.targetBox.bottom, candidate.targetBox.bottom) -
+                                    maxOf(existing.targetBox.top, candidate.targetBox.top))
+                                    .coerceAtLeast(0)
+                                val intersection = interW.toLong() * interH
+                                val minArea = minOf(
+                                    areaOf(existing.targetBox),
+                                    areaOf(candidate.targetBox)
+                                ).coerceAtLeast(1L)
+                                intersection.toFloat() / minArea >= 0.55f
+                            }
+                            if (sameTargetIndex < 0) {
+                                consolidated.add(candidate)
+                                continue
+                            }
+                            val existing = consolidated[sameTargetIndex]
+                            val joinedText = when {
+                                existing.text.contains(candidate.text, ignoreCase = true) -> existing.text
+                                candidate.text.contains(existing.text, ignoreCase = true) -> candidate.text
+                                else -> translationService.joinTextFragments(
+                                    existing.text,
+                                    candidate.text,
+                                    true
+                                )
+                            }
+                            consolidated[sameTargetIndex] = BubbleCandidate(
+                                targetBox = Rect(existing.targetBox).apply {
+                                    union(candidate.targetBox)
+                                },
+                                text = joinedText,
+                                textRect = Rect(existing.textRect).apply {
+                                    union(candidate.textRect)
+                                },
+                                isBubble = existing.isBubble || candidate.isBubble,
+                                isDark = existing.isDark || candidate.isDark,
+                                bubbleBounds = if (areaOf(existing.bubbleBounds) >= areaOf(candidate.bubbleBounds)) {
+                                    existing.bubbleBounds
+                                } else {
+                                    candidate.bubbleBounds
+                                }
+                            )
+                        }
+                        return consolidated
                     }
 
                     // Use the detected bubble's usable interior as the layout area. The OCR
@@ -2697,16 +2753,16 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         )
 
                         // Detector output contains rectangles, not the balloon contour.
-                        // Use an 80% ellipse inscribed in that rectangle so translated
-                        // text uses most of the balloon interior while the rounded overlay
-                        // corners still stay inside oval balloons.
+                        // Use the largest rectangle that fits inside the inscribed ellipse
+                        // (about 70% of the detector box), otherwise text at the top and
+                        // bottom lines spills outside the visible rounded bubble.
                         val centerX = bubble.exactCenterX()
                         val centerY = bubble.exactCenterY()
                         val ovalSafe = Rect(
-                            (centerX - bubble.width() * 0.40f).toInt().coerceAtLeast(bubble.left),
-                            (centerY - bubble.height() * 0.40f).toInt().coerceAtLeast(bubble.top),
-                            (centerX + bubble.width() * 0.40f).toInt().coerceAtMost(bubble.right),
-                            (centerY + bubble.height() * 0.40f).toInt().coerceAtMost(bubble.bottom)
+                            (centerX - bubble.width() * 0.35f).toInt().coerceAtLeast(bubble.left),
+                            (centerY - bubble.height() * 0.35f).toInt().coerceAtLeast(bubble.top),
+                            (centerX + bubble.width() * 0.35f).toInt().coerceAtMost(bubble.right),
+                            (centerY + bubble.height() * 0.35f).toInt().coerceAtMost(bubble.bottom)
                         )
                         if (ovalSafe.isEmpty) return null
                         val safeOval = Rect(ovalSafe)
@@ -2718,49 +2774,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             // A false or mismatched detector must not move unrelated OCR text.
                             return null
                         }
-                        // Keep this rectangle centered on the actual bubble. Its 80% width
+                        // Keep this rectangle centered on the actual bubble. Its 70% width
                         // and height let the line breaker use the balloon instead of the
                         // much smaller OCR text box.
                         val meaningfulGrowth = safeOval.width() >= anchor.width() * 1.10f &&
                             safeOval.height() >= anchor.height() * 1.10f
                         return if (meaningfulGrowth) safeOval else Rect(anchor)
-                    }
-
-                    // Algılayıcı balon kutusu balonun tamamını kapsamayabilir; bu durumda
-                    // çeviri yazısı gereğinden küçük kalıyor ve balon içinde kalan orijinal
-                    // harf parçaları (ör. kesilen kelime sonları) maskelenemiyordu.
-                    // Metnin hemen çevresine değen text_free adaylarını balon sınırına
-                    // katarak hem yerleşim alanını hem maske kapsamını genişlet.
-                    fun grownBubbleBounds(anchor: Rect, bubble: Rect): Rect {
-                        if (bubble.isEmpty || anchor.isEmpty) return bubble
-                        val padX = maxOf(14f, anchor.width() * 0.25f)
-                        val padY = maxOf(14f, anchor.height() * 0.25f)
-                        val anchorReach = Rect(
-                            (anchor.left - padX).toInt(),
-                            (anchor.top - padY).toInt(),
-                            (anchor.right + padX).toInt(),
-                            (anchor.bottom + padY).toInt()
-                        )
-                        val bubbleArea = rectArea(bubble)
-                        val anchorArea = rectArea(anchor)
-                        val baseArea = maxOf(bubbleArea, anchorArea)
-                        var result = Rect(bubble).apply { union(anchor) }
-                        for (aux in pageAuxBoxes) {
-                            if (aux.isEmpty) continue
-                            val auxArea = rectArea(aux)
-                            if (auxArea > baseArea * 2.5f) continue
-                            if (!Rect(aux).intersect(anchorReach)) continue
-                            val unioned = Rect(result).apply { union(aux) }
-                            if (rectArea(unioned) > baseArea * 3L) continue
-                            result = unioned
-                        }
-                        val pageBounds = Rect(
-                            0,
-                            0,
-                            bmpW.toInt().coerceAtLeast(1),
-                            bmpH.toInt().coerceAtLeast(1)
-                        )
-                        return if (result.intersect(pageBounds)) result else Rect(bubble)
                     }
 
                     // 3. Eşleştirme ve Çeviri Akışı
@@ -2995,7 +3014,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                             containingBubble != null -> containingBubble
                                             analysis.isBubble -> translationService.refineBubbleBounds(bitmap, textBounds, analysis.isDarkBubble)
                                             else -> textBounds
-                                        }.let { grownBubbleBounds(textBounds, it) }
+                                        }
                                     // Size bubble text from the balloon interior. The tight
                                     // text_bubble detection remains a fallback anchor, but
                                     // fitting to it left longer translations needlessly tiny.
@@ -3043,7 +3062,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     containingBubble != null -> containingBubble
                                     analysis.isBubble -> translationService.refineBubbleBounds(bitmap, cluster.rect, analysis.isDarkBubble)
                                     else -> cluster.rect
-                                }.let { grownBubbleBounds(cluster.rect, it) }
+                                }
                                 candidates.add(
                                     BubbleCandidate(
                                         targetBox = (if (finalIsBubble) {
