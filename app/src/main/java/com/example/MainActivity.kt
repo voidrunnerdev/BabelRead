@@ -9,6 +9,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -19,9 +20,7 @@ import androidx.compose.material.icons.filled.TravelExplore
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalLifecycleOwner
-import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -40,6 +39,8 @@ import com.example.i18n.AppLanguageState
 import com.example.i18n.AppLanguages
 import com.example.i18n.LocalAppLanguage
 import com.example.i18n.Text
+import com.example.ui.components.AppBottomBar
+import com.example.ui.components.AppDestination
 import com.example.ui.screens.*
 import com.example.ui.theme.MyApplicationTheme
 import com.example.viewmodel.MangaViewModel
@@ -101,91 +102,32 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val showBottomBar = currentRoute in listOf("library", "browse", "history", "settings")
+                val bottomDestinations = remember {
+                    listOf(
+                        AppDestination("library", "Kütüphane", Icons.Default.Favorite),
+                        AppDestination("browse", "Göz At", Icons.Default.TravelExplore),
+                        AppDestination("history", "Geçmiş", Icons.Default.History),
+                        AppDestination("settings", "Ayarlar", Icons.Default.Settings)
+                    )
+                }
 
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
-                    containerColor = Color(0xFF121212),
+                    containerColor = MaterialTheme.colorScheme.background,
                     contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
                     bottomBar = {
                         if (showBottomBar) {
-                            NavigationBar(
-                                containerColor = Color(0xFF161616),
-                                contentColor = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.testTag("global_bottom_nav")
-                            ) {
-                                NavigationBarItem(
-                                    selected = currentRoute == "library",
-                                    onClick = {
-                                        navController.navigate("library") {
-                                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    },
-                                    icon = { Icon(Icons.Default.Favorite, contentDescription = null) },
-                                    label = { Text("Kütüphane") },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                                        unselectedIconColor = Color.Gray,
-                                        unselectedTextColor = Color.Gray
-                                    )
-                                )
-                                NavigationBarItem(
-                                    selected = currentRoute == "browse",
-                                    onClick = {
-                                        navController.navigate("browse") {
-                                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    },
-                                    icon = { Icon(Icons.Default.TravelExplore, contentDescription = null) },
-                                    label = { Text("Göz At") },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                                        unselectedIconColor = Color.Gray,
-                                        unselectedTextColor = Color.Gray
-                                    )
-                                )
-                                NavigationBarItem(
-                                    selected = currentRoute == "history",
-                                    onClick = {
-                                        navController.navigate("history") {
-                                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    },
-                                    icon = { Icon(Icons.Default.History, contentDescription = null) },
-                                    label = { Text("Geçmiş") },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                                        unselectedIconColor = Color.Gray,
-                                        unselectedTextColor = Color.Gray
-                                    )
-                                )
-                                NavigationBarItem(
-                                    selected = currentRoute == "settings",
-                                    onClick = {
-                                        navController.navigate("settings") {
-                                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                                            launchSingleTop = true
-                                            restoreState = true
-                                        }
-                                    },
-                                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                                    label = { Text("Ayarlar") },
-                                    colors = NavigationBarItemDefaults.colors(
-                                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                                        unselectedIconColor = Color.Gray,
-                                        unselectedTextColor = Color.Gray
-                                    )
-                                )
-                            }
+                            AppBottomBar(
+                                destinations = bottomDestinations,
+                                currentRoute = currentRoute,
+                                onNavigate = { route ->
+                                    navController.navigate(route) {
+                                        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                        launchSingleTop = true
+                                        restoreState = true
+                                    }
+                                }
+                            )
                         }
                     }
                 ) { innerPadding ->
@@ -194,7 +136,8 @@ class MainActivity : ComponentActivity() {
                         startDestination = "library",
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(bottom = innerPadding.calculateBottomPadding())
+                            .consumeWindowInsets(innerPadding)
+                            .padding(innerPadding)
                     ) {
                         composable("library") {
                             LibraryScreen(
