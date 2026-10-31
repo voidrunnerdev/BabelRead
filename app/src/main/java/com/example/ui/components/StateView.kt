@@ -65,7 +65,7 @@ fun StateView(
             style = MaterialTheme.typography.titleLarge,
             color = MaterialTheme.colorScheme.onBackground,
             textAlign = TextAlign.Center,
-            maxLines = 2,
+            maxLines = 4,
             overflow = TextOverflow.Ellipsis
         )
         if (message != null) {

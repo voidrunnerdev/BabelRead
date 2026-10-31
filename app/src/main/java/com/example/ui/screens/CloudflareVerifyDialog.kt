@@ -17,24 +17,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import com.example.i18n.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.net.WebViewCookieJar
 import com.example.data.parser.NetworkManager
+import com.example.i18n.Text
+import com.example.ui.theme.AppRadius
+import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
 
 @Composable
@@ -51,37 +48,36 @@ fun CloudflareVerifyDialog(
             modifier = Modifier
                 .fillMaxWidth(0.95f)
                 .fillMaxHeight(0.85f),
-            shape = RoundedCornerShape(16.dp),
-            color = Color(0xFF1E1E1E)
+            shape = RoundedCornerShape(AppRadius.lg),
+            color = MaterialTheme.colorScheme.surface
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                Column(modifier = Modifier.padding(16.dp)) {
+                Column(modifier = Modifier.padding(AppSpacing.lg)) {
                     Text(
                         text = "Cloudflare Doğrulaması",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(AppSpacing.xs))
                     Text(
                         text = challenge.host,
-                        color = Color(0xFF9E9E9E),
-                        fontSize = 13.sp
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(AppSpacing.sm))
                     Text(
                         text = "Site bot koruması istiyor. Doğrulama çoğu zaman otomatik tamamlanır; gerekirse aşağıdaki kutucuğu işaretleyip 'Doğruladım' düğmesine dokunun.",
-                        color = Color(0xFFBDBDBD),
-                        fontSize = 12.sp
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFF0E0E0E))
+                        .padding(horizontal = AppSpacing.md)
+                        .clip(RoundedCornerShape(AppRadius.sm))
+                        .background(MaterialTheme.colorScheme.background)
                 ) {
                     AndroidView(
                         modifier = Modifier.fillMaxSize(),
@@ -128,22 +124,19 @@ fun CloudflareVerifyDialog(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
+                        .padding(AppSpacing.lg),
                     horizontalArrangement = Arrangement.End,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TextButton(onClick = onCancel) {
-                        Text("İptal", color = Color(0xFF9E9E9E))
+                        Text("İptal", color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(AppSpacing.sm))
                     Button(
                         onClick = {
                             CookieManager.getInstance().flush()
                             onVerified()
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary
-                        )
+                        }
                     ) {
                         Text("Doğruladım, Devam Et")
                     }
