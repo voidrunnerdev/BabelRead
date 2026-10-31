@@ -146,7 +146,7 @@ object StaticTextLayoutOptimizer {
             val firstLineW = if (layout.lineCount > 0) layout.getLineWidth(0) else 0f
             val lastLineW = if (layout.lineCount > 1) layout.getLineWidth(layout.lineCount - 1) else 0f
 
-            val edgeWidthRatio = if (isOvalBubble && layout.lineCount > 0) {
+            val edgeWidthRatio = if (isOvalBubble && layout.lineCount > 1) {
                 val widePenalty = ((aspectRatio - 0.75f) / 1.75f).coerceIn(0f, 1f)
                 (0.94f - widePenalty * 0.16f).coerceIn(0.78f, 0.94f)
             } else {
@@ -170,7 +170,7 @@ object StaticTextLayoutOptimizer {
                 }
             }
 
-            val ovalRequiredWidthPx = if (isOvalBubble && layout.lineCount > 0) {
+            val ovalRequiredWidthPx = if (isOvalBubble && layout.lineCount > 1) {
                 max(firstLineW, lastLineW) / edgeWidthRatio
             } else {
                 0f

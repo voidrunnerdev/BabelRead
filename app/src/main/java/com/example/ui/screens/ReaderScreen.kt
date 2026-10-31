@@ -117,14 +117,41 @@ data class PlacedOverlayBox(
 // çökmelerini engeller. Kutular orijinal boyutlarının %35'inden fazla
 // küçültülmez. Küçültülen bloklar işaretlenir; bu blokların yazıları
 // kalın çizilerek küçülen alanda okunabilirlik telafi edilir.
-private fun separateNearbyBoxes(rects: List<Rect>): BooleanArray {
+private fun separateNearbyBoxes(
+    rects: List<Rect>,
+    isBubble: List<Boolean>,
+    anchorRects: List<Rect>
+): BooleanArray {
     val boosted = BooleanArray(rects.size)
     if (rects.size < 2) return boosted
     val margin = 3
     val originalWidths = IntArray(rects.size) { rects[it].width() }
     val originalHeights = IntArray(rects.size) { rects[it].height() }
+
+    fun minWidthFromLeft(index: Int): Int {
+        val anchor = anchorRects.getOrNull(index) ?: return 0
+        return anchor.right - rects[index].left
+    }
+
+    fun minWidthFromRight(index: Int): Int {
+        val anchor = anchorRects.getOrNull(index) ?: return 0
+        return rects[index].right - anchor.left
+    }
+
+    fun minHeightFromTop(index: Int): Int {
+        val anchor = anchorRects.getOrNull(index) ?: return 0
+        return anchor.bottom - rects[index].top
+    }
+
+    fun minHeightFromBottom(index: Int): Int {
+        val anchor = anchorRects.getOrNull(index) ?: return 0
+        return rects[index].bottom - anchor.top
+    }
+
     for (i in rects.indices) {
+        if (!isBubble.getOrElse(i) { false }) continue
         for (j in i + 1 until rects.size) {
+            if (!isBubble.getOrElse(j) { false }) continue
             val a = rects[i]
             val b = rects[j]
             if (a.isEmpty || b.isEmpty) continue
@@ -135,6 +162,16 @@ private fun separateNearbyBoxes(rects: List<Rect>): BooleanArray {
             val interW = interRight - interLeft
             val interH = interBottom - interTop
             if (interW <= 0 || interH <= 0) continue
+
+            val aArea = a.width().toLong() * a.height().toLong()
+            val bArea = b.width().toLong() * b.height().toLong()
+            val interArea = interW.toLong() * interH.toLong()
+            val unionArea = aArea + bArea - interArea
+            val overlapRatio = if (unionArea > 0L) interArea.toFloat() / unionArea else 1f
+            val aContained = interArea >= aArea * 9L / 10L
+            val bContained = interArea >= bArea * 9L / 10L
+            if (aContained || bContained || overlapRatio >= 0.5f) continue
+
             if (interW <= interH) {
                 // Dikey bölme: soldaki kutunun sağ kenarı, sağdakinin sol kenarı
                 // kesişimin orta hattına çekilir.
@@ -145,8 +182,14 @@ private fun separateNearbyBoxes(rects: List<Rect>): BooleanArray {
                 val mid = interLeft + interW / 2
                 val newLeftRight = mid - margin
                 val newRightLeft = mid + margin
-                val minLeftWidth = max(28, (originalWidths[li] * 0.35f).toInt())
-                val minRightWidth = max(28, (originalWidths[ri] * 0.35f).toInt())
+                val minLeftWidth = max(
+                    max(28, (originalWidths[li] * 0.35f).toInt()),
+                    minWidthFromLeft(li)
+                )
+                val minRightWidth = max(
+                    max(28, (originalWidths[ri] * 0.35f).toInt()),
+                    minWidthFromRight(ri)
+                )
                 if (newLeftRight - leftBox.left >= minLeftWidth &&
                     rightBox.right - newRightLeft >= minRightWidth
                 ) {
@@ -165,8 +208,14 @@ private fun separateNearbyBoxes(rects: List<Rect>): BooleanArray {
                 val mid = interTop + interH / 2
                 val newTopBottom = mid - margin
                 val newBottomTop = mid + margin
-                val minTopHeight = max(28, (originalHeights[ti] * 0.35f).toInt())
-                val minBottomHeight = max(28, (originalHeights[bi] * 0.35f).toInt())
+                val minTopHeight = max(
+                    max(28, (originalHeights[ti] * 0.35f).toInt()),
+                    minHeightFromTop(ti)
+                )
+                val minBottomHeight = max(
+                    max(28, (originalHeights[bi] * 0.35f).toInt()),
+                    minHeightFromBottom(bi)
+                )
                 if (newTopBottom - topBox.top >= minTopHeight &&
                     bottomBox.bottom - newBottomTop >= minBottomHeight
                 ) {
@@ -1128,6 +1177,9 @@ fun ReaderPageContainer(
                     )
                 }
 
+                var debugPlacedOverlays by remember(pageIndex, translatedBlocks) {
+                    mutableStateOf(emptyList<PlacedOverlayBox>())
+                }
                 if (translationActive && translatedBlocks.isNotEmpty()) {
                     val userAlpha = (opacity / 100f).coerceIn(0.20f, 1.0f)
                     val placedOverlays by produceState(
@@ -1151,7 +1203,11 @@ fun ReaderPageContainer(
                         val preparedBoxes = translatedBlocks.map { block ->
                             if (block.isBubble) Rect(block.layoutBox) else Rect(block.boundingBox)
                         }
-                        val boldBoostFlags = separateNearbyBoxes(preparedBoxes)
+                        val boldBoostFlags = separateNearbyBoxes(
+                            preparedBoxes,
+                            translatedBlocks.map { it.isBubble },
+                            translatedBlocks.map { Rect(it.boundingBox) }
+                        )
                         val placements = translatedBlocks.withIndex().mapNotNull { (blockIndex, block) ->
                             val targetBox = preparedBoxes[blockIndex]
                             val boldBoost = boldBoostFlags[blockIndex]
@@ -1221,20 +1277,7 @@ fun ReaderPageContainer(
                                     bubble.bottom - margin
                                 )
                                 if (inset.isEmpty) return Rect(targetBox)
-
-                                // Match the 80% oval budget used when the initial box is
-                                // created (MangaViewModel.centeredLayoutBox), but allow the
-                                // text to grow into that whole area.
-                                val centerX = bubble.exactCenterX()
-                                val centerY = bubble.exactCenterY()
-                                val ovalSafe = Rect(
-                                    (centerX - bubble.width() * 0.40f).toInt().coerceAtLeast(bubble.left),
-                                    (centerY - bubble.height() * 0.40f).toInt().coerceAtLeast(bubble.top),
-                                    (centerX + bubble.width() * 0.40f).toInt().coerceAtMost(bubble.right),
-                                    (centerY + bubble.height() * 0.40f).toInt().coerceAtMost(bubble.bottom)
-                                )
-                                if (ovalSafe.intersect(inset)) return ovalSafe
-                                return inset
+                                return Rect(inset).apply { union(targetBox) }
                             }
 
                             fun optimize(
@@ -1251,7 +1294,7 @@ fun ReaderPageContainer(
                                     (geo.heightDp - geo.padV * 2).value.coerceAtLeast(1f)
                                 ),
                                 minSp = minSp,
-                                maxSp = 30f,
+                                maxSp = (geo.heightDp.value * 0.55f).coerceIn(18f, 48f),
                                 density = density.density,
                                 spToPx = { fontSizeSp -> with(density) { fontSizeSp.sp.toPx() } },
                                 layoutLocale = readerLocale,
@@ -1356,16 +1399,22 @@ fun ReaderPageContainer(
                                                 expanded.width(),
                                                 requiredWidthPx,
                                                 ceil(expanded.width() * 1.30f).toInt()
-                                            ).coerceAtMost(safeBubble.width())
+                                            ).coerceAtMost(maxOf(safeBubble.width(), expanded.width()))
                                             val nextHeight = maxOf(
                                                 expanded.height(),
                                                 requiredHeightPx,
                                                 ceil(expanded.height() * 1.30f).toInt()
-                                            ).coerceAtMost(safeBubble.height())
+                                            ).coerceAtMost(maxOf(safeBubble.height(), expanded.height()))
                                             val left = (anchorX - nextWidth / 2f).roundToInt()
-                                                .coerceIn(safeBubble.left, safeBubble.right - nextWidth)
+                                                .coerceIn(
+                                                    safeBubble.left,
+                                                    maxOf(safeBubble.left, safeBubble.right - nextWidth)
+                                                )
                                             val top = (anchorY - nextHeight / 2f).roundToInt()
-                                                .coerceIn(safeBubble.top, safeBubble.bottom - nextHeight)
+                                                .coerceIn(
+                                                    safeBubble.top,
+                                                    maxOf(safeBubble.top, safeBubble.bottom - nextHeight)
+                                                )
                                             val next = Rect(left, top, left + nextWidth, top + nextHeight)
                                             if (next == expanded) break
                                             expanded = next
@@ -1378,7 +1427,9 @@ fun ReaderPageContainer(
                                         // translation, try the complete safe balloon area. The
                                         // OCR box is an anchor, not a hard size limit for translated text.
                                         if (!opt.fitsInside) {
-                                            geo = geometryFor(safeBubble)
+                                            geo = geometryFor(
+                                                Rect(safeBubble).apply { union(expanded) }
+                                            )
                                             opt = optimize(geo)
                                         }
 
@@ -1406,9 +1457,8 @@ fun ReaderPageContainer(
                                 }
                                 if (!opt.fitsInside) {
                                     // Keep speech-bubble translations inside their safe
-                                    // balloon area. If normal font fitting fails, scale the
-                                    // complete layout down in the draw pass instead of
-                                    // replacing it with an OCR crop and a floating TR badge.
+                                    // balloon area only while the scaled-down result stays
+                                    // readable; otherwise show the original text below.
                                     if (!isSub) {
                                         val safeBubble = maxSafeBubbleBounds().let { detectedSafe ->
                                             if (!detectedSafe.isEmpty) {
@@ -1428,26 +1478,46 @@ fun ReaderPageContainer(
                                         }
                                         if (!safeBubble.isEmpty) {
                                             geo = geometryFor(safeBubble)
-                                            opt = optimize(geo, minSp = 1f)
-                                            return@mapNotNull PlacedOverlayBox(
-                                                block = block,
-                                                leftDp = geo.leftDp,
-                                                topDp = geo.topDp,
-                                                widthDp = geo.widthDp,
-                                                heightDp = geo.heightDp,
-                                                layoutResult = opt,
-                                                paddingHDp = geo.padH,
-                                                paddingVDp = geo.padV,
-                                                forceTextToFitBox = true,
-                                                boldBoost = boldBoost
-                                            )
+                                            opt = optimize(geo, minSp = 6f)
+                                            val layoutWidth = opt.staticLayout?.width?.toFloat() ?: 0f
+                                            val layoutHeight = opt.staticLayout?.height?.toFloat() ?: 0f
+                                            val availableWidth =
+                                                (geo.widthDp - geo.padH * 2).value * density.density
+                                            val availableHeight =
+                                                (geo.heightDp - geo.padV * 2).value * density.density
+                                            val drawScale = if (layoutWidth > 0f && layoutHeight > 0f) {
+                                                minOf(
+                                                    1f,
+                                                    availableWidth / layoutWidth,
+                                                    availableHeight / layoutHeight
+                                                )
+                                            } else {
+                                                0f
+                                            }
+                                            if (opt.fontSizeSp >= 6f && drawScale >= 0.7f) {
+                                                return@mapNotNull PlacedOverlayBox(
+                                                    block = block,
+                                                    leftDp = geo.leftDp,
+                                                    topDp = geo.topDp,
+                                                    widthDp = geo.widthDp,
+                                                    heightDp = geo.heightDp,
+                                                    layoutResult = opt,
+                                                    paddingHDp = geo.padH,
+                                                    paddingVDp = geo.padV,
+                                                    forceTextToFitBox = true,
+                                                    boldBoost = boldBoost
+                                                )
+                                            }
                                         }
                                     }
                                     // This is a layout fallback only. Keep the successful translation
                                     // available and do not change the block's translation status.
-                                    // Include both OCR text and its measured layout area so a
-                                    // clipped OCR rectangle cannot crop off the original glyphs.
-                                    val sourceBox = Rect(block.boundingBox).apply { union(block.layoutBox) }
+                                    // Include OCR text, its measured layout area, and the detected
+                                    // bubble so a clipped rectangle cannot crop off original glyphs.
+                                    val sourceBox = Rect(block.boundingBox).apply {
+                                        union(block.layoutBox)
+                                        union(block.bubbleBox)
+                                    }
                                     val pageBounds = Rect(
                                         0,
                                         0,
@@ -1507,6 +1577,9 @@ fun ReaderPageContainer(
                         placements
                         }
                     }
+                    LaunchedEffect(placedOverlays) {
+                        debugPlacedOverlays = placedOverlays
+                    }
 
                     // Katman 1: balon/alt yazı zeminleri. Tüm zeminler bütün
                     // metinlerden ÖNCE çizilir; böylece hiçbir zemin komşu
@@ -1515,7 +1588,9 @@ fun ReaderPageContainer(
                     placedOverlays.forEach { placed ->
                         val block = placed.block
                         val overlayKey = "$pageIndex:${block.boundingBox}:${block.originalText}:${placed.showOriginalFallback}"
-                        if (placed.showOriginalFallback || peekHiddenStates[overlayKey] == true) {
+                        if (placed.showOriginalFallback || peekHiddenStates[overlayKey] == true ||
+                            !block.translationSucceeded
+                        ) {
                             return@forEach
                         }
                         val isSubtitleMode = bubbleStyle == "Alt Yazı (Şeffaf)" || !block.isBubble
@@ -1605,10 +1680,14 @@ fun ReaderPageContainer(
                             val cropBounds = placed.fallbackSourceBounds ?: remember(
                                 block.boundingBox,
                                 block.layoutBox,
+                                block.bubbleBox,
                                 pageOriginalWidth,
                                 pageOriginalHeight
                             ) {
-                                val expandedBounds = Rect(block.boundingBox).apply { union(block.layoutBox) }
+                                val expandedBounds = Rect(block.boundingBox).apply {
+                                    union(block.layoutBox)
+                                    union(block.bubbleBox)
+                                }
                                 val imageBounds = Rect(
                                     0,
                                     0,
@@ -1969,12 +2048,32 @@ fun ReaderPageContainer(
                                 with(density) { 2.dp.toPx() },
                                 cornerPx
                             )
+                            val placed = if (translationActive) {
+                                debugPlacedOverlays.firstOrNull {
+                                    it.block.boundingBox == block.boundingBox &&
+                                        it.block.originalText == block.originalText
+                                }
+                            } else null
+                            val targetBox = if (placed != null) {
+                                Rect(
+                                    (with(density) { placed.leftDp.toPx() } / coordinateScaleX)
+                                        .roundToInt(),
+                                    (with(density) { placed.topDp.toPx() } / coordinateScaleY)
+                                        .roundToInt(),
+                                    (with(density) { (placed.leftDp + placed.widthDp).toPx() } /
+                                        coordinateScaleX).roundToInt(),
+                                    (with(density) { (placed.topDp + placed.heightDp).toPx() } /
+                                        coordinateScaleY).roundToInt()
+                                )
+                            } else {
+                                block.layoutBox
+                            }
                             drawDebugBox(
-                                block.layoutBox,
+                                targetBox,
                                 coordinateScaleX,
                                 coordinateScaleY,
                                 android.graphics.Color.rgb(0, 230, 118),
-                                "Dizgi alanı",
+                                "Hedef kutu",
                                 with(density) { 1.dp.toPx() },
                                 with(density) { 2.dp.toPx() }
                             )

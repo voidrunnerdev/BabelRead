@@ -47,6 +47,12 @@ class PpOcrV5Engine(context: Context) {
         val confidence: Float
     )
 
+    private data class BlockAttempt(
+        val results: List<TranslationService.RectAndText>,
+        val lineCount: Int,
+        val vertical: Boolean
+    )
+
     private val appContext = context.applicationContext
     private val lineSegmenter = TextLineSegmenter()
     private val sessionMutex = Mutex()
@@ -81,9 +87,25 @@ class PpOcrV5Engine(context: Context) {
         val primaryLanguage = normalizeLanguage(originLanguage) ?: return@withContext emptyList()
         if (!ensureInitialized()) return@withContext emptyList()
 
-        suspend fun recognize(language: String): List<TranslationService.RectAndText> {
-            val lines = lineSegmenter.segment(bitmap, region, language)
-            if (lines.isEmpty()) return emptyList()
+        suspend fun recognize(
+            language: String,
+            forceVertical: Boolean = false,
+            forceHorizontal: Boolean = false
+        ): BlockAttempt {
+            val lines = lineSegmenter.segment(
+                bitmap,
+                region,
+                language,
+                forceVertical = forceVertical,
+                forceHorizontal = forceHorizontal
+            )
+            val vertical = if (lines.isEmpty()) {
+                isJapanese(primaryLanguage) && region.height() > region.width() * 1.8f
+            } else {
+                lines.count { it.vertical } * 2 >= lines.size
+            }
+            if (lines.isEmpty()) return BlockAttempt(emptyList(), 0, vertical)
+
             val results = ArrayList<TranslationService.RectAndText>(lines.size)
             for (line in lines) {
                 currentCoroutineContext().ensureActive()
@@ -96,21 +118,59 @@ class PpOcrV5Engine(context: Context) {
                     results.add(TranslationService.RectAndText(line.rect, recognized.text))
                 }
             }
-            return results
+            return BlockAttempt(results, lines.size, vertical)
         }
 
         val primary = recognize(primaryLanguage)
-        if (primary.isNotEmpty()) return@withContext primary
-
-        // Source language may be unset, wrong, or the page may use the other
-        // writing direction. Retry once with the other supported direction
-        // before giving up on the block; this costs only an empty block.
-        val fallbackLanguage = if (isJapanese(primaryLanguage)) "İngilizce" else "Japonca"
-        val fallback = recognize(fallbackLanguage)
-        if (fallback.isNotEmpty()) {
-            Log.d(TAG, "PP-OCRv5 recovered empty block with $fallbackLanguage")
+        if (primary.lineCount > 0 && primary.results.size >= primary.lineCount) {
+            return@withContext primary.results
         }
-        fallback
+
+        // Some lines may be rejected in the detected direction. Retry the same
+        // language in the opposite direction and keep the successful lines.
+        val retryVertical = !primary.vertical
+        val fallback = recognize(
+            primaryLanguage,
+            forceVertical = retryVertical,
+            forceHorizontal = !retryVertical
+        )
+        if (fallback.results.isEmpty()) return@withContext primary.results
+
+        val merged = ArrayList(primary.results)
+        val seen = HashSet<Rect>()
+        for (result in primary.results) seen.add(Rect(result.rect))
+        for (result in fallback.results) {
+            val rect = Rect(result.rect)
+            if (!seen.add(rect)) continue
+            if (overlapsExisting(rect, merged)) continue
+            merged.add(result)
+        }
+        if (merged.size > primary.results.size) {
+            Log.d(
+                TAG,
+                "PP-OCRv5 recovered ${merged.size - primary.results.size} lines with " +
+                    "${if (retryVertical) "vertical" else "horizontal"} retry"
+            )
+        }
+        merged
+    }
+
+    private fun overlapsExisting(
+        rect: Rect,
+        existing: List<TranslationService.RectAndText>
+    ): Boolean {
+        val candidateArea = rect.width().toLong() * rect.height()
+        if (candidateArea <= 0L) return true
+        for (item in existing) {
+            val overlap = Rect(rect)
+            if (!overlap.intersect(item.rect)) continue
+            val overlapArea = overlap.width().toLong() * overlap.height()
+            val existingArea = item.rect.width().toLong() * item.rect.height()
+            if (overlapArea * 2 >= candidateArea || overlapArea * 2 >= existingArea) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun acceptsLine(line: LineResult, language: String): Boolean {

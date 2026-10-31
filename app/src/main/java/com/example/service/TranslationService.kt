@@ -802,6 +802,22 @@ class TranslationService(
         fun isVerticalCjkColumn(block: RectAndText): Boolean =
             isCjkText(block.text) && block.rect.height() > block.rect.width() * 1.5f
 
+        fun compareReadingOrder(a: RectAndText, b: RectAndText): Int {
+            if (isVerticalCjkColumn(a) && isVerticalCjkColumn(b)) {
+                val minWidth = min(a.rect.width(), b.rect.width()).toFloat()
+                val sameColumn = abs(a.rect.exactCenterX() - b.rect.exactCenterX()) < minWidth * 0.6f
+                return if (sameColumn) {
+                    a.rect.top.compareTo(b.rect.top).takeIf { it != 0 }
+                        ?: b.rect.right.compareTo(a.rect.right)
+                } else {
+                    b.rect.right.compareTo(a.rect.right).takeIf { it != 0 }
+                        ?: a.rect.top.compareTo(b.rect.top)
+                }
+            }
+            return a.rect.top.compareTo(b.rect.top).takeIf { it != 0 }
+                ?: a.rect.left.compareTo(b.rect.left)
+        }
+
         fun overlapFraction(rect: Rect, bubble: Rect): Float {
             val left = max(rect.left, bubble.left)
             val top = max(rect.top, bubble.top)
@@ -823,15 +839,12 @@ class TranslationService(
                 val centerInside = bubble.contains(rect.centerX(), rect.centerY())
                 val coverage = overlapFraction(rect, bubble)
                 if (!centerInside && coverage < 0.50f) return@mapIndexedNotNull null
-                val score = (if (centerInside) 1f else 0f) + coverage
+                val score = coverage + if (centerInside) 0.10f else 0f
                 Triple(index, score, bubble.width().toLong() * bubble.height())
             }.sortedWith(compareByDescending<Triple<Int, Float, Long>> { it.second }.thenBy { it.third })
-            if (scored.isEmpty()) return null
-            // Ambiguous assignment between nearby balloons is safer left unassigned.
-            val first = scored[0]
-            val second = scored.getOrNull(1)
-            if (second != null && first.second - second.second < 0.15f) return null
-            return first.first
+            // Equal scores prefer the innermost (smallest) bubble; a plausible
+            // match must keep its parent identity instead of becoming unassigned.
+            return scored.firstOrNull()?.first
         }
 
         fun groupEnvelopeAllowed(group: Rect, candidate: Rect, bubbleIndex: Int?): Boolean {
@@ -854,7 +867,7 @@ class TranslationService(
 
         val groups = blocks
             .filter { !it.rect.isEmpty && it.text.isNotBlank() }
-            .sortedWith(compareBy({ it.rect.top }, { it.rect.left }))
+            .sortedWith(Comparator { a, b -> compareReadingOrder(a, b) })
             .map {
                 TextGroup(
                     RectAndText(Rect(it.rect), it.text),
@@ -901,10 +914,15 @@ class TranslationService(
                             max(current.block.rect.right, candidate.block.rect.right).coerceAtMost(bitmap.width),
                             max(current.block.rect.bottom, candidate.block.rect.bottom).coerceAtMost(bitmap.height)
                         )
-                        val vDist = abs(current.block.rect.top - candidate.block.rect.top)
-                        val hDist = abs(current.block.rect.left - candidate.block.rect.left)
+                        val minColumnWidth = min(
+                            current.block.rect.width(),
+                            candidate.block.rect.width()
+                        ).toFloat()
+                        val sameColumn = abs(
+                            current.block.rect.exactCenterX() - candidate.block.rect.exactCenterX()
+                        ) < minColumnWidth * 0.6f
                         val sideBySideColumns = current.isVerticalCjkColumn &&
-                            candidate.isVerticalCjkColumn && hDist > vDist
+                            candidate.isVerticalCjkColumn && !sameColumn
                         val currentFirst = if (sideBySideColumns) {
                             current.block.rect.right >= candidate.block.rect.right
                         } else {
@@ -1116,15 +1134,15 @@ class TranslationService(
                 val interArea = interW.toLong() * interH.toLong()
                 val candArea = candidate.rect.width().toLong() * candidate.rect.height().toLong()
                 val existArea = existing.rect.width().toLong() * existing.rect.height().toLong()
-                val minArea = min(candArea, existArea)
-                val overlapRatio = if (minArea > 0) interArea.toFloat() / minArea else 0f
+                val unionArea = candArea + existArea - interArea
+                val iou = if (unionArea > 0) interArea.toFloat() / unionArea else 0f
                 val gapX = max(0, max(existing.rect.left, candidate.rect.left) - min(existing.rect.right, candidate.rect.right))
                 val gapY = max(0, max(existing.rect.top, candidate.rect.top) - min(existing.rect.bottom, candidate.rect.bottom))
                 val closeCenters = abs(existing.rect.exactCenterX() - candidate.rect.exactCenterX()) <=
                     max(existing.rect.width(), candidate.rect.width()) * 0.75f &&
                     abs(existing.rect.exactCenterY() - candidate.rect.exactCenterY()) <=
                     max(existing.rect.height(), candidate.rect.height()) * 0.75f
-                val closeBoxes = overlapRatio > 0f ||
+                val closeBoxes = interArea > 0 ||
                     (closeCenters && gapX <= max(8, min(existing.rect.width(), candidate.rect.width()) / 2) &&
                         gapY <= max(8, min(existing.rect.height(), candidate.rect.height()) / 2))
                 val hasUsefulText = min(candText.length, existText.length) >= 3
@@ -1134,7 +1152,7 @@ class TranslationService(
                         (existText.length > 3 && candText.contains(existText, ignoreCase = true))
                     )
 
-                if (textMatch || overlapRatio > 0.45f) {
+                if (textMatch || iou >= 0.75f) {
                     val mergedRect = Rect(
                         min(existing.rect.left, candidate.rect.left),
                         min(existing.rect.top, candidate.rect.top),
@@ -1215,8 +1233,8 @@ class TranslationService(
         if (bitmap.isRecycled || textRect.width() <= 0 || textRect.height() <= 0) return textRect
         val width = bitmap.width
         val height = bitmap.height
-        val maxExpandX = (textRect.width() * 0.35f).toInt().coerceIn(6, 36)
-        val maxExpandY = (textRect.height() * 0.30f).toInt().coerceIn(6, 26)
+        val maxExpandX = (textRect.width() * 0.35f).toInt().coerceIn(6, max(6, width))
+        val maxExpandY = (textRect.height() * 0.30f).toInt().coerceIn(6, max(6, height))
 
         fun isBorderPixel(px: Int): Boolean {
             val lum = (Color.red(px) * 0.299 + Color.green(px) * 0.587 + Color.blue(px) * 0.114)
@@ -1289,7 +1307,14 @@ class TranslationService(
         val bordersFoundCount = (if (foundBorderLeft) 1 else 0) + (if (foundBorderRight) 1 else 0) +
                 (if (foundBorderTop) 1 else 0) + (if (foundBorderBottom) 1 else 0)
         if (bordersFoundCount < 2) {
-            return textRect
+            val fallbackPadX = (textRect.width() * 0.12f).toInt().coerceIn(4, maxExpandX)
+            val fallbackPadY = (textRect.height() * 0.12f).toInt().coerceIn(4, maxExpandY)
+            return Rect(
+                if (foundBorderLeft) expLeft else (textRect.left - fallbackPadX).coerceAtLeast(0),
+                if (foundBorderTop) expTop else (textRect.top - fallbackPadY).coerceAtLeast(0),
+                if (foundBorderRight) expRight else (textRect.right + fallbackPadX).coerceAtMost(width),
+                if (foundBorderBottom) expBottom else (textRect.bottom + fallbackPadY).coerceAtMost(height)
+            )
         }
 
         val finalLeft = if (foundBorderLeft) expLeft else textRect.left
@@ -1341,9 +1366,10 @@ class TranslationService(
         val skippedAuxBoxes = mutableListOf<Rect>()
         val canvas = Canvas(resultBitmap)
         for (block in blocks) {
-            if (!block.isBubble) continue
             val textRect = block.boundingBox
             val bubbleBox = block.bubbleBox
+            val isBubbleBlock = block.isBubble
+            if (!isBubbleBlock && block.backgroundColor == null) continue
             val maskColor = if (block.isDarkBubble) {
                 Color.rgb(18, 18, 18)
             } else if (block.backgroundColor != null) {
@@ -1363,7 +1389,7 @@ class TranslationService(
             // An unchanged bubbleBox is the TextBlockObj default/fallback, not a
             // reliable speech-bubble boundary. In that case, allow the mask padding
             // to extend beyond the OCR rectangle while staying inside the bitmap.
-            val hasDistinctBubbleBounds = bubbleBox != textRect
+            val hasDistinctBubbleBounds = isBubbleBlock && bubbleBox != textRect
             val minX = if (hasDistinctBubbleBounds) max(bubbleBox.left.toFloat() + 4f, 0f) else 0f
             val maxX = if (hasDistinctBubbleBounds) {
                 min(bubbleBox.right.toFloat() - 4f, sourceBitmap.width.toFloat())
@@ -1383,20 +1409,39 @@ class TranslationService(
             val maskTop = max(topBound, textRect.top.toFloat() - padY)
             val maskBottom = min(bottomBound, textRect.bottom.toFloat() + padY)
 
+            // Komşu ve korumalı metin alanları ana maskeden önce hesaplanır;
+            // aksi halde geniş bir maske henüz çizilmemiş komşu yazıyı kapatır.
+            val otherTextReaches = (blocks + protectedBlocks)
+                .filter { it !== block }
+                .map { textReachOf(it) }
+            val protectedReaches = protectedBlocks
+                .filter { it !== block }
+                .map { textReachOf(it) }
+
             if (maskRight > maskLeft && maskBottom > maskTop) {
                 val maskRect = RectF(maskLeft, maskTop, maskRight, maskBottom)
-                val cornerRadius = (min(maskRect.width(), maskRect.height()) * 0.35f).coerceIn(4f, 24f)
-                canvas.drawRoundRect(maskRect, cornerRadius, cornerRadius, paint)
-                val paintedRect = Rect()
-                maskRect.round(paintedRect)
-                paintedRects.add(paintedRect)
+                val maskArea = (maskRect.width() * maskRect.height()).coerceAtLeast(1f)
+                val coversText = (protectedReaches + otherTextReaches).any { other ->
+                    val inter = RectF()
+                    if (!inter.setIntersect(maskRect, other)) return@any false
+                    val interArea = inter.width() * inter.height()
+                    val otherArea = (other.width() * other.height()).coerceAtLeast(1f)
+                    interArea > maskArea * 0.25f || interArea > otherArea * 0.35f
+                }
+                if (!coversText) {
+                    val cornerRadius = (min(maskRect.width(), maskRect.height()) * 0.35f).coerceIn(4f, 24f)
+                    canvas.drawRoundRect(maskRect, cornerRadius, cornerRadius, paint)
+                    val paintedRect = Rect()
+                    maskRect.round(paintedRect)
+                    paintedRects.add(paintedRect)
+                }
             }
 
             // Balon kutusu balonun tamamını kapsamıyorsa balon içinde kalan
             // orijinal harf parçaları (ör. büyük stilize kelimelerin kesilen
             // sonları) ekranda kalıyordu. Metnin çevresine ya da balona değen
             // ham text_free aday kutularını da temizleyerek bunları kaldır.
-            if (auxBoxes.isNotEmpty()) {
+            if (isBubbleBlock && auxBoxes.isNotEmpty()) {
                 val textReach = RectF(
                     textRect.left - padX,
                     textRect.top - padY,
@@ -1407,12 +1452,6 @@ class TranslationService(
                 // üstüne taşıyorsa maskeleme atlanır, aksi halde opak zemin
                 // komşu balonun yazısını kapatır. Çevirisi başarısız blokların
                 // orijinal metni görünür kalacağı için bu alanlar ayrıca korunur.
-                val otherTextReaches = (blocks + protectedBlocks)
-                    .filter { it !== block && it.isBubble }
-                    .map { textReachOf(it) }
-                val protectedReaches = protectedBlocks
-                    .filter { it.isBubble }
-                    .map { textReachOf(it) }
                 for (aux in auxBoxes) {
                     if (aux.isEmpty) continue
                     val auxRect = RectF(aux)

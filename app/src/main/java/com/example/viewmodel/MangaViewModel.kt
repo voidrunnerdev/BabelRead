@@ -2255,6 +2255,38 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun rectArea(rect: Rect): Long = rect.width().toLong() * rect.height()
+
+    private fun rectOverlapArea(a: Rect, b: Rect): Long {
+        val w = (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0)
+        val h = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0)
+        return w.toLong() * h
+    }
+
+    private fun isDuplicateRegion(a: Rect, b: Rect): Boolean {
+        if (a.isEmpty || b.isEmpty) return false
+        val intersection = rectOverlapArea(a, b).toFloat()
+        val areaA = rectArea(a).toFloat()
+        val areaB = rectArea(b).toFloat()
+        val minArea = minOf(areaA, areaB).coerceAtLeast(1f)
+        val unionArea = (areaA + areaB - intersection).coerceAtLeast(1f)
+        return intersection / unionArea >= 0.55f || intersection / minArea >= 0.85f
+    }
+
+    private fun dedupeRegions(rects: List<Rect>): List<Rect> {
+        val result = mutableListOf<Rect>()
+        for (rect in rects) {
+            if (rect.isEmpty) continue
+            val duplicateIndex = result.indexOfFirst { existing -> isDuplicateRegion(existing, rect) }
+            if (duplicateIndex < 0) {
+                result.add(Rect(rect))
+            } else if (rectArea(rect) > rectArea(result[duplicateIndex])) {
+                result[duplicateIndex] = Rect(rect)
+            }
+        }
+        return result
+    }
+
     /**
      * Bölge OCR için YOLO kutularını sadeleştirir: balon kutuları esas alınır,
      * balonla örtüşen metin kutuları ve başka bir bölgeyle çok örtüşen kopyalar
@@ -2262,13 +2294,6 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
      */
     private fun buildBubbleOcrRegions(bubbles: List<BubbleBox>, width: Int, height: Int): List<Rect> {
         if (bubbles.isEmpty() || width <= 0 || height <= 0) return emptyList()
-
-        fun areaOf(rect: Rect): Long = rect.width().toLong() * rect.height()
-        fun overlapArea(a: Rect, b: Rect): Long {
-            val w = (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0)
-            val h = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0)
-            return w.toLong() * h
-        }
 
         val balloonLabels = setOf("bubble", "balloon")
         val textLabels = setOf("text_bubble", "dialogue_text", "text")
@@ -2282,47 +2307,20 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val candidates = mutableListOf<Rect>()
         candidates.addAll(balloonRects)
         for (textRect in textRects) {
-            val alreadyCovered = candidates.any { overlapArea(it, textRect) >= areaOf(textRect) * 0.5f }
+            val alreadyCovered = candidates.any { rectOverlapArea(it, textRect) >= rectArea(textRect) * 0.5f }
             if (!alreadyCovered) candidates.add(textRect)
         }
-
-        val pruned = mutableListOf<Rect>()
-        for (candidate in candidates) {
-            val duplicate = pruned.any { existing -> overlapArea(existing, candidate) >= areaOf(candidate) * 0.7f }
-            if (!duplicate) pruned.add(candidate)
-        }
-        return pruned
+        return dedupeRegions(candidates)
     }
 
     /**
      * PP-OCRv5 recognition is line-oriented, so prefer the detector's
      * text_bubble boxes over the larger balloon boxes. The line segmenter
-     * splits each text block into line crops. If the model returned no text
-     * boxes, fall back to balloon boxes.
+     * splits each text block into line crops. When the text boxes do not cover
+     * most of a balloon, use that balloon as the OCR region instead.
      */
     private fun buildPpOcrV5Regions(bubbles: List<BubbleBox>, width: Int, height: Int): List<Rect> {
         if (bubbles.isEmpty() || width <= 0 || height <= 0) return emptyList()
-
-        fun areaOf(rect: Rect): Long = rect.width().toLong() * rect.height()
-        fun overlapArea(a: Rect, b: Rect): Long {
-            val w = (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0)
-            val h = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0)
-            return w.toLong() * h
-        }
-
-        fun dedupe(rects: List<Rect>): List<Rect> {
-            val result = mutableListOf<Rect>()
-            for (rect in rects) {
-                if (rect.isEmpty) continue
-                val duplicate = result.any { existing ->
-                    overlapArea(existing, rect).toFloat() >=
-                        minOf(areaOf(existing), areaOf(rect)).toFloat() * 0.70f
-                }
-                if (duplicate) continue
-                result.add(rect)
-            }
-            return result
-        }
 
         val textLabels = setOf("text_bubble", "dialogue_text", "text")
         val balloonLabels = setOf("bubble", "balloon")
@@ -2333,17 +2331,23 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             .map { it.toPixelRect(width, height) }
             .filter { !it.isEmpty }
 
-        // Prefer tight text boxes, but never drop a balloon that has no text box.
-        // The detector does not guarantee a text_bubble detection for every balloon.
-        val candidates = mutableListOf<Rect>()
-        candidates.addAll(textRects)
-        for (balloon in balloonRects) {
-            val coveredByText = textRects.any { text ->
-                overlapArea(balloon, text) >= areaOf(text) * 0.5f
+        // Prefer tight text boxes, but never drop a balloon whose text boxes are
+        // too small to cover it. When the balloon is used as the OCR region, its
+        // contained text boxes must be removed; otherwise PP-OCRv5 would read the
+        // same glyphs twice (tight box and full balloon) and emit duplicates.
+        val fallbackBalloons = balloonRects.filter { balloon ->
+            textRects.none { text ->
+                rectOverlapArea(balloon, text) >= rectArea(balloon) * 0.5f
             }
-            if (!coveredByText) candidates.add(balloon)
         }
-        return dedupe(candidates)
+        val candidates = textRects.filterNot { text ->
+            fallbackBalloons.any { balloon ->
+                balloon.contains(text.centerX(), text.centerY()) ||
+                    rectOverlapArea(balloon, text) >= rectArea(text) * 0.5f
+            }
+        }.toMutableList()
+        candidates.addAll(fallbackBalloons)
+        return dedupeRegions(candidates)
     }
 
     fun translatePageIfNeeded(pageIdx: Int, forceReload: Boolean = false) {
@@ -2538,9 +2542,15 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             val interW = (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0)
                             val interH = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0)
                             val inter = interW.toLong() * interH
-                            val minArea = minOf(areaOf(a), areaOf(b)).coerceAtLeast(1L)
-                            return inter.toFloat() / minArea >= 0.75f
+                            val areaA = areaOf(a)
+                            val areaB = areaOf(b)
+                            val maxArea = maxOf(areaA, areaB).coerceAtLeast(1L)
+                            val unionArea = (areaA + areaB - inter).coerceAtLeast(1L)
+                            val iou = inter.toFloat() / unionArea
+                            return iou >= 0.55f || inter.toFloat() / maxArea >= 0.85f
                         }
+                        val verticalCjkMode = (ppOriginLang ?: originLang).equals("Japonca", ignoreCase = true) &&
+                            input.count { it.textRect.height() > it.textRect.width() * 1.3f } * 2 >= input.size
                         fun tryMerge(a: BubbleCandidate, b: BubbleCandidate): BubbleCandidate? {
                             if (!sameBalloon(a.bubbleBounds, b.bubbleBounds)) return null
                             val lineHeight = minOf(a.textRect.height(), b.textRect.height())
@@ -2583,6 +2593,26 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 return translationService.joinTextFragments(firstText, secondText, true)
                             }
 
+                            if (verticalCjkMode) {
+                                val minW = minOf(a.textRect.width(), b.textRect.width())
+                                    .coerceAtLeast(1).toFloat()
+                                val sameColumn = kotlin.math.abs(
+                                    a.textRect.exactCenterX() - b.textRect.exactCenterX()
+                                ) < minW * 0.6f
+                                if (sameColumn) {
+                                    val upper = if (a.textRect.top <= b.textRect.top) a else b
+                                    val lower = if (upper === a) b else a
+                                    val gap = (lower.textRect.top - upper.textRect.bottom).toFloat()
+                                    if (gap <= lineHeight * 2.0f) {
+                                        return buildMerged(
+                                            upper,
+                                            lower,
+                                            joinFragmentText(upper.text.trim(), lower.text.trim())
+                                        )
+                                    }
+                                }
+                            }
+
                             // Aynı satırda sol/sağ bölünmüş parçalar önce denenir;
                             // kutular yatayda komşu ve dikeyde büyük ölçüde
                             // örtüşüyorsa tek metin olarak soldan sağa birleştirilir.
@@ -2593,33 +2623,47 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             val minH = minOf(left.textRect.height(), right.textRect.height())
                                 .coerceAtLeast(1)
                             val hGap = (right.textRect.left - left.textRect.right).toFloat()
-                            if (vOverlap >= minH * 0.5f &&
-                                hGap <= lineHeight * 1.0f &&
+                            val vOverlapThreshold = if (verticalCjkMode) 0.35f else 0.5f
+                            val hGapLimit = if (verticalCjkMode) 1.5f else 1.0f
+                            if (vOverlap >= minH * vOverlapThreshold &&
+                                hGap <= lineHeight * hGapLimit &&
                                 hGap > -lineHeight * 0.5f
                             ) {
+                                val first = if (verticalCjkMode) right else left
+                                val second = if (verticalCjkMode) left else right
                                 return buildMerged(
-                                    left,
-                                    right,
-                                    joinFragmentText(left.text.trim(), right.text.trim())
+                                    first,
+                                    second,
+                                    joinFragmentText(first.text.trim(), second.text.trim())
                                 )
                             }
 
-                            val upper = if (a.textRect.top <= b.textRect.top) a else b
-                            val lower = if (upper === a) b else a
-                            val gap = (lower.textRect.top - upper.textRect.bottom).toFloat()
-                            if (gap > lineHeight * 2.0f) return null
-                            val interW = minOf(upper.textRect.right, lower.textRect.right) -
-                                maxOf(upper.textRect.left, lower.textRect.left)
-                            if (interW < minOf(upper.textRect.width(), lower.textRect.width()) * 0.30f) return null
-                            return buildMerged(
-                                upper,
-                                lower,
-                                joinFragmentText(upper.text.trim(), lower.text.trim())
-                            )
+                            if (!verticalCjkMode) {
+                                val upper = if (a.textRect.top <= b.textRect.top) a else b
+                                val lower = if (upper === a) b else a
+                                val gap = (lower.textRect.top - upper.textRect.bottom).toFloat()
+                                if (gap > lineHeight * 2.0f) return null
+                                val interW = minOf(upper.textRect.right, lower.textRect.right) -
+                                    maxOf(upper.textRect.left, lower.textRect.left)
+                                if (interW < minOf(upper.textRect.width(), lower.textRect.width()) * 0.30f) return null
+                                return buildMerged(
+                                    upper,
+                                    lower,
+                                    joinFragmentText(upper.text.trim(), lower.text.trim())
+                                )
+                            }
+                            return null
                         }
-                        val working = input.sortedWith(
-                            compareBy({ it.textRect.top }, { it.textRect.left })
-                        ).toMutableList()
+                        val working = if (verticalCjkMode) {
+                            input.sortedWith(
+                                compareByDescending<BubbleCandidate> { it.textRect.right }
+                                    .thenBy { it.textRect.top }
+                            )
+                        } else {
+                            input.sortedWith(
+                                compareBy({ it.textRect.top }, { it.textRect.left })
+                            )
+                        }.toMutableList()
                         var changed = true
                         while (changed) {
                             changed = false
@@ -2677,7 +2721,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         // Keep this rectangle centered on the actual bubble. Its 80% width
                         // and height let the line breaker use the balloon instead of the
                         // much smaller OCR text box.
-                        return safeOval
+                        val meaningfulGrowth = safeOval.width() >= anchor.width() * 1.10f &&
+                            safeOval.height() >= anchor.height() * 1.10f
+                        return if (meaningfulGrowth) safeOval else Rect(anchor)
                     }
 
                     // Algılayıcı balon kutusu balonun tamamını kapsamayabilir; bu durumda
@@ -2686,7 +2732,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     // Metnin hemen çevresine değen text_free adaylarını balon sınırına
                     // katarak hem yerleşim alanını hem maske kapsamını genişlet.
                     fun grownBubbleBounds(anchor: Rect, bubble: Rect): Rect {
-                        if (bubble.isEmpty || anchor.isEmpty || pageAuxBoxes.isEmpty()) return bubble
+                        if (bubble.isEmpty || anchor.isEmpty) return bubble
                         val padX = maxOf(14f, anchor.width() * 0.25f)
                         val padY = maxOf(14f, anchor.height() * 0.25f)
                         val anchorReach = Rect(
@@ -2695,18 +2741,26 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             (anchor.right + padX).toInt(),
                             (anchor.bottom + padY).toInt()
                         )
-                        val bubbleArea = bubble.width().toLong() * bubble.height()
-                        var result = Rect(bubble)
+                        val bubbleArea = rectArea(bubble)
+                        val anchorArea = rectArea(anchor)
+                        val baseArea = maxOf(bubbleArea, anchorArea)
+                        var result = Rect(bubble).apply { union(anchor) }
                         for (aux in pageAuxBoxes) {
                             if (aux.isEmpty) continue
-                            val auxArea = aux.width().toLong() * aux.height()
-                            if (auxArea > bubbleArea * 2.5f) continue
+                            val auxArea = rectArea(aux)
+                            if (auxArea > baseArea * 2.5f) continue
                             if (!Rect(aux).intersect(anchorReach)) continue
                             val unioned = Rect(result).apply { union(aux) }
-                            if (unioned.width().toLong() * unioned.height() > bubbleArea * 3f) continue
+                            if (rectArea(unioned) > baseArea * 3L) continue
                             result = unioned
                         }
-                        return result
+                        val pageBounds = Rect(
+                            0,
+                            0,
+                            bmpW.toInt().coerceAtLeast(1),
+                            bmpH.toInt().coerceAtLeast(1)
+                        )
+                        return if (result.intersect(pageBounds)) result else Rect(bubble)
                     }
 
                     // 3. Eşleştirme ve Çeviri Akışı
@@ -2716,10 +2770,31 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         }
                             .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
                         pageAuxBoxes.addAll(sfxBoxes)
-                        val balloonBoxes = yoloBubbles.filter { it.label in setOf("bubble", "balloon") }
-                            .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
-                        val dialogueBoxes = yoloBubbles.filter { it.label in setOf("text_bubble", "dialogue_text", "text") }
-                            .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
+                        val balloonBoxes = dedupeRegions(
+                            yoloBubbles.filter { it.label in setOf("bubble", "balloon") }
+                                .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
+                        )
+                        val dialogueBoxes = dedupeRegions(
+                            yoloBubbles.filter { it.label in setOf("text_bubble", "dialogue_text", "text") }
+                                .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
+                        )
+
+                        fun selectContainingBubble(textRect: Rect): Rect? {
+                            if (textRect.isEmpty || balloonBoxes.isEmpty()) return null
+                            val textArea = rectArea(textRect).coerceAtLeast(1L)
+                            val scored = balloonBoxes.filter { !it.isEmpty }.map { bBox ->
+                                val coverage = rectOverlapArea(textRect, bBox).toFloat() / textArea
+                                val containsCenter = bBox.contains(textRect.centerX(), textRect.centerY())
+                                val score = coverage +
+                                    (if (containsCenter) 0.08f else 0f) +
+                                    (if (coverage >= 0.95f) 0.04f else 0f)
+                                Triple(bBox, score, rectArea(bBox))
+                            }
+                            val comparator = compareBy<Triple<Rect, Float, Long>> { it.second }
+                                .thenBy { it.third }
+                            val acceptable = scored.filter { it.second >= 0.35f }
+                            return acceptable.maxWithOrNull(comparator)?.first
+                        }
 
                         fun matchingTextDetection(textRect: Rect): Rect? {
                             if (dialogueBoxes.isEmpty() || textRect.isEmpty) return null
@@ -2731,12 +2806,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     .coerceAtLeast(0)
                                 val overlap = (intersectionWidth.toLong() * intersectionHeight).toFloat() / textArea.toFloat()
                                 val containsCenter = detection.contains(textRect.centerX(), textRect.centerY())
-                                val score = if (containsCenter) maxOf(overlap, 0.70f) else overlap
+                                val score = overlap + if (containsCenter) 0.05f else 0f
                                 if (score < 0.20f) null else detection to score
                             }
                                 .sortedWith(
                                     compareByDescending<Pair<Rect, Float>> { it.second }
-                                        .thenBy { it.first.width().toLong() * it.first.height() }
+                                        .thenByDescending { it.first.width().toLong() * it.first.height() }
                                 )
                                 .firstOrNull()
                                 ?.first
@@ -2812,17 +2887,17 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 val isNearVerticalEdge = (vDistToTop <= yoloBox.height() * 0.28f || vDistToBottom <= yoloBox.height() * 0.28f) &&
                                     ocr.rect.centerX() in (yoloBox.left - 20)..(yoloBox.right + 20)
                                 val score = when {
-                                    isCenterIn -> kotlin.math.max(overlap, 0.70f)
+                                    isCenterIn -> overlap + 0.05f
                                     overlap >= 0.25f -> overlap
-                                    isNearVerticalEdge -> 0.42f
+                                    isNearVerticalEdge -> 0.22f
                                     else -> 0f
                                 }
                                 val currentBestArea = yoloBoxes.getOrNull(bestYoloIdx)?.let {
                                     it.width().toLong() * it.height()
-                                } ?: Long.MAX_VALUE
+                                } ?: -1L
                                 val candidateArea = yoloBox.width().toLong() * yoloBox.height()
-                                if (score >= 0.30f &&
-                                    (score > bestOverlap || (score == bestOverlap && candidateArea < currentBestArea))
+                                if (score >= 0.20f &&
+                                    (score > bestOverlap || (score == bestOverlap && candidateArea > currentBestArea))
                                 ) {
                                     bestOverlap = score
                                     bestYoloIdx = yoloIdx
@@ -2864,7 +2939,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         }
 
                         val matchedOcrIndices = mutableSetOf<Int>()
-                        val isJapanese = originLang.equals("Japonca", ignoreCase = true)
+                        val isJapanese = (ppOriginLang ?: originLang).equals("Japonca", ignoreCase = true)
                         for ((yoloIdx, yoloBox) in yoloBoxes.withIndex()) {
                             val assigned = ocrAssignments.filter { it.value == yoloIdx }.keys
                             if (assigned.isNotEmpty()) {
@@ -2909,18 +2984,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     detectedBubbles = balloonBoxes
                                 )
                                 for (textGroup in textGroups) {
-                                    val cleanedText = translationService.cleanOcrArtifacts(textGroup.text, originLang)
+                                    val cleanedText = translationService.cleanOcrArtifacts(textGroup.text, ppOriginLang ?: originLang)
                                     val textBounds = Rect(textGroup.rect)
                                     val analysis = translationService.analyzeBubble(bitmap, textBounds)
-                                    val containingBubble = balloonBoxes
-                                        .filter { bBox ->
-                                            val interWidth = (minOf(textBounds.right, bBox.right) - maxOf(textBounds.left, bBox.left)).coerceAtLeast(0)
-                                            val interHeight = (minOf(textBounds.bottom, bBox.bottom) - maxOf(textBounds.top, bBox.top)).coerceAtLeast(0)
-                                            val intersection = interWidth.toLong() * interHeight.toLong()
-                                            val textArea = (textBounds.width().toLong() * textBounds.height()).coerceAtLeast(1L)
-                                            bBox.contains(textBounds.centerX(), textBounds.centerY()) || intersection.toFloat() / textArea >= 0.50f
-                                        }
-                                        .minByOrNull { bBox -> bBox.width().toLong() * bBox.height() }
+                                    val containingBubble = selectContainingBubble(textBounds)
                                     val finalIsBubble = containingBubble != null || analysis.isBubble
 
                                     if (cleanedText.isNotBlank() && translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
@@ -2967,14 +3034,19 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             detectedBubbles = balloonBoxes
                         )
                         clusteredUnmatched.forEach { cluster ->
-                            val cleanedText = translationService.cleanOcrArtifacts(cluster.text, originLang)
+                            val cleanedText = translationService.cleanOcrArtifacts(cluster.text, ppOriginLang ?: originLang)
                             val analysis = translationService.analyzeBubble(bitmap, cluster.rect)
-                            if (translationService.isValidDialogueText(cleanedText, isBubble = analysis.isBubble)) {
-                                val refinedBox = (if (analysis.isBubble) translationService.refineBubbleBounds(bitmap, cluster.rect, analysis.isDarkBubble) else cluster.rect)
-                                    .let { grownBubbleBounds(cluster.rect, it) }
+                            val containingBubble = selectContainingBubble(cluster.rect)
+                            val finalIsBubble = containingBubble != null || analysis.isBubble
+                            if (translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
+                                val refinedBox = when {
+                                    containingBubble != null -> containingBubble
+                                    analysis.isBubble -> translationService.refineBubbleBounds(bitmap, cluster.rect, analysis.isDarkBubble)
+                                    else -> cluster.rect
+                                }.let { grownBubbleBounds(cluster.rect, it) }
                                 candidates.add(
                                     BubbleCandidate(
-                                        targetBox = (if (analysis.isBubble) {
+                                        targetBox = (if (finalIsBubble) {
                                             centeredLayoutBox(cluster.rect, refinedBox)
                                         } else {
                                             null
@@ -2983,7 +3055,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                             ?: Rect(cluster.rect),
                                         text = cleanedText,
                                         textRect = cluster.rect,
-                                        isBubble = analysis.isBubble,
+                                        isBubble = finalIsBubble,
                                         isDark = analysis.isDarkBubble,
                                         bubbleBounds = refinedBox
                                     )
@@ -2998,7 +3070,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         val filteredBlocks = ocrBlocks.filter { it.text.trim().isNotEmpty() }
                         val clusteredBlocks = translationService.clusterAdjacentBlocks(filteredBlocks, bitmap)
                         clusteredBlocks.forEach { raw ->
-                            val cleanedText = translationService.cleanOcrArtifacts(raw.text, originLang)
+                            val cleanedText = translationService.cleanOcrArtifacts(raw.text, ppOriginLang ?: originLang)
                             val analysis = translationService.analyzeBubble(bitmap, raw.rect)
                             if (translationService.isValidDialogueText(cleanedText, isBubble = analysis.isBubble)) {
                                 val refinedBox = if (analysis.isBubble) translationService.refineBubbleBounds(bitmap, raw.rect, analysis.isDarkBubble) else raw.rect

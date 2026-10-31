@@ -24,14 +24,21 @@ class TextLineSegmenter {
 
     private companion object {
         const val MAX_SEGMENT_PIXELS = 2_000_000L
+        const val MAX_RECOGNITION_LINES = 32
     }
 
-    fun segment(bitmap: Bitmap, region: Rect, originLanguage: String): List<SegmentedTextLine> {
+    fun segment(
+        bitmap: Bitmap,
+        region: Rect,
+        originLanguage: String,
+        forceVertical: Boolean = false,
+        forceHorizontal: Boolean = false
+    ): List<SegmentedTextLine> {
         if (bitmap.isRecycled || region.isEmpty) return emptyList()
         val pageRect = Rect(region)
         if (!pageRect.intersect(0, 0, bitmap.width, bitmap.height)) return emptyList()
         if (pageRect.width() < 8 || pageRect.height() < 8) {
-            return listOf(SegmentedTextLine(pageRect, isVerticalBlock(pageRect, originLanguage)))
+            return singleLine(pageRect, originLanguage, forceVertical, forceHorizontal)
         }
 
         val pad = (min(pageRect.width(), pageRect.height()) / 16).coerceIn(2, 8)
@@ -44,13 +51,13 @@ class TextLineSegmenter {
         if (cropRect.width() < 8 || cropRect.height() < 8 ||
             cropRect.width().toLong() * cropRect.height() > MAX_SEGMENT_PIXELS
         ) {
-            return listOf(SegmentedTextLine(pageRect, isVerticalBlock(pageRect, originLanguage)))
+            return singleLine(pageRect, originLanguage, forceVertical, forceHorizontal)
         }
 
         val crop = try {
             Bitmap.createBitmap(bitmap, cropRect.left, cropRect.top, cropRect.width(), cropRect.height())
         } catch (_: Exception) {
-            return listOf(SegmentedTextLine(pageRect, isVerticalBlock(pageRect, originLanguage)))
+            return singleLine(pageRect, originLanguage, forceVertical, forceHorizontal)
         }
 
         val w = crop.width
@@ -58,7 +65,7 @@ class TextLineSegmenter {
         val pixels = try {
             IntArray(w * h).also { crop.getPixels(it, 0, w, 0, 0, w, h) }
         } catch (_: Throwable) {
-            return listOf(SegmentedTextLine(pageRect, isVerticalBlock(pageRect, originLanguage)))
+            return singleLine(pageRect, originLanguage, forceVertical, forceHorizontal)
         } finally {
             crop.recycle()
         }
@@ -73,7 +80,7 @@ class TextLineSegmenter {
         val minGray = gray.minOrNull() ?: 255
         val maxGray = gray.maxOrNull() ?: 0
         if (maxGray - minGray < 20) {
-            return listOf(SegmentedTextLine(pageRect, isVerticalBlock(pageRect, originLanguage)))
+            return singleLine(pageRect, originLanguage, forceVertical, forceHorizontal)
         }
 
         val threshold = otsuThreshold(gray)
@@ -85,36 +92,36 @@ class TextLineSegmenter {
         val cleanedMask = removeNonTextComponents(inkMask, w, h)
         val inkCount = cleanedMask.count { it }
         if (inkCount < max(8, w * h / 5000)) {
-            return listOf(SegmentedTextLine(pageRect, isVerticalBlock(pageRect, originLanguage)))
+            return singleLine(pageRect, originLanguage, forceVertical, forceHorizontal)
         }
 
         val horizontalLines = buildHorizontalLines(cleanedMask, w, h, cropRect)
         val verticalLines = buildVerticalLines(cleanedMask, w, h, cropRect)
         val japanese = isJapanese(originLanguage)
 
-        val chosen = if (!japanese) {
-            horizontalLines.ifEmpty { verticalLines }
-        } else {
-            val horizontalScore = scoreLines(horizontalLines, cleanedMask, w, h, vertical = false, cropRect = cropRect)
-            val verticalScore = scoreLines(verticalLines, cleanedMask, w, h, vertical = true, cropRect = cropRect)
-            val aspectBias = when {
-                h >= w * 0.90f -> 0.55f
-                w > h * 1.30f -> -0.55f
-                else -> 0.0f
+        val chosen = when {
+            forceVertical -> verticalLines
+            forceHorizontal -> horizontalLines
+            !japanese -> horizontalLines.ifEmpty { verticalLines }
+            else -> {
+                val horizontalScore = scoreLines(horizontalLines, cleanedMask, w, h, vertical = false, cropRect = cropRect)
+                val verticalScore = scoreLines(verticalLines, cleanedMask, w, h, vertical = true, cropRect = cropRect)
+                val aspectBias = when {
+                    h >= w * 0.90f -> 0.55f
+                    w > h * 1.30f -> -0.55f
+                    else -> 0.0f
+                }
+                if (verticalLines.isNotEmpty() && verticalScore + aspectBias >= horizontalScore) {
+                    verticalLines
+                } else {
+                    horizontalLines.ifEmpty { verticalLines }
+                }
             }
-            if (verticalLines.isNotEmpty() && verticalScore + aspectBias >= horizontalScore) {
-                verticalLines
-            } else {
-                horizontalLines.ifEmpty { verticalLines }
-            }
-        }
-
-        if (chosen.isEmpty() || chosen.size > 32) {
-            return listOf(SegmentedTextLine(pageRect, isVerticalBlock(pageRect, originLanguage)))
         }
 
         val filtered = if (japanese) filterSmallJapaneseLines(chosen) else chosen
-        val result = filtered.map { line ->
+        val bounded = coalesceLines(filtered)
+        val result = bounded.map { line ->
             val rect = Rect(line.rect)
             if (!rect.intersect(0, 0, bitmap.width, bitmap.height)) {
                 Rect(pageRect)
@@ -123,8 +130,37 @@ class TextLineSegmenter {
         }.filter { !it.rect.isEmpty }
 
         return result.ifEmpty {
-            listOf(SegmentedTextLine(pageRect, isVerticalBlock(pageRect, originLanguage)))
+            singleLine(pageRect, originLanguage, forceVertical, forceHorizontal)
         }
+    }
+
+    private fun singleLine(
+        pageRect: Rect,
+        originLanguage: String,
+        forceVertical: Boolean,
+        forceHorizontal: Boolean
+    ): List<SegmentedTextLine> {
+        val vertical = when {
+            forceVertical -> true
+            forceHorizontal -> false
+            else -> isVerticalBlock(pageRect, originLanguage)
+        }
+        return listOf(SegmentedTextLine(pageRect, vertical))
+    }
+
+    private fun coalesceLines(lines: List<SegmentedTextLine>): List<SegmentedTextLine> {
+        if (lines.size <= MAX_RECOGNITION_LINES) return lines
+        val groupSize = (lines.size + MAX_RECOGNITION_LINES - 1) / MAX_RECOGNITION_LINES
+        val merged = ArrayList<SegmentedTextLine>(MAX_RECOGNITION_LINES)
+        var index = 0
+        while (index < lines.size) {
+            val end = min(index + groupSize, lines.size)
+            val rect = Rect(lines[index].rect)
+            for (i in index + 1 until end) rect.union(lines[i].rect)
+            merged.add(SegmentedTextLine(rect, lines[index].vertical))
+            index = end
+        }
+        return merged
     }
 
     private fun isJapanese(originLanguage: String): Boolean =
@@ -408,7 +444,7 @@ class TextLineSegmenter {
     private fun filterSmallJapaneseLines(
         lines: List<SegmentedTextLine>
     ): List<SegmentedTextLine> {
-        if (lines.size < 3) return lines
+        if (lines.size < 2) return lines
         val vertical = lines.count { it.vertical } >= lines.size / 2
         val thickness = lines.map {
             if (vertical) it.rect.width().toDouble() else it.rect.height().toDouble()
@@ -422,7 +458,9 @@ class TextLineSegmenter {
                 areas[index] < medianArea * 0.55
             !isSmall
         }
-        return kept.ifEmpty { lines }
+        if (kept.isNotEmpty()) return kept
+        val mainIndex = lines.indices.maxByOrNull { areas[it] } ?: return lines
+        return listOf(lines[mainIndex])
     }
 
     private fun median(values: List<Double>): Double {
