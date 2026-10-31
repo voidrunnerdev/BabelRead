@@ -1,36 +1,35 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
-import com.example.i18n.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import coil.compose.AsyncImage
 import com.example.data.db.MangaEntity
+import com.example.i18n.Text
+import com.example.ui.components.AppScaffold
+import com.example.ui.components.AppTopBar
+import com.example.ui.components.MangaCover
+import com.example.ui.components.SectionHeader
+import com.example.ui.components.StateView
+import com.example.ui.components.SurfaceCard
+import com.example.ui.theme.AppSizes
+import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HiddenMangasScreen(
     viewModel: MangaViewModel,
@@ -45,12 +44,14 @@ fun HiddenMangasScreen(
     val hiddenMangas = remember(allMangas, hiddenIds) { allMangas.filter { it.id in hiddenIds } }
     val selectableMangas = remember(allMangas, hiddenIds) { allMangas.filter { it.id !in hiddenIds } }
 
-    Scaffold(
+    AppScaffold(
         topBar = {
-            TopAppBar(
-                title = {
+            AppTopBar(
+                title = "Gizli Mangalar",
+                titleContent = {
                     Text(
                         text = "Gizli Mangalar",
+                        style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -60,7 +61,7 @@ fun HiddenMangasScreen(
                         onClick = onNavigateBack,
                         modifier = Modifier.testTag("hidden_mangas_back")
                     ) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Geri", tint = Color.White)
+                        Icon(Icons.Default.ArrowBack, contentDescription = "Geri")
                     }
                 },
                 actions = {
@@ -69,20 +70,19 @@ fun HiddenMangasScreen(
                             onClick = { menuExpanded = true },
                             modifier = Modifier.testTag("hidden_mangas_menu")
                         ) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "Menü", tint = Color.White)
+                            Icon(Icons.Default.MoreVert, contentDescription = "Menü")
                         }
                         DropdownMenu(
                             expanded = menuExpanded,
-                            onDismissRequest = { menuExpanded = false },
-                            modifier = Modifier.background(Color(0xFF262626))
+                            onDismissRequest = { menuExpanded = false }
                         ) {
                             DropdownMenuItem(
                                 text = {
                                     Text(
                                         text = "Gizlenecek mangaları seç",
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 13.sp
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = FontWeight.Bold
                                     )
                                 },
                                 leadingIcon = {
@@ -90,7 +90,7 @@ fun HiddenMangasScreen(
                                         imageVector = Icons.Default.VisibilityOff,
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(20.dp)
+                                        modifier = Modifier.size(AppSizes.icon)
                                     )
                                 },
                                 onClick = {
@@ -101,64 +101,33 @@ fun HiddenMangasScreen(
                             )
                         }
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF161616),
-                    titleContentColor = Color.White
-                )
+                }
             )
-        },
-        containerColor = Color(0xFF121212)
+        }
     ) { paddingValues ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = AppSpacing.lg)
         ) {
             if (hiddenMangas.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.padding(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.VisibilityOff,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
-                            modifier = Modifier.size(96.dp)
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(
-                            text = "Gizli manga yok",
-                            fontSize = 20.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "Sağ üstteki ⋮ menüsünden gizlenecek mangaları seçebilirsiniz. Gizlenen mangalar kütüphanede görünmez.",
-                            fontSize = 14.sp,
-                            color = Color.Gray,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                }
-            } else {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "Gizli Mangalar (${hiddenMangas.size})",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                StateView(
+                    title = "Gizli manga yok",
+                    message = "Sağ üstteki ⋮ menüsünden gizlenecek mangaları seçebilirsiniz. Gizlenen mangalar kütüphanede görünmez.",
+                    icon = Icons.Default.VisibilityOff,
                     modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
+                SectionHeader(title = "Gizli Mangalar (${hiddenMangas.size})")
+                Spacer(modifier = Modifier.height(AppSpacing.md))
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                    contentPadding = PaddingValues(bottom = AppSpacing.lg),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
                 ) {
                     items(hiddenMangas, key = { it.id }) { manga ->
                         HiddenMangaCard(
@@ -190,66 +159,60 @@ private fun HiddenMangaCard(
     onOpen: () -> Unit,
     onUnhide: () -> Unit
 ) {
-    Card(
+    SurfaceCard(
         modifier = Modifier
             .fillMaxWidth()
-            .height(84.dp)
-            .clickable { onOpen() }
             .testTag("hidden_manga_card_${manga.id}"),
-        shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
+        onClick = onOpen,
+        contentPadding = PaddingValues(AppSpacing.sm)
     ) {
         Row(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AsyncImage(
-                model = manga.coverUrl,
-                contentDescription = manga.title,
-                contentScale = ContentScale.Crop,
+            MangaCover(
+                imageUrl = manga.coverUrl,
+                title = manga.title,
                 modifier = Modifier
-                    .width(62.dp)
-                    .fillMaxHeight()
+                    .width(56.dp)
+                    .height(78.dp)
             )
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(horizontal = 12.dp)
-            ) {
+            Spacer(modifier = Modifier.width(AppSpacing.md))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = manga.title,
-                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(3.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xxs))
                 Text(
                     text = manga.sourceName,
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
-                    fontSize = 11.sp,
                     fontWeight = FontWeight.Bold
                 )
             }
             TextButton(
                 onClick = onUnhide,
                 modifier = Modifier
-                    .padding(end = 4.dp)
+                    .heightIn(min = AppSizes.minTouchTarget)
                     .testTag("unhide_${manga.id}")
             ) {
                 Icon(
                     imageVector = Icons.Default.Visibility,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(18.dp)
+                    modifier = Modifier.size(AppSizes.iconSmall)
                 )
-                Spacer(modifier = Modifier.width(4.dp))
+                Spacer(modifier = Modifier.width(AppSpacing.xs))
                 Text(
                     text = "Göster",
+                    style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 13.sp
+                    fontWeight = FontWeight.Bold
                 )
             }
         }
@@ -266,8 +229,9 @@ private fun HideMangaPickerDialog(
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = Color(0xFF1E1E1E),
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
             modifier = Modifier
                 .fillMaxWidth()
                 .fillMaxHeight(0.85f)
@@ -275,21 +239,21 @@ private fun HideMangaPickerDialog(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(16.dp)
+                    .padding(AppSpacing.lg)
             ) {
                 Text(
                     text = "Gizlenecek Mangaları Seç",
-                    fontSize = 17.sp,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    color = MaterialTheme.colorScheme.onSurface
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xs))
                 Text(
                     text = "Kütüphanede görünmesini istemediğiniz mangaları işaretleyin. Birden fazla manga seçebilirsiniz.",
-                    fontSize = 12.sp,
-                    color = Color.Gray
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.md))
 
                 if (mangas.isEmpty()) {
                     Box(
@@ -298,90 +262,113 @@ private fun HideMangaPickerDialog(
                             .fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("Gizlenebilecek manga yok", color = Color.Gray, fontSize = 13.sp)
+                        Text(
+                            text = "Gizlenebilecek manga yok",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 } else {
                     LazyColumn(
                         modifier = Modifier.weight(1f),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
                     ) {
                         items(mangas, key = { it.id }) { manga ->
                             val checked = selected.contains(manga.id)
-                            Row(
+                            val toggleSelection: () -> Unit = {
+                                if (checked) selected.remove(manga.id) else selected.add(manga.id)
+                            }
+                            SurfaceCard(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        if (checked) MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-                                        else Color(0xFF262626)
-                                    )
-                                    .clickable {
-                                        if (checked) selected.remove(manga.id) else selected.add(manga.id)
-                                    }
-                                    .padding(8.dp)
                                     .testTag("pick_manga_${manga.id}"),
-                                verticalAlignment = Alignment.CenterVertically
+                                onClick = toggleSelection,
+                                color = if (checked) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant
+                                },
+                                contentColor = if (checked) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (checked) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.outlineVariant
+                                    }
+                                ),
+                                contentPadding = PaddingValues(
+                                    horizontal = AppSpacing.sm,
+                                    vertical = AppSpacing.xs
+                                )
                             ) {
-                                Checkbox(
-                                    checked = checked,
-                                    onCheckedChange = {
-                                        if (checked) selected.remove(manga.id) else selected.add(manga.id)
-                                    },
-                                    colors = CheckboxDefaults.colors(
-                                        checkedColor = MaterialTheme.colorScheme.primary,
-                                        uncheckedColor = Color.Gray
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(
+                                        checked = checked,
+                                        onCheckedChange = { toggleSelection() },
+                                        colors = CheckboxDefaults.colors(
+                                            checkedColor = MaterialTheme.colorScheme.primary,
+                                            uncheckedColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
                                     )
-                                )
-                                AsyncImage(
-                                    model = manga.coverUrl,
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier
-                                        .width(36.dp)
-                                        .height(50.dp)
-                                        .clip(RoundedCornerShape(4.dp))
-                                )
-                                Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        text = manga.title,
-                                        color = Color.White,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
+                                    MangaCover(
+                                        imageUrl = manga.coverUrl,
+                                        title = manga.title,
+                                        modifier = Modifier
+                                            .width(36.dp)
+                                            .height(50.dp)
                                     )
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = manga.sourceName,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontSize = 11.sp
-                                    )
+                                    Spacer(modifier = Modifier.width(AppSpacing.sm))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = manga.title,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurface,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Spacer(modifier = Modifier.height(AppSpacing.xxs))
+                                        Text(
+                                            text = manga.sourceName,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.md))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.End
                 ) {
                     TextButton(
                         onClick = onDismiss,
-                        modifier = Modifier.testTag("hide_picker_cancel")
+                        modifier = Modifier
+                            .heightIn(min = AppSizes.minTouchTarget)
+                            .testTag("hide_picker_cancel")
                     ) {
-                        Text("Vazgeç", color = Color.Gray)
+                        Text(
+                            text = "Vazgeç",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(AppSpacing.sm))
                     Button(
                         onClick = { onConfirm(selected.toSet()) },
                         enabled = selected.isNotEmpty(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary
-                        ),
-                        modifier = Modifier.testTag("hide_picker_confirm")
+                        modifier = Modifier
+                            .heightIn(min = AppSizes.minTouchTarget)
+                            .testTag("hide_picker_confirm")
                     ) {
                         Text(
                             text = if (selected.isEmpty()) "Gizle" else "Gizle (${selected.size})",

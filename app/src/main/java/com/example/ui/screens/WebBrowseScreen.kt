@@ -10,7 +10,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -24,7 +23,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
@@ -41,8 +39,6 @@ import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import com.example.i18n.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -56,12 +52,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.example.data.net.PageRefererRegistry
@@ -71,6 +64,12 @@ import com.example.data.web.CaptureSeries
 import com.example.data.web.WebCaptureMode
 import com.example.data.web.WebCaptureParser
 import com.example.data.web.WebScripts
+import com.example.i18n.Text
+import com.example.ui.components.AppScaffold
+import com.example.ui.components.AppTopBar
+import com.example.ui.theme.AppElevation
+import com.example.ui.theme.AppSizes
+import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -115,7 +114,7 @@ fun WebBrowseScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xFF121212)),
+                .background(MaterialTheme.colorScheme.background),
             contentAlignment = Alignment.Center
         ) {
             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
@@ -210,56 +209,45 @@ fun WebBrowseScreen(
         if (web != null && web.canGoBack()) web.goBack() else onNavigateBack()
     }
 
-    Scaffold(
-        containerColor = Color(0xFF121212),
+    AppScaffold(
         topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 28.dp, start = 4.dp, end = 12.dp, bottom = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onNavigateBack) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Geri",
-                        tint = Color.White
-                    )
-                }
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = sourceName,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 15.sp,
-                        maxLines = 1
-                    )
-                    Text(
-                        text = currentUrl.ifBlank { baseUrl },
-                        color = Color(0xFF9E9E9E),
-                        fontSize = 11.sp,
-                        maxLines = 1
-                    )
-                }
-                IconButton(onClick = { startQuickRead(false) }, enabled = !quickReading) {
-                    if (quickReading && !quickReadViaTranslate) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    } else {
+            AppTopBar(
+                title = sourceName,
+                subtitle = currentUrl.ifBlank { baseUrl },
+                navigationIcon = {
+                    IconButton(onClick = onNavigateBack) {
                         Icon(
-                            Icons.Default.MenuBook,
-                            contentDescription = "Oku (eklemeden)",
-                            tint = Color.White
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Geri",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { startQuickRead(false) }, enabled = !quickReading) {
+                        if (quickReading && !quickReadViaTranslate) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(AppSizes.icon),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            Icon(
+                                Icons.Default.MenuBook,
+                                contentDescription = "Oku (eklemeden)",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    IconButton(onClick = { webViewRef?.reload() }) {
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = "Yenile",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-                IconButton(onClick = { webViewRef?.reload() }) {
-                    Icon(Icons.Default.Refresh, contentDescription = "Yenile", tint = Color.White)
-                }
-            }
+            )
         },
         floatingActionButton = {
             Column(horizontalAlignment = Alignment.End) {
@@ -267,23 +255,34 @@ fun WebBrowseScreen(
                 FloatingActionButton(
                     onClick = { startQuickRead(true, showPicker = false) },
                     modifier = Modifier
-                        .border(1.dp, Color.White.copy(alpha = 0.25f), shape = FloatingActionButtonDefaults.shape)
+                        .border(
+                            1.dp,
+                            MaterialTheme.colorScheme.outline,
+                            shape = FloatingActionButtonDefaults.shape
+                        )
                         .testTag("browser_translate_fab"),
-                    containerColor = Color.DarkGray.copy(alpha = 0.45f),
-                    contentColor = Color.White.copy(alpha = 0.90f),
-                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 2.dp, pressedElevation = 4.dp)
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    elevation = FloatingActionButtonDefaults.elevation(
+                        defaultElevation = AppElevation.low,
+                        pressedElevation = AppElevation.medium
+                    )
                 ) {
                     if (quickReading && quickReadViaTranslate) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color.White, strokeWidth = 2.dp)
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(AppSizes.iconLarge),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            strokeWidth = 2.dp
+                        )
                     } else {
                         Icon(
                             imageVector = Icons.Default.Translate,
                             contentDescription = "Türkçe Çeviri",
-                            tint = Color.White.copy(alpha = 0.90f)
+                            tint = MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.md))
                 ExtendedFloatingActionButton(
                     onClick = {
                     webViewRef?.evaluateJavascript(WebScripts.CAPTURE) { value ->
@@ -303,10 +302,10 @@ fun WebBrowseScreen(
                     }
                 },
                 containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = Color.Black
+                contentColor = MaterialTheme.colorScheme.onPrimary
             ) {
                 Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
+                Spacer(modifier = Modifier.width(AppSpacing.sm))
                 Text("Seri Ekle")
                 }
             }
@@ -427,14 +426,26 @@ fun WebBrowseScreen(
     if (feedback != null) {
         AlertDialog(
             onDismissRequest = { feedback = null },
-            containerColor = Color(0xFF1E1E1E),
+            containerColor = MaterialTheme.colorScheme.surface,
             confirmButton = {
                 TextButton(onClick = { feedback = null }) {
                     Text("Tamam")
                 }
             },
-            title = { Text("Bilgi", color = Color.White) },
-            text = { Text(feedback ?: "", color = Color(0xFFBDBDBD)) }
+            title = {
+                Text(
+                    "Bilgi",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            text = {
+                Text(
+                    feedback ?: "",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         )
     }
 }
@@ -454,29 +465,34 @@ private fun CaptureDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1E1E1E),
-        title = { Text("Seriyi Ekle", color = Color.White) },
+        containerColor = MaterialTheme.colorScheme.surface,
+        title = {
+            Text(
+                "Seriyi Ekle",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        },
         text = {
             Column {
                 Text(
                     result.title.ifBlank { "Başlıksız" },
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 15.sp
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xs))
                 Text(
                     "${result.chapters.size} bölüm bulundu. Eklemek istediklerinizi seçin:",
-                    color = Color(0xFF9E9E9E),
-                    fontSize = 12.sp
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xxs))
                 Text(
                     "Bölümler okurken internetten yayınlanır; cihaza indirilmez.",
-                    color = Color(0xFF757575),
-                    fontSize = 11.sp
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
                 Box(modifier = Modifier.heightIn(max = 360.dp)) {
                     LazyColumn {
                         itemsIndexed(result.chapters) { _, chapter ->
@@ -486,17 +502,17 @@ private fun CaptureDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { selected[chapter.url] = !checked }
-                                    .padding(vertical = 2.dp)
+                                    .padding(vertical = AppSpacing.xxs)
                             ) {
                                 Checkbox(
                                     checked = checked,
                                     onCheckedChange = { selected[chapter.url] = it }
                                 )
-                                Spacer(modifier = Modifier.width(4.dp))
+                                Spacer(modifier = Modifier.width(AppSpacing.xs))
                                 Text(
                                     chapter.title,
-                                    color = Color(0xFFE0E0E0),
-                                    fontSize = 13.sp,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface,
                                     maxLines = 1
                                 )
                             }
@@ -517,7 +533,10 @@ private fun CaptureDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("İptal", color = Color(0xFF9E9E9E))
+                Text(
+                    "İptal",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     )
@@ -535,32 +554,36 @@ private fun SeriesListDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1E1E1E),
-        title = { Text("Seri Listesi Algılandı", color = Color.White) },
+        containerColor = MaterialTheme.colorScheme.surface,
+        title = {
+            Text(
+                "Seri Listesi Algılandı",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        },
         text = {
             Column {
                 Text(
                     "${series.size} seri bulundu. Eklemek istediklerinizi seçin; her seri ayrı ayrı kütüphaneye eklenir.",
-                    color = Color(0xFF9E9E9E),
-                    fontSize = 12.sp
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xxs))
                 Text(
                     "Mangalar cihaza indirilmez; bölümler okurken internetten yayınlanır.",
-                    color = Color(0xFF757575),
-                    fontSize = 11.sp
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                TextButton(
-                    onClick = {
-                        if (allSelected) selected.clear()
-                        else series.forEach { selected[it.url] = true }
-                    }
-                ) {
+                Spacer(modifier = Modifier.height(AppSpacing.xs))
+                TextButton(onClick = {
+                    if (allSelected) selected.clear()
+                    else series.forEach { selected[it.url] = true }
+                }) {
                     Text(
                         if (allSelected) "Seçimi Kaldır" else "Tümünü Seç",
-                        color = MaterialTheme.colorScheme.primary,
-                        fontSize = 12.sp
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
                 Box(modifier = Modifier.heightIn(max = 340.dp)) {
@@ -572,24 +595,24 @@ private fun SeriesListDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { selected[item.url] = !checked }
-                                    .padding(vertical = 2.dp)
+                                    .padding(vertical = AppSpacing.xxs)
                             ) {
                                 Checkbox(
                                     checked = checked,
                                     onCheckedChange = { selected[item.url] = it }
                                 )
-                                Spacer(modifier = Modifier.width(4.dp))
+                                Spacer(modifier = Modifier.width(AppSpacing.xs))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         item.title,
-                                        color = Color(0xFFE0E0E0),
-                                        fontSize = 13.sp,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurface,
                                         maxLines = 1
                                     )
                                     Text(
                                         item.url.removePrefix("https://").removePrefix("http://"),
-                                        color = Color(0xFF757575),
-                                        fontSize = 10.sp,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1
                                     )
                                 }
@@ -611,7 +634,10 @@ private fun SeriesListDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("İptal", color = Color(0xFF9E9E9E))
+                Text(
+                    "İptal",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     )
@@ -643,32 +669,36 @@ private fun QuickReadDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1E1E1E),
-        title = { Text("Okunacak Görseller (${pages.size})", color = Color.White) },
+        containerColor = MaterialTheme.colorScheme.surface,
+        title = {
+            Text(
+                "Okunacak Görseller (${pages.size})",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        },
         text = {
             Column {
                 Text(
                     "Tümü seçili. İstemediğiniz görsellerin işaretini kaldırabilirsiniz; sadece seçili olanlar açılır.",
-                    color = Color(0xFF9E9E9E),
-                    fontSize = 12.sp
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(2.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xxs))
                 Text(
                     "Görseller cihaza indirilmez; okurken internetten yayınlanır.",
-                    color = Color(0xFF757575),
-                    fontSize = 11.sp
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                TextButton(
-                    onClick = {
-                        if (allSelected) selected.clear()
-                        else pages.forEach { selected[it] = true }
-                    }
-                ) {
+                Spacer(modifier = Modifier.height(AppSpacing.xs))
+                TextButton(onClick = {
+                    if (allSelected) selected.clear()
+                    else pages.forEach { selected[it] = true }
+                }) {
                     Text(
                         if (allSelected) "Seçimi Kaldır" else "Tümünü Seç",
-                        color = MaterialTheme.colorScheme.primary,
-                        fontSize = 12.sp
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
                     )
                 }
                 Box(modifier = Modifier.heightIn(max = 320.dp)) {
@@ -680,7 +710,7 @@ private fun QuickReadDialog(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable { selected[url] = !checked }
-                                    .padding(vertical = 3.dp)
+                                    .padding(vertical = AppSpacing.xs)
                             ) {
                                 Checkbox(
                                     checked = checked,
@@ -693,20 +723,20 @@ private fun QuickReadDialog(
                                     modifier = Modifier
                                         .width(40.dp)
                                         .height(56.dp)
-                                        .clip(RoundedCornerShape(4.dp))
-                                        .background(Color(0xFF262626))
+                                        .clip(MaterialTheme.shapes.small)
+                                        .background(MaterialTheme.colorScheme.surfaceVariant)
                                 )
-                                Spacer(modifier = Modifier.width(10.dp))
+                                Spacer(modifier = Modifier.width(AppSpacing.sm))
                                 Text(
                                     "${index + 1}. görsel",
-                                    color = Color(0xFFE0E0E0),
-                                    fontSize = 13.sp
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         }
                     }
                 }
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xs))
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -714,8 +744,12 @@ private fun QuickReadDialog(
                         .clickable { translate = !translate }
                 ) {
                     Checkbox(checked = translate, onCheckedChange = { translate = it })
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Çeviri ile oku", color = Color(0xFFE0E0E0), fontSize = 13.sp)
+                    Spacer(modifier = Modifier.width(AppSpacing.xs))
+                    Text(
+                        "Çeviri ile oku",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
                 }
             }
         },
@@ -729,7 +763,10 @@ private fun QuickReadDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("İptal", color = Color(0xFF9E9E9E))
+                Text(
+                    "İptal",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     )

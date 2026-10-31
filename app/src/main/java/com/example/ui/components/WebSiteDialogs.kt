@@ -1,6 +1,7 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -16,8 +17,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
-import com.example.i18n.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -26,11 +25,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.example.data.web.WebSite
+import com.example.i18n.Text
+import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
 
 @Composable
@@ -45,50 +42,44 @@ fun AddWebSiteDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1E1E1E),
-        title = { Text("Web Sitesi Ekle", color = Color.White) },
+        containerColor = MaterialTheme.colorScheme.surface,
+        title = {
+            Text(
+                "Web Sitesi Ekle",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        },
         text = {
             Column {
                 Text(
                     "Manga okumak istediğiniz sitenin adresini girin. Site eklenince manga listesi tarayıcı açılmadan otomatik toplanır; listede daha fazla manga için katalog adresi verebilirsiniz.",
-                    color = Color(0xFF9E9E9E),
-                    fontSize = 12.sp
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                Spacer(modifier = Modifier.height(12.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.md))
                 OutlinedTextField(
                     value = url,
                     onValueChange = { url = it },
                     label = { Text("Site adresi (ör. mangasite.com)") },
                     singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = Color(0xFF424242),
-                        focusedLabelColor = MaterialTheme.colorScheme.primary,
-                        unfocusedLabelColor = Color.Gray
-                    ),
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
                     label = { Text("Görünen ad (isteğe bağlı)") },
                     singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = Color.White,
-                        unfocusedTextColor = Color.White,
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = Color(0xFF424242),
-                        focusedLabelColor = MaterialTheme.colorScheme.primary,
-                        unfocusedLabelColor = Color.Gray
-                    ),
                     modifier = Modifier.fillMaxWidth()
                 )
                 if (url.isNotBlank() && normalized == null) {
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text("Geçerli bir site adresi girin.", color = Color.Red, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(AppSpacing.sm))
+                    Text(
+                        "Geçerli bir site adresi girin.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
             }
         },
@@ -105,7 +96,10 @@ fun AddWebSiteDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("İptal", color = Color(0xFF9E9E9E))
+                Text(
+                    "İptal",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     )
@@ -119,35 +113,55 @@ fun ManageWebSitesDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1E1E1E),
-        title = { Text("Web Siteleri", color = Color.White) },
+        containerColor = MaterialTheme.colorScheme.surface,
+        title = {
+            Text(
+                "Web Siteleri",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        },
         text = {
             if (webSites.isEmpty()) {
-                Text("Henüz web sitesi eklenmedi.", color = Color.Gray, fontSize = 13.sp)
+                Text(
+                    "Henüz web sitesi eklenmedi.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             } else {
                 Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
                     webSites.forEach { site ->
-                        Row(
+                        SurfaceCard(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                                .padding(vertical = AppSpacing.xs),
+                            contentPadding = PaddingValues(
+                                horizontal = AppSpacing.md,
+                                vertical = AppSpacing.sm
+                            )
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    site.name,
-                                    color = Color.White,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(site.origin, color = Color.Gray, fontSize = 11.sp)
-                            }
-                            IconButton(onClick = { onRemove(site.id) }) {
-                                Icon(
-                                    Icons.Default.Delete,
-                                    contentDescription = "Sil",
-                                    tint = Color(0xFFEF5350)
-                                )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        site.name,
+                                        style = MaterialTheme.typography.titleSmall,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    Text(
+                                        site.origin,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                IconButton(onClick = { onRemove(site.id) }) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        contentDescription = "Sil",
+                                        tint = MaterialTheme.colorScheme.error
+                                    )
+                                }
                             }
                         }
                     }

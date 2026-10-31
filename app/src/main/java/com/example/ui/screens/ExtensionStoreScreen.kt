@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,36 +12,32 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import com.example.i18n.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -52,21 +50,27 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import coil.compose.AsyncImage
 import com.example.extensions.ExtensionIndex
 import com.example.extensions.ExtensionManager
 import com.example.extensions.languageLabel
+import com.example.i18n.Text
 import com.example.i18n.TranslationLanguages
+import com.example.ui.components.AppScaffold
+import com.example.ui.components.AppTopBar
 import com.example.ui.components.LanguagePickerDialog
 import com.example.ui.components.LanguagePickerOption
+import com.example.ui.components.SectionHeader
+import com.example.ui.components.StateView
+import com.example.ui.components.SurfaceCard
+import com.example.ui.theme.AppSizes
+import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
-import coil.compose.AsyncImage
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -115,7 +119,6 @@ private fun variantRank(variant: StoreVariant): Int = when {
     else -> 3
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ExtensionStoreScreen(
     onNavigateBack: () -> Unit,
@@ -279,60 +282,55 @@ fun ExtensionStoreScreen(
         }
     }
 
-    Scaffold(
+    AppScaffold(
         topBar = {
-            TopAppBar(
+            AppTopBar(
+                title = "Eklenti Mağazası",
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(
                             Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Geri",
-                            tint = Color.White,
+                            tint = MaterialTheme.colorScheme.onSurface,
                         )
                     }
                 },
-                title = {
-                    Text(
-                        "Eklenti Mağazası",
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontSize = 18.sp,
-                    )
-                },
                 actions = {
-                    TextButton(onClick = { showLanguagePicker = true }) {
+                    TextButton(
+                        onClick = { showLanguagePicker = true },
+                        modifier = Modifier.heightIn(min = AppSizes.minTouchTarget)
+                    ) {
                         Icon(
                             Icons.Default.FilterList,
                             contentDescription = "Dil filtresi",
                             tint = if (languageFilter != null) {
                                 MaterialTheme.colorScheme.primary
                             } else {
-                                Color.White
+                                MaterialTheme.colorScheme.onSurfaceVariant
                             },
-                            modifier = Modifier.size(18.dp),
+                            modifier = Modifier.size(AppSizes.iconSmall),
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
+                        Spacer(modifier = Modifier.width(AppSpacing.xs))
                         Text(
                             languageFilter?.let { languageLabel(it) } ?: "Tümü",
+                            style = MaterialTheme.typography.labelLarge,
                             color = if (languageFilter != null) {
                                 MaterialTheme.colorScheme.primary
                             } else {
-                                Color.White
+                                MaterialTheme.colorScheme.onSurfaceVariant
                             },
-                            fontSize = 13.sp,
                         )
                     }
                     IconButton(onClick = { loadStore() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "Yenile", tint = Color.White)
+                        Icon(
+                            Icons.Default.Refresh,
+                            contentDescription = "Yenile",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF161616),
-                    titleContentColor = Color.White,
-                ),
             )
         },
-        containerColor = Color(0xFF121212),
     ) { paddingValues ->
         Column(
             modifier = Modifier
@@ -353,47 +351,63 @@ fun ExtensionStoreScreen(
                     onValueChange = { query = it },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = AppSpacing.lg, vertical = AppSpacing.sm)
                         .testTag("extension_search"),
-                    placeholder = { Text("Eklenti ara…", color = Color.Gray) },
-                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color.Gray) },
+                    placeholder = {
+                        Text(
+                            "Eklenti ara…",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Search,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
                     singleLine = true,
                 )
 
                 Text(
                     "${installed.size} kurulu · ${filtered.size} seçenek",
-                    color = Color.Gray,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = AppSpacing.lg, vertical = AppSpacing.xs),
                 )
 
                 if (loadError != null) {
-                    Text(
-                        "Hata: $loadError",
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(16.dp),
-                        fontSize = 13.sp,
+                    StateView(
+                        title = "Hata",
+                        message = loadError,
+                        icon = Icons.Default.ErrorOutline
                     )
                 }
 
                 if (loading) {
-                    Box(
+                    StateView(
+                        title = "Yükleniyor…",
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(32.dp),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-                    }
+                            .padding(vertical = AppSpacing.xl),
+                        loading = true,
+                    )
                 } else {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = AppSpacing.lg,
+                            end = AppSpacing.lg,
+                            bottom = AppSpacing.xl
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                    ) {
                         if (filtered.isEmpty()) {
                             item {
-                                Text(
-                                    "Eklenti bulunamadı.",
-                                    color = Color.Gray,
-                                    fontSize = 13.sp,
-                                    modifier = Modifier.padding(16.dp),
+                                StateView(
+                                    title = "Eklenti bulunamadı.",
+                                    icon = Icons.Default.Extension
                                 )
                             }
                         }
@@ -433,7 +447,6 @@ fun ExtensionStoreScreen(
                                 onUpdate = { updateVariant(variant) },
                                 onRemove = { removeVariant(variant) },
                             )
-                            HorizontalDivider(color = Color(0xFF2C2C2C))
                         }
                     }
                 }
@@ -490,137 +503,156 @@ private fun ExtensionRow(
     onRemove: () -> Unit,
 ) {
     val item = variant.item
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    SurfaceCard(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(AppSpacing.md),
     ) {
-        if (!item.iconUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = item.iconUrl,
-                contentDescription = null,
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp)),
-                contentScale = ContentScale.Crop,
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Color(0xFF2A2A2A)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Default.Extension,
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (!item.iconUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = item.iconUrl,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(22.dp),
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(MaterialTheme.shapes.small),
+                    contentScale = ContentScale.Crop,
                 )
-            }
-        }
-        Spacer(modifier = Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    variant.title,
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 15.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                if (item.isNsfw) {
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        "18+",
-                        color = Color(0xFFFF6E6E),
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(4.dp))
-                            .background(Color(0xFF3A1E1E))
-                            .padding(horizontal = 4.dp, vertical = 1.dp),
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(MaterialTheme.shapes.small)
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        Icons.Default.Extension,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(AppSizes.icon),
                     )
                 }
             }
-            if (variant.isMulti) {
-                Text(
-                    "Tüm dil kaynakları birlikte",
-                    color = Color.Gray,
-                    fontSize = 10.sp,
-                )
-            }
-            if (status?.message != null) {
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    status.message,
-                    color = if (
-                        status.message == "Kuruldu" ||
-                        status.message == "Güncellendi" ||
-                        status.message == "Kaldırıldı"
-                    ) {
-                        Color(0xFF7BD88F)
-                    } else {
-                        Color(0xFFFFB86E)
-                    },
-                    fontSize = 12.sp,
-                )
-            }
-        }
-        Spacer(modifier = Modifier.width(8.dp))
-        if (status?.running == true) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(20.dp),
-                strokeWidth = 2.dp,
-                color = MaterialTheme.colorScheme.primary,
-            )
-        } else {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (showUpdate) {
-                    Button(onClick = onUpdate, contentPadding = PaddingValues(horizontal = 10.dp)) {
-                        Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Güncelle", fontSize = 12.sp)
+            Spacer(modifier = Modifier.width(AppSpacing.md))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        variant.title,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (item.isNsfw) {
+                        Spacer(modifier = Modifier.width(AppSpacing.xs))
+                        Text(
+                            "18+",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(MaterialTheme.shapes.extraSmall)
+                                .background(MaterialTheme.colorScheme.error.copy(alpha = 0.14f))
+                                .padding(horizontal = AppSpacing.xs, vertical = AppSpacing.xxs),
+                        )
                     }
-                    Spacer(modifier = Modifier.width(6.dp))
                 }
-                if (isVariantInstalled) {
-                    OutlinedButton(onClick = onRemove, contentPadding = PaddingValues(horizontal = 10.dp)) {
-                        Icon(
-                            Icons.Default.Delete,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            tint = Color(0xFFFF8A8A),
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            if (variant.isMulti) "Tümünü Kaldır" else "Kaldır",
-                            fontSize = 12.sp,
-                            color = Color(0xFFFF8A8A),
-                        )
+                if (variant.isMulti) {
+                    Text(
+                        "Tüm dil kaynakları birlikte",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (status?.message != null) {
+                    Spacer(modifier = Modifier.height(AppSpacing.xxs))
+                    Text(
+                        status.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (
+                            status.message == "Kuruldu" ||
+                            status.message == "Güncellendi" ||
+                            status.message == "Kaldırıldı"
+                        ) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(AppSpacing.sm))
+            if (status?.running == true) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(AppSizes.icon),
+                    strokeWidth = 2.dp,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            } else {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs),
+                ) {
+                    if (showUpdate) {
+                        Button(
+                            onClick = onUpdate,
+                            contentPadding = PaddingValues(horizontal = AppSpacing.md),
+                            modifier = Modifier.heightIn(min = AppSizes.minTouchTarget),
+                        ) {
+                            Icon(
+                                Icons.Default.Download,
+                                contentDescription = null,
+                                modifier = Modifier.size(AppSizes.iconSmall)
+                            )
+                            Spacer(modifier = Modifier.width(AppSpacing.xs))
+                            Text("Güncelle", style = MaterialTheme.typography.labelMedium)
+                        }
                     }
-                } else {
-                    TextButton(onClick = onInstall) {
-                        Icon(
-                            Icons.Default.Download,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(18.dp),
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            when {
-                                !packageInstalled -> "Kur"
-                                variant.isMulti -> "Tümünü Ekle"
-                                else -> "Ekle"
-                            },
-                            color = MaterialTheme.colorScheme.primary,
-                            fontSize = 13.sp,
-                        )
+                    if (isVariantInstalled) {
+                        OutlinedButton(
+                            onClick = onRemove,
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            ),
+                            contentPadding = PaddingValues(horizontal = AppSpacing.md),
+                            modifier = Modifier.heightIn(min = AppSizes.minTouchTarget),
+                        ) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = null,
+                                modifier = Modifier.size(AppSizes.iconSmall),
+                                tint = MaterialTheme.colorScheme.error,
+                            )
+                            Spacer(modifier = Modifier.width(AppSpacing.xs))
+                            Text(
+                                if (variant.isMulti) "Tümünü Kaldır" else "Kaldır",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    } else {
+                        TextButton(
+                            onClick = onInstall,
+                            modifier = Modifier.heightIn(min = AppSizes.minTouchTarget),
+                        ) {
+                            Icon(
+                                Icons.Default.Download,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(AppSizes.iconSmall),
+                            )
+                            Spacer(modifier = Modifier.width(AppSpacing.xs))
+                            Text(
+                                when {
+                                    !packageInstalled -> "Kur"
+                                    variant.isMulti -> "Tümünü Ekle"
+                                    else -> "Ekle"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
                     }
                 }
             }
@@ -637,32 +669,53 @@ private fun AddRepoDialog(
     var inputError by remember { mutableStateOf<String?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Color(0xFF1E1E1E),
-        title = { Text("Depo Ekle", color = Color.White, fontWeight = FontWeight.Bold) },
+        containerColor = MaterialTheme.colorScheme.surface,
+        title = {
+            Text(
+                "Depo Ekle",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.Bold
+            )
+        },
         text = {
             Column {
                 Text(
                     "Depo kök adresini ya da doğrudan index.min.json / index.json bağlantısını yapıştırın.",
-                    color = Color.Gray,
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
                 OutlinedTextField(
                     value = input,
                     onValueChange = {
                         input = it
                         inputError = null
                     },
-                    placeholder = { Text("https://ornek.com/eklenti-deposu", color = Color.Gray) },
+                    placeholder = {
+                        Text(
+                            "https://ornek.com/eklenti-deposu",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
                 if (inputError != null) {
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(inputError ?: "", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                    Spacer(modifier = Modifier.height(AppSpacing.xs))
+                    Text(
+                        inputError ?: "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
                 }
-                Spacer(modifier = Modifier.height(10.dp))
-                Text("Yalnızca güvendiğiniz depoları ekleyin.", color = Color(0xFF888888), fontSize = 11.sp)
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
+                Text(
+                    "Yalnızca güvendiğiniz depoları ekleyin.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         },
         confirmButton = {
@@ -673,10 +726,16 @@ private fun AddRepoDialog(
                 } else {
                     onConfirm(normalized)
                 }
-            }) { Text("Ekle") }
+            }) { Text("Ekle", style = MaterialTheme.typography.labelLarge) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("İptal") }
+            TextButton(onClick = onDismiss) {
+                Text(
+                    "İptal",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         },
     )
 }
@@ -686,27 +745,23 @@ private fun RepoEmptyState(onAddRepo: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(24.dp),
+            .verticalScroll(rememberScrollState())
+            .padding(AppSpacing.xl),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Spacer(modifier = Modifier.height(32.dp))
-        Icon(Icons.Default.Extension, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(44.dp))
-        Spacer(modifier = Modifier.height(12.dp))
-        Text("Henüz depo eklenmedi", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            "Eklentileri görüntülemek için bir depo adresi ekleyin. Depo kök adresini, index.min.json / index.json bağlantısını veya GitHub sayfa adresini yapıştırabilirsiniz; adres otomatik olarak düzenlenir.",
-            color = Color.Gray,
-            fontSize = 12.sp,
+        Spacer(modifier = Modifier.height(AppSpacing.lg))
+        StateView(
+            title = "Henüz depo eklenmedi",
+            message = "Eklentileri görüntülemek için bir depo adresi ekleyin. Depo kök adresini, index.min.json / index.json bağlantısını veya GitHub sayfa adresini yapıştırabilirsiniz; adres otomatik olarak düzenlenir.",
+            icon = Icons.Default.Extension,
+            actionLabel = "Depo Ekle",
+            onAction = onAddRepo
         )
-        Spacer(modifier = Modifier.height(16.dp))
-        Button(onClick = onAddRepo) {
-            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(6.dp))
-            Text("Depo Ekle")
-        }
-        Spacer(modifier = Modifier.height(6.dp))
-        Text("Depoları dilediğiniz zaman listeden kaldırabilirsiniz.", color = Color(0xFF666666), fontSize = 11.sp)
+        Text(
+            "Depoları dilediğiniz zaman listeden kaldırabilirsiniz.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -720,55 +775,80 @@ private fun RepoManager(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = AppSpacing.lg),
     ) {
-        Text("Depolar", color = Color.Gray, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(4.dp))
+        SectionHeader(
+            title = "Depolar",
+            modifier = Modifier.padding(vertical = AppSpacing.xs)
+        )
         repos.sorted().forEach { repo ->
             val error = errors[repo]
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth(),
+            SurfaceCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = AppSpacing.sm),
+                contentPadding = PaddingValues(horizontal = AppSpacing.md, vertical = AppSpacing.sm)
             ) {
-                Icon(Icons.Default.Extension, contentDescription = null, tint = Color.Gray, modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        repoDisplayName(repo),
-                        color = Color.White,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Extension,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(AppSizes.iconSmall)
                     )
-                    if (error != null) {
+                    Spacer(modifier = Modifier.width(AppSpacing.sm))
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            error,
-                            color = MaterialTheme.colorScheme.error,
-                            fontSize = 10.sp,
-                            maxLines = 2,
+                            repoDisplayName(repo),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
+                        )
+                        if (error != null) {
+                            Text(
+                                error,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    IconButton(onClick = { onRemove(repo) }) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = "Depoyu kaldır",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(AppSizes.iconSmall)
                         )
                     }
                 }
-                IconButton(
-                    onClick = { onRemove(repo) },
-                    modifier = Modifier.size(28.dp),
-                ) {
-                    Icon(Icons.Default.Delete, contentDescription = "Depoyu kaldır", tint = Color(0xFFFF8A8A), modifier = Modifier.size(15.dp))
-                }
             }
         }
-        Spacer(modifier = Modifier.height(2.dp))
+        Spacer(modifier = Modifier.height(AppSpacing.xs))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedButton(onClick = onAddRepo, contentPadding = PaddingValues(horizontal = 12.dp)) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Depo Ekle", fontSize = 12.sp)
+            OutlinedButton(
+                onClick = onAddRepo,
+                contentPadding = PaddingValues(horizontal = AppSpacing.md),
+                modifier = Modifier.heightIn(min = AppSizes.minTouchTarget),
+            ) {
+                Icon(
+                    Icons.Default.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(AppSizes.iconSmall)
+                )
+                Spacer(modifier = Modifier.width(AppSpacing.xs))
+                Text("Depo Ekle", style = MaterialTheme.typography.labelLarge)
             }
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("Kaldırma, kurulu eklentileri silmez.", color = Color(0xFF666666), fontSize = 10.sp)
+            Spacer(modifier = Modifier.width(AppSpacing.sm))
+            Text(
+                "Kaldırma, kurulu eklentileri silmez.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
-        Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(AppSpacing.sm))
     }
 }
 

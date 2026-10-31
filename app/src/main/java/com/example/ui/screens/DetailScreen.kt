@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -10,13 +11,23 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.Download
-import androidx.compose.material3.*
-import com.example.i18n.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -28,15 +39,22 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import com.example.data.db.ChapterEntity
 import com.example.data.db.DownloadQueueItemEntity
+import com.example.data.db.MangaEntity
 import com.example.extensions.languageLabel
+import com.example.i18n.Text
+import com.example.ui.components.AppScaffold
+import com.example.ui.components.AppTopBar
+import com.example.ui.components.MangaCover
+import com.example.ui.components.SectionHeader
+import com.example.ui.components.StateView
+import com.example.ui.components.SurfaceCard
+import com.example.ui.theme.AppSizes
+import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetailScreen(
     viewModel: MangaViewModel,
@@ -71,287 +89,390 @@ fun DetailScreen(
         else chapters.filter { languageLabel(it.language) == selectedChapterLang }
     }
 
-    Scaffold(
+    AppScaffold(
         topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = manga?.title ?: "Manga Detay",
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                },
+            AppTopBar(
+                title = manga?.title ?: "Manga Detay",
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack, modifier = Modifier.testTag("detail_back")) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Geri", tint = Color.White)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF161616),
-                    titleContentColor = Color.White
-                )
-            )
-        },
-        containerColor = Color(0xFF121212)
-    ) { paddingValues ->
-        if (loading) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-            }
-        } else if (error != null) {
-            Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = Color.Red, modifier = Modifier.size(64.dp))
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(error ?: "Bilinmeyen bir hata oluştu.", color = Color.White, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Button(onClick = { viewModel.loadMangaDetail(mangaId, sourceName) }) {
-                        Text("Yeniden Dene")
-                    }
-                }
-            }
-        } else if (manga != null) {
-            val m = manga!!
-
-            val mangaQueueItems = downloadQueue.filter { it.mangaId == m.id }
-            val activeDownloadItems = mangaQueueItems.filter {
-                it.status == "Bekliyor" || it.status == "İndiriliyor" || it.status == "CFBekliyor"
-            }
-            val aggregateDownloadProgress = if (activeDownloadItems.isEmpty()) null else {
-                activeDownloadItems.map { if (it.status == "İndiriliyor") it.progress else 0f }.average().toFloat()
-            }
-
-            if (showContextMenu && activeContextChapter != null) {
-                val act = activeContextChapter!!
-                AlertDialog(
-                    onDismissRequest = { showContextMenu = false },
-                    title = { Text(act.title, color = Color.White) },
-                    text = { Text("Seçtiğiniz bölüm için yapmak istediğiniz eylemi belirtin:") },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            viewModel.markChaptersReadFromHere(m.id, act.chapterNumber)
-                            showContextMenu = false
-                        }) {
-                            Text("Buradan İtibaren Okundu İşaretle")
-                        }
-                    },
-                    dismissButton = {
-                        TextButton(onClick = {
-                            viewModel.queueAllChaptersFromHere(m.id, act.chapterNumber)
-                            showContextMenu = false
-                        }) {
-                            Text("Buradan İtibaren İndir")
-                        }
-                    },
-                    containerColor = Color(0xFF1E1E1E),
-                    textContentColor = Color.White,
-                    titleContentColor = Color.White
-                )
-            }
-
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = paddingValues.calculateTopPadding())
-            ) {
-                item {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(300.dp)
+                    IconButton(
+                        onClick = onNavigateBack,
+                        modifier = Modifier.testTag("detail_back")
                     ) {
-                        AsyncImage(
-                            model = m.coverUrl,
-                            contentDescription = m.title,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(
-                                    Brush.verticalGradient(
-                                        colors = listOf(Color.Black.copy(alpha = 0.8f), Color.Transparent, Color(0xFF121212)),
-                                        startY = 0f,
-                                        endY = 900f
-                                    )
-                                )
-                        )
-                        Column(
-                            modifier = Modifier
-                                .align(Alignment.BottomStart)
-                                .padding(16.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .background(
-                                            MaterialTheme.colorScheme.primary,
-                                            shape = RoundedCornerShape(4.dp)
-                                        )
-                                        .padding(horizontal = 8.dp, vertical = 2.dp)
-                                ) {
-                                    Text("Diller: ${m.availableLanguages.ifBlank { m.originLanguage }}", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                                }
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .background(
-                                            Color.DarkGray,
-                                            shape = RoundedCornerShape(4.dp)
-                                        )
-                                        .padding(horizontal = 8.dp, vertical = 2.dp)
-                                ) {
-                                    Text(m.status, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 11.sp)
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Text(m.title, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 24.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text("Orijinal: ${m.originLanguage}  |  Yazar: ${m.author}  |  Kaynak: ${m.sourceName}", color = Color.LightGray, fontSize = 12.sp)
-                        }
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Geri")
                     }
                 }
+            )
+        }
+    ) { paddingValues ->
+        when {
+            loading -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(paddingValues),
+                    contentAlignment = Alignment.Center
+                ) {
+                    StateView(
+                        title = "Yükleniyor…",
+                        loading = true
+                    )
+                }
+            }
 
-                item {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button(
-                                onClick = { viewModel.toggleFavorite(m.id) },
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp)
-                                    .testTag("add_to_library_btn"),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isFavorite) Color.DarkGray else MaterialTheme.colorScheme.primary
-                                )
-                            ) {
-                                Icon(
-                                    imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                                    contentDescription = null,
-                                    tint = if (isFavorite) Color.Red else Color.White
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(if (isFavorite) "Kütüphanede" else "Kütüphaneye Ekle", fontWeight = FontWeight.Bold)
+            error != null -> {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(paddingValues),
+                    contentAlignment = Alignment.Center
+                ) {
+                    StateView(
+                        title = error ?: "Bilinmeyen bir hata oluştu.",
+                        icon = Icons.Default.ErrorOutline,
+                        actionLabel = "Yeniden Dene",
+                        onAction = {
+                            viewModel.loadMangaDetail(mangaId, sourceName)
+                        }
+                    )
+                }
+            }
+
+            manga != null -> {
+                val m = manga!!
+
+                val mangaQueueItems = downloadQueue.filter { it.mangaId == m.id }
+                val activeDownloadItems = mangaQueueItems.filter {
+                    it.status == "Bekliyor" || it.status == "İndiriliyor" || it.status == "CFBekliyor"
+                }
+                val aggregateDownloadProgress = if (activeDownloadItems.isEmpty()) null else {
+                    activeDownloadItems.map { if (it.status == "İndiriliyor") it.progress else 0f }.average().toFloat()
+                }
+
+                if (showContextMenu && activeContextChapter != null) {
+                    val act = activeContextChapter!!
+                    AlertDialog(
+                        onDismissRequest = { showContextMenu = false },
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        titleContentColor = MaterialTheme.colorScheme.onSurface,
+                        textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        title = {
+                            Text(
+                                act.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                        },
+                        text = {
+                            Text(
+                                "Seçtiğiniz bölüm için yapmak istediğiniz eylemi belirtin:",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(onClick = {
+                                viewModel.markChaptersReadFromHere(m.id, act.chapterNumber)
+                                showContextMenu = false
+                            }) {
+                                Text("Buradan İtibaren Okundu İşaretle")
                             }
-                            Button(
+                        },
+                        dismissButton = {
+                            TextButton(onClick = {
+                                viewModel.queueAllChaptersFromHere(m.id, act.chapterNumber)
+                                showContextMenu = false
+                            }) {
+                                Text("Buradan İtibaren İndir")
+                            }
+                        }
+                    )
+                }
+
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(paddingValues)
+                ) {
+                    item {
+                        DetailHero(manga = m)
+                    }
+
+                    item {
+                        Column(
+                            modifier = Modifier.padding(
+                                horizontal = AppSpacing.lg,
+                                vertical = AppSpacing.lg
+                            ),
+                            verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                            ) {
+                                Button(
+                                    onClick = { viewModel.toggleFavorite(m.id) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = AppSizes.minTouchTarget)
+                                        .testTag("add_to_library_btn"),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (isFavorite) {
+                                            MaterialTheme.colorScheme.surfaceVariant
+                                        } else {
+                                            MaterialTheme.colorScheme.primary
+                                        },
+                                        contentColor = if (isFavorite) {
+                                            MaterialTheme.colorScheme.error
+                                        } else {
+                                            MaterialTheme.colorScheme.onPrimary
+                                        }
+                                    )
+                                ) {
+                                    Icon(
+                                        imageVector = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                        contentDescription = null
+                                    )
+                                    Spacer(modifier = Modifier.width(AppSpacing.sm))
+                                    Text(
+                                        text = if (isFavorite) "Kütüphanede" else "Kütüphaneye Ekle",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Button(
+                                    onClick = {
+                                        val targetCh = filteredChapters.lastOrNull { !it.isRead }
+                                            ?: filteredChapters.lastOrNull()
+                                        targetCh?.let { onNavigateToReader(it.id) }
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = AppSizes.minTouchTarget)
+                                        .testTag("start_reading_btn"),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = MaterialTheme.colorScheme.secondary,
+                                        contentColor = MaterialTheme.colorScheme.onSecondary
+                                    )
+                                ) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(AppSpacing.xs))
+                                    Text(
+                                        text = "Okumaya Başla",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+
+                            OutlinedButton(
                                 onClick = {
-                                    val targetCh = filteredChapters.lastOrNull { !it.isRead } ?: filteredChapters.lastOrNull()
-                                    targetCh?.let { onNavigateToReader(it.id) }
+                                    viewModel.queueAllChapters(
+                                        m.id,
+                                        selectedChapterLang.takeUnless { it == "Hepsi" }
+                                    )
                                 },
                                 modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp)
-                                    .testTag("start_reading_btn"),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.secondary
-                                )
-                            ) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = null)
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Okumaya Başla", fontWeight = FontWeight.Bold, color = Color.White)
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(10.dp))
-
-                        OutlinedButton(
-                            onClick = {
-                                viewModel.queueAllChapters(
-                                    m.id,
-                                    selectedChapterLang.takeUnless { it == "Hepsi" }
-                                )
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(44.dp)
-                                .testTag("download_all_btn"),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.primary)
-                        ) {
-                            if (aggregateDownloadProgress != null) {
-                                DownloadProgressIcon(
-                                    progress = aggregateDownloadProgress,
-                                    modifier = Modifier.size(24.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    "İndiriliyor %${(aggregateDownloadProgress.coerceIn(0f, 1f) * 100).roundToInt()}",
-                                    fontWeight = FontWeight.Bold
-                                )
-                            } else {
-                                Icon(Icons.Default.Download, contentDescription = null)
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text("Tümünü İndir", fontWeight = FontWeight.Bold)
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text("Özet Açıklama", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(m.description, color = Color.Gray, fontSize = 13.sp, lineHeight = 18.sp)
-
-                        Spacer(modifier = Modifier.height(20.dp))
-                        HorizontalDivider(color = Color.DarkGray)
-                        Spacer(modifier = Modifier.height(14.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("Bölümler (${filteredChapters.size}/${chapters.size})", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                            if (availableChapterLangs.size > 1) {
-                                Text("Dile Göre Filtrele", color = Color.Gray, fontSize = 12.sp)
-                            }
-                        }
-
-                        if (availableChapterLangs.size > 1) {
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Row(
-                                modifier = Modifier
                                     .fillMaxWidth()
-                                    .horizontalScroll(rememberScrollState()),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    .heightIn(min = AppSizes.minTouchTarget)
+                                    .testTag("download_all_btn"),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.primary
+                                )
                             ) {
-                                availableChapterLangs.forEach { l ->
-                                    val isSel = selectedChapterLang == l
-                                    FilterChip(
-                                        selected = isSel,
-                                        onClick = { selectedChapterLang = l },
-                                        label = { Text(l, fontSize = 11.sp, fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal) },
-                                        colors = FilterChipDefaults.filterChipColors(
-                                            selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                            selectedLabelColor = Color.Black
-                                        )
+                                if (aggregateDownloadProgress != null) {
+                                    DownloadProgressIcon(
+                                        progress = aggregateDownloadProgress,
+                                        modifier = Modifier.size(AppSizes.iconLarge)
+                                    )
+                                    Spacer(modifier = Modifier.width(AppSpacing.sm))
+                                    Text(
+                                        text = "İndiriliyor %${(aggregateDownloadProgress.coerceIn(0f, 1f) * 100).roundToInt()}",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                } else {
+                                    Icon(Icons.Default.Download, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(AppSpacing.sm))
+                                    Text(
+                                        text = "Tümünü İndir",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        fontWeight = FontWeight.Bold
                                     )
                                 }
                             }
                         }
                     }
-                }
 
-                items(filteredChapters, key = { it.id }) { chapter ->
-                    ChapterRow(
-                        chapter = chapter,
-                        queueItem = queueByChapterId[chapter.id],
-                        onClick = { onNavigateToReader(chapter.id) },
-                        onLongClick = {
-                            activeContextChapter = chapter
-                            showContextMenu = true
-                        },
-                        onDownloadClick = {
-                            viewModel.queueChapterDownload(m.id, chapter.id)
-                        },
-                        onRetryClick = {
-                            viewModel.retryDownload(chapter.id)
-                        },
-                        onCancelClick = {
-                            viewModel.cancelDownload(chapter.id)
+                    item {
+                        Column(
+                            modifier = Modifier.padding(horizontal = AppSpacing.lg)
+                        ) {
+                            SectionHeader(title = "Özet Açıklama")
+                            Spacer(modifier = Modifier.height(AppSpacing.sm))
+                            SurfaceCard {
+                                Text(
+                                    text = m.description,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
+                    }
+
+                    item {
+                        Column(
+                            modifier = Modifier.padding(
+                                start = AppSpacing.lg,
+                                end = AppSpacing.lg,
+                                top = AppSpacing.xl,
+                                bottom = AppSpacing.md
+                            )
+                        ) {
+                            SectionHeader(
+                                title = "Bölümler (${filteredChapters.size}/${chapters.size})",
+                                subtitle = if (availableChapterLangs.size > 1) "Dile Göre Filtrele" else null
+                            )
+                            if (availableChapterLangs.size > 1) {
+                                Spacer(modifier = Modifier.height(AppSpacing.sm))
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(rememberScrollState()),
+                                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                                ) {
+                                    availableChapterLangs.forEach { l ->
+                                        val isSel = selectedChapterLang == l
+                                        FilterChip(
+                                            selected = isSel,
+                                            onClick = { selectedChapterLang = l },
+                                            label = {
+                                                Text(
+                                                    text = l,
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    fontWeight = if (isSel) FontWeight.Bold else FontWeight.Normal
+                                                )
+                                            },
+                                            colors = FilterChipDefaults.filterChipColors(
+                                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                                selectedLabelColor = MaterialTheme.colorScheme.onPrimary
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    items(filteredChapters, key = { it.id }) { chapter ->
+                        ChapterRow(
+                            chapter = chapter,
+                            queueItem = queueByChapterId[chapter.id],
+                            onClick = { onNavigateToReader(chapter.id) },
+                            onLongClick = {
+                                activeContextChapter = chapter
+                                showContextMenu = true
+                            },
+                            onDownloadClick = {
+                                viewModel.queueChapterDownload(m.id, chapter.id)
+                            },
+                            onRetryClick = {
+                                viewModel.retryDownload(chapter.id)
+                            },
+                            onCancelClick = {
+                                viewModel.cancelDownload(chapter.id)
+                            }
+                        )
+                    }
+
+                    item {
+                        Spacer(modifier = Modifier.height(AppSpacing.xl))
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailHero(manga: MangaEntity) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = AppSpacing.lg, end = AppSpacing.lg, top = AppSpacing.sm)
+            .height(300.dp)
+            .clip(MaterialTheme.shapes.medium)
+    ) {
+        MangaCover(
+            imageUrl = manga.coverUrl,
+            title = manga.title,
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        colors = listOf(
+                            MaterialTheme.colorScheme.scrim,
+                            Color.Transparent,
+                            MaterialTheme.colorScheme.background
+                        ),
+                        startY = 0f,
+                        endY = 900f
+                    )
+                )
+        )
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(AppSpacing.lg),
+            verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                    shape = MaterialTheme.shapes.extraSmall
+                ) {
+                    Text(
+                        text = "Diller: ${manga.availableLanguages.ifBlank { manga.originLanguage }}",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = AppSpacing.sm, vertical = AppSpacing.xxs)
+                    )
+                }
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    shape = MaterialTheme.shapes.extraSmall
+                ) {
+                    Text(
+                        text = manga.status,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = AppSpacing.sm, vertical = AppSpacing.xxs)
                     )
                 }
             }
+            Text(
+                text = manga.title,
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = "Orijinal: ${manga.originLanguage}  |  Yazar: ${manga.author}  |  Kaynak: ${manga.sourceName}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
@@ -363,18 +484,25 @@ private fun DownloadProgressIcon(
     onClick: (() -> Unit)? = null
 ) {
     val fraction = progress.coerceIn(0f, 1f)
+    val arcColor = MaterialTheme.colorScheme.primary
+    val iconColor = MaterialTheme.colorScheme.onSurfaceVariant
+    val clickableModifier = if (onClick != null) {
+        Modifier
+            .sizeIn(minWidth = AppSizes.minTouchTarget, minHeight = AppSizes.minTouchTarget)
+            .clickable(onClick = onClick)
+    } else {
+        Modifier
+    }
     Box(
-        modifier = modifier
-            .size(40.dp)
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+        modifier = modifier.then(clickableModifier),
         contentAlignment = Alignment.Center
     ) {
         Canvas(modifier = Modifier.size(26.dp)) {
             if (fraction <= 0f) {
-                drawCircle(color = Color(0xFFE0E0E0).copy(alpha = 0.28f))
+                drawCircle(color = arcColor.copy(alpha = 0.24f))
             } else {
                 drawArc(
-                    color = Color(0xFFE0E0E0).copy(alpha = 0.92f),
+                    color = arcColor,
                     startAngle = -90f,
                     sweepAngle = 360f * fraction,
                     useCenter = true
@@ -384,7 +512,7 @@ private fun DownloadProgressIcon(
         Icon(
             imageVector = Icons.Outlined.Download,
             contentDescription = "İndiriliyor",
-            tint = Color(0xFF9E9E9E),
+            tint = iconColor,
             modifier = Modifier.size(22.dp)
         )
     }
@@ -404,20 +532,29 @@ fun ChapterRow(
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .padding(horizontal = AppSpacing.lg, vertical = AppSpacing.xs)
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick
             )
             .testTag("chapter_row_${chapter.id}"),
+        shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(
-            containerColor = if (chapter.isRead) Color(0xFF161616) else Color(0xFF1E1E1E)
+            containerColor = if (chapter.isRead) {
+                MaterialTheme.colorScheme.surface
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            }
+        ),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant
         )
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
+                .padding(horizontal = AppSpacing.md, vertical = AppSpacing.md),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -427,49 +564,49 @@ fun ChapterRow(
                         Icon(
                             imageVector = Icons.Default.CheckCircle,
                             contentDescription = "Okundu",
-                            tint = MaterialTheme.colorScheme.secondary,
-                            modifier = Modifier.size(16.dp)
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(AppSizes.iconSmall)
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(AppSpacing.xs))
                     }
                     val langLabel = languageLabel(chapter.language).ifBlank { "Türkçe" }
+                    val badgeColor = when (langLabel) {
+                        "Türkçe" -> MaterialTheme.colorScheme.error
+                        "İngilizce" -> MaterialTheme.colorScheme.primary
+                        "Fransızca" -> MaterialTheme.colorScheme.tertiary
+                        else -> MaterialTheme.colorScheme.secondary
+                    }
                     Surface(
-                        color = when (langLabel) {
-                            "Türkçe" -> Color(0xFFE53935).copy(alpha = 0.2f)
-                            "İngilizce" -> Color(0xFF1E88E5).copy(alpha = 0.2f)
-                            "Fransızca" -> Color(0xFF8E24AA).copy(alpha = 0.2f)
-                            else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
-                        },
-                        shape = RoundedCornerShape(4.dp)
+                        color = badgeColor.copy(alpha = 0.16f),
+                        contentColor = badgeColor,
+                        shape = MaterialTheme.shapes.extraSmall
                     ) {
                         Text(
                             text = langLabel,
-                            color = when (langLabel) {
-                                "Türkçe" -> Color(0xFFFF5252)
-                                "İngilizce" -> Color(0xFF64B5F6)
-                                "Fransızca" -> Color(0xFFBA68C8)
-                                else -> MaterialTheme.colorScheme.primary
-                            },
-                            fontSize = 10.sp,
+                            style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
-                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                            modifier = Modifier.padding(horizontal = AppSpacing.xs, vertical = AppSpacing.xxs)
                         )
                     }
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(AppSpacing.xs))
                     Text(
                         text = chapter.title.replace(Regex("^\\[[A-Z-]+\\]\\s*"), ""),
+                        style = MaterialTheme.typography.bodyMedium,
                         fontWeight = if (chapter.isRead) FontWeight.Normal else FontWeight.Bold,
-                        color = if (chapter.isRead) Color.Gray else Color.White,
-                        fontSize = 14.sp,
+                        color = if (chapter.isRead) {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            MaterialTheme.colorScheme.onSurface
+                        },
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xxs))
                 Text(
                     text = "Yayınlanma: ${chapter.uploadDate}",
-                    fontSize = 11.sp,
-                    color = Color.Gray
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -480,10 +617,11 @@ fun ChapterRow(
                                 imageVector = Icons.Default.CloudDone,
                                 contentDescription = "İndirildi",
                                 tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp)
+                                modifier = Modifier.size(AppSizes.iconLarge)
                             )
                         }
                     }
+
                     queueItem != null && queueItem.status == "İndiriliyor" -> {
                         DownloadProgressIcon(
                             progress = queueItem.progress,
@@ -491,6 +629,7 @@ fun ChapterRow(
                             onClick = onCancelClick
                         )
                     }
+
                     queueItem != null && queueItem.status == "Başarısız" -> {
                         IconButton(
                             onClick = onRetryClick,
@@ -499,11 +638,12 @@ fun ChapterRow(
                             Icon(
                                 imageVector = Icons.Default.ErrorOutline,
                                 contentDescription = "İndirme başarısız, tekrar dene",
-                                tint = Color(0xFFEF5350),
-                                modifier = Modifier.size(22.dp)
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(AppSizes.iconLarge)
                             )
                         }
                     }
+
                     queueItem != null -> {
                         DownloadProgressIcon(
                             progress = 0f,
@@ -511,6 +651,7 @@ fun ChapterRow(
                             onClick = onCancelClick
                         )
                     }
+
                     else -> {
                         IconButton(
                             onClick = onDownloadClick,
@@ -519,8 +660,8 @@ fun ChapterRow(
                             Icon(
                                 imageVector = Icons.Outlined.Download,
                                 contentDescription = "İndir",
-                                tint = Color.LightGray,
-                                modifier = Modifier.size(22.dp)
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(AppSizes.iconLarge)
                             )
                         }
                     }

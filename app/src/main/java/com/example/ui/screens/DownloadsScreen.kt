@@ -6,28 +6,30 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import com.example.i18n.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import com.example.data.db.DownloadQueueItemEntity
+import com.example.i18n.Text
+import com.example.ui.components.AppScaffold
+import com.example.ui.components.AppTopBar
+import com.example.ui.components.MangaCover
+import com.example.ui.components.SectionHeader
+import com.example.ui.components.StateView
+import com.example.ui.components.SurfaceCard
+import com.example.ui.theme.AppSizes
+import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DownloadsScreen(
     viewModel: MangaViewModel,
@@ -61,10 +63,10 @@ fun DownloadsScreen(
         }
     }
 
-    Scaffold(
+    AppScaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("İndirilenler & Kuyruk", fontWeight = FontWeight.Bold) },
+            AppTopBar(
+                title = "İndirilenler & Kuyruk",
                 actions = {
                     IconButton(
                         onClick = {
@@ -72,44 +74,45 @@ fun DownloadsScreen(
                         },
                         modifier = Modifier.testTag("import_img_btn")
                     ) {
-                        Icon(Icons.Default.AddPhotoAlternate, contentDescription = "Resimler Yükle", tint = Color.White)
+                        Icon(
+                            imageVector = Icons.Default.AddPhotoAlternate,
+                            contentDescription = "Resimler Yükle"
+                        )
                     }
                     Button(
                         onClick = {
                             cbzPickerLauncher.launch(arrayOf("*/*"))
                         },
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                         modifier = Modifier
-                            .padding(end = 8.dp)
+                            .padding(end = AppSpacing.sm)
+                            .heightIn(min = AppSizes.minTouchTarget)
                             .testTag("import_cbz_btn")
                     ) {
-                        Icon(Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("CBZ/ZIP/RAR Yükle", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Icon(
+                            Icons.Default.FileOpen,
+                            contentDescription = null,
+                            modifier = Modifier.size(AppSizes.iconSmall)
+                        )
+                        Spacer(modifier = Modifier.width(AppSpacing.xs))
+                        Text(
+                            text = "CBZ/ZIP/RAR Yükle",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color(0xFF161616),
-                    titleContentColor = Color.White
-                )
+                }
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        containerColor = Color(0xFF121212)
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
-                .padding(16.dp)
+                .padding(AppSpacing.lg)
         ) {
-            Text(
-                text = "Aktif İndirme Kuyruğu (${downloadQueue.size} Bölüm)",
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
-            )
-            Spacer(modifier = Modifier.height(12.dp))
+            SectionHeader(title = "Aktif İndirme Kuyruğu (${downloadQueue.size} Bölüm)")
+            Spacer(modifier = Modifier.height(AppSpacing.md))
 
             if (downloadQueue.isEmpty()) {
                 Box(
@@ -118,36 +121,16 @@ fun DownloadsScreen(
                         .weight(1f),
                     contentAlignment = Alignment.Center
                 ) {
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
-                        modifier = Modifier.padding(24.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.DownloadForOffline,
-                            contentDescription = null,
-                            tint = Color.Gray.copy(alpha = 0.5f),
-                            modifier = Modifier.size(80.dp)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "Aktif İndirme Yok",
-                            fontWeight = FontWeight.Bold,
-                            color = Color.LightGray,
-                            fontSize = 15.sp
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Detay ekranından istediğiniz bölümleri çevrimdışı okumak için indirebilirsiniz.",
-                            fontSize = 12.sp,
-                            color = Color.Gray,
-                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                        )
-                    }
+                    StateView(
+                        title = "Aktif İndirme Yok",
+                        message = "Detay ekranından istediğiniz bölümleri çevrimdışı okumak için indirebilirsiniz.",
+                        icon = Icons.Default.DownloadForOffline
+                    )
                 }
             } else {
                 LazyColumn(
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                    contentPadding = PaddingValues(bottom = AppSpacing.lg),
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
@@ -171,44 +154,39 @@ fun DownloadQueueRow(
     onCancelClick: () -> Unit,
     onRetryClick: () -> Unit
 ) {
-    Card(
+    SurfaceCard(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("download_row_${item.chapterId}"),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
+        contentPadding = PaddingValues(AppSpacing.md)
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AsyncImage(
-                model = item.mangaCover,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .size(54.dp)
-                    .clip(RoundedCornerShape(6.dp))
+            MangaCover(
+                imageUrl = item.mangaCover,
+                title = item.mangaTitle,
+                modifier = Modifier.size(56.dp)
             )
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(AppSpacing.md))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = item.chapterTitle,
-                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = item.mangaTitle,
-                    color = Color.Gray,
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -219,11 +197,11 @@ fun DownloadQueueRow(
                         modifier = Modifier
                             .weight(1f)
                             .height(6.dp)
-                            .clip(RoundedCornerShape(3.dp)),
+                            .clip(MaterialTheme.shapes.extraSmall),
                         color = MaterialTheme.colorScheme.primary,
-                        trackColor = Color.DarkGray
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant
                     )
-                    Spacer(modifier = Modifier.width(12.dp))
+                    Spacer(modifier = Modifier.width(AppSpacing.md))
                     Text(
                         text = when (item.status) {
                             "İndiriliyor" -> "${(item.progress * 100).toInt()}%"
@@ -231,32 +209,36 @@ fun DownloadQueueRow(
                             else -> item.status
                         },
                         color = when (item.status) {
-                            "Başarısız" -> Color.Red
-                            "CFBekliyor" -> Color(0xFFFFB300)
+                            "Başarısız" -> MaterialTheme.colorScheme.error
+                            "CFBekliyor" -> MaterialTheme.colorScheme.tertiary
                             else -> MaterialTheme.colorScheme.primary
                         },
-                        fontSize = 12.sp,
+                        style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.Bold
                     )
                 }
             }
-            Spacer(modifier = Modifier.width(8.dp))
+            Spacer(modifier = Modifier.width(AppSpacing.sm))
             if (item.status == "Başarısız" || item.status == "CFBekliyor") {
                 TextButton(
                     onClick = onRetryClick,
-                    modifier = Modifier.testTag("retry_download_${item.chapterId}")
+                    modifier = Modifier
+                        .heightIn(min = AppSizes.minTouchTarget)
+                        .testTag("retry_download_${item.chapterId}")
                 ) {
-                    Text("Tekrar Dene")
+                    Text("Tekrar Dene", style = MaterialTheme.typography.labelMedium)
                 }
             }
             IconButton(
                 onClick = onCancelClick,
-                modifier = Modifier.testTag("cancel_download_${item.chapterId}")
+                modifier = Modifier
+                    .size(AppSizes.minTouchTarget)
+                    .testTag("cancel_download_${item.chapterId}")
             ) {
                 Icon(
                     imageVector = Icons.Default.Cancel,
                     contentDescription = "İptal Et",
-                    tint = Color.Red.copy(alpha = 0.8f)
+                    tint = MaterialTheme.colorScheme.error
                 )
             }
         }

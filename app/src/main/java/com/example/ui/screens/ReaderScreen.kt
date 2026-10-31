@@ -32,6 +32,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -39,7 +40,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -52,6 +52,12 @@ import com.example.service.BubbleBox
 import com.example.service.TextBlockObj
 import com.example.ui.components.LanguagePickerDialog
 import com.example.ui.components.LanguagePickerOption
+import com.example.ui.components.StateView
+import com.example.ui.components.SurfaceCard
+import com.example.ui.theme.AppElevation
+import com.example.ui.theme.AppRadius
+import com.example.ui.theme.AppSizes
+import com.example.ui.theme.AppSpacing
 import com.example.util.StaticTextLayoutOptimizer
 import com.example.viewmodel.MangaViewModel
 import kotlinx.coroutines.CancellationException
@@ -68,6 +74,94 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 
 @Composable
+private fun ReaderSheetSectionHeader(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = AppSpacing.md, bottom = AppSpacing.xs),
+    )
+}
+
+@Composable
+private fun ReaderChoiceChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    minWidth: Dp = 0.dp,
+) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                maxLines = 1,
+                softWrap = false,
+            )
+        },
+        modifier = modifier.widthIn(min = minWidth),
+        shape = MaterialTheme.shapes.small,
+        colors = FilterChipDefaults.filterChipColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            selectedContainerColor = MaterialTheme.colorScheme.primary,
+            selectedLabelColor = MaterialTheme.colorScheme.onPrimary,
+        ),
+    )
+}
+
+@Composable
+private fun ReaderToggleRow(
+    title: String,
+    subtitle: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    leadingIcon: ImageVector? = null,
+    leadingIconTint: Color = MaterialTheme.colorScheme.primary,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = AppSizes.minTouchTarget + AppSpacing.sm)
+            .padding(vertical = AppSpacing.xs),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.md),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (leadingIcon != null) {
+                    Icon(
+                        imageVector = leadingIcon,
+                        contentDescription = null,
+                        tint = leadingIconTint,
+                        modifier = Modifier.size(AppSizes.iconSmall),
+                    )
+                    Spacer(modifier = Modifier.width(AppSpacing.xs))
+                }
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+        )
+    }
+}
+
+@Composable
 private fun LanguageSettingRow(
     label: String,
     value: String,
@@ -76,22 +170,40 @@ private fun LanguageSettingRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xFF2C2C2C))
+            .heightIn(min = AppSizes.minTouchTarget + AppSpacing.sm)
+            .clip(MaterialTheme.shapes.small)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .padding(horizontal = AppSpacing.lg, vertical = AppSpacing.md),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
-        Text(label, color = Color.Gray, fontSize = 12.sp)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(value, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.width(AppSpacing.md))
+        Row(
+            modifier = Modifier.weight(1f, fill = false),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.End,
+        ) {
+            Text(
+                text = value,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Spacer(modifier = Modifier.width(AppSpacing.xs))
             Icon(
-                Icons.Default.KeyboardArrowRight,
+                imageVector = Icons.Default.KeyboardArrowRight,
                 contentDescription = null,
-                tint = Color.Gray,
-                modifier = Modifier.size(18.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(AppSizes.icon),
             )
         }
     }
@@ -392,7 +504,7 @@ fun ReaderScreen(
     }
 
     Scaffold(
-        containerColor = Color.Black,
+        containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         val errorMsg = readerError
@@ -400,95 +512,76 @@ fun ReaderScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(paddingValues),
+                    .padding(paddingValues)
+                    .padding(AppSpacing.lg),
                 contentAlignment = Alignment.Center
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(24.dp)
+                SurfaceCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.surface,
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.ErrorOutline,
-                        contentDescription = "Hata",
-                        tint = Color.Red,
-                        modifier = Modifier.size(64.dp)
+                    StateView(
+                        title = "Bölüm Yüklenemedi",
+                        message = errorMsg,
+                        icon = Icons.Default.ErrorOutline,
+                        actionLabel = "Yeniden Dene",
+                        onAction = {
+                            retainedReaderChapterId.ifBlank { chapterId }
+                                .let(viewModel::loadChapterInReader)
+                        },
+                        secondaryActionLabel = "Geri Git",
+                        onSecondaryAction = onNavigateBack,
                     )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "Bölüm Yüklenemedi",
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 18.sp,
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = errorMsg,
-                        color = Color.Gray,
-                        fontSize = 14.sp,
-                        textAlign = TextAlign.Center
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Button(
-                            onClick = onNavigateBack,
-                            colors = ButtonDefaults.buttonColors(containerColor = Color.DarkGray)
-                        ) {
-                            Text("Geri Git")
-                        }
-                        Button(
-                            onClick = {
-                                retainedReaderChapterId.ifBlank { chapterId }
-                                    .let(viewModel::loadChapterInReader)
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        ) {
-                            Text("Yeniden Dene")
-                        }
-                    }
                     if (webChapterUrl != null) {
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Button(
+                        TextButton(
                             onClick = { onOpenInBrowser(webChapterUrl) },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary)
+                            modifier = Modifier
+                                .align(Alignment.CenterHorizontally)
+                                .heightIn(min = AppSizes.minTouchTarget)
                         ) {
-                            Text("Tarayıcıda Aç")
+                            Text(
+                                text = "Tarayıcıda Aç",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.tertiary,
+                            )
                         }
                     }
                 }
             }
         } else if (loading || activeCh == null) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-            }
-        } else if (pages.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(paddingValues),
                 contentAlignment = Alignment.Center
             ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(24.dp)
+                StateView(
+                    title = "Bölüm yükleniyor…",
+                    loading = true,
+                )
+            }
+        } else if (pages.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+                    .padding(AppSpacing.lg),
+                contentAlignment = Alignment.Center
+            ) {
+                SurfaceCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.surface,
                 ) {
-                    Text(
-                        text = "Bu bölümde gösterilecek sayfa bulunamadı.",
-                        color = Color.White,
-                        textAlign = TextAlign.Center
+                    StateView(
+                        title = "Bu bölümde gösterilecek sayfa bulunamadı.",
+                        actionLabel = "Yeniden Dene",
+                        onAction = {
+                            retainedReaderChapterId.ifBlank { chapterId }
+                                .let(viewModel::loadChapterInReader)
+                        },
+                        secondaryActionLabel = "Geri",
+                        onSecondaryAction = onNavigateBack,
                     )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        TextButton(onClick = onNavigateBack) { Text("Geri") }
-                        Button(
-                            onClick = {
-                                retainedReaderChapterId.ifBlank { chapterId }
-                                    .let(viewModel::loadChapterInReader)
-                            }
-                        ) {
-                            Text("Yeniden Dene")
-                        }
-                    }
                 }
             }
         } else {
@@ -617,31 +710,52 @@ fun ReaderScreen(
                             .align(Alignment.TopCenter)
                             .fillMaxWidth()
                             .wrapContentHeight(),
-                        color = Color.Black.copy(alpha = 0.85f)
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        shape = RoundedCornerShape(
+                            bottomStart = AppRadius.lg,
+                            bottomEnd = AppRadius.lg
+                        ),
+                        shadowElevation = AppElevation.low
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = 8.dp, vertical = 12.dp),
+                                .padding(horizontal = AppSpacing.sm, vertical = AppSpacing.sm),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                                IconButton(onClick = onNavigateBack, modifier = Modifier.testTag("reader_back")) {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Geri", tint = Color.White)
+                                IconButton(
+                                    onClick = onNavigateBack,
+                                    modifier = Modifier
+                                        .testTag("reader_back")
+                                        .sizeIn(
+                                            minWidth = AppSizes.minTouchTarget,
+                                            minHeight = AppSizes.minTouchTarget
+                                        )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Geri",
+                                        tint = MaterialTheme.colorScheme.onSurface
+                                    )
                                 }
-                                Column {
+                                Column(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = AppSpacing.xs)
+                                ) {
                                     Text(
                                         text = manga?.title ?: "Manga",
-                                        fontWeight = FontWeight.Bold,
-                                        fontSize = 15.sp,
-                                        color = Color.White,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
                                         text = ch.title,
-                                        fontSize = 12.sp,
+                                        style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.primary,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
@@ -652,27 +766,53 @@ fun ReaderScreen(
                                 if (webChapterUrl != null) {
                                     IconButton(
                                         onClick = { onOpenInBrowser(webChapterUrl) },
-                                        modifier = Modifier.testTag("reader_open_browser")
+                                        modifier = Modifier
+                                            .testTag("reader_open_browser")
+                                            .sizeIn(
+                                                minWidth = AppSizes.minTouchTarget,
+                                                minHeight = AppSizes.minTouchTarget
+                                            )
                                     ) {
                                         Icon(
                                             imageVector = Icons.Default.Public,
                                             contentDescription = "Tarayıcıda Aç",
-                                            tint = Color.White
+                                            tint = MaterialTheme.colorScheme.onSurface
                                         )
                                     }
                                 }
                                 IconButton(
                                     onClick = { viewModel.toggleDebugMode() },
-                                    modifier = Modifier.testTag("reader_debug_toggle")
+                                    modifier = Modifier
+                                        .testTag("reader_debug_toggle")
+                                        .sizeIn(
+                                            minWidth = AppSizes.minTouchTarget,
+                                            minHeight = AppSizes.minTouchTarget
+                                        )
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.BugReport,
                                         contentDescription = "RT-DETR AI Balon Debug Modu",
-                                        tint = if (isDebugMode) Color(0xFF00E676) else Color.White
+                                        tint = if (isDebugMode) {
+                                            Color(0xFF00E676)
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        }
                                     )
                                 }
-                                IconButton(onClick = { showSettingsSheet = true }, modifier = Modifier.testTag("reader_settings")) {
-                                    Icon(Icons.Default.Tune, contentDescription = "Okuyucu Ayarları", tint = Color.White)
+                                IconButton(
+                                    onClick = { showSettingsSheet = true },
+                                    modifier = Modifier
+                                        .testTag("reader_settings")
+                                        .sizeIn(
+                                            minWidth = AppSizes.minTouchTarget,
+                                            minHeight = AppSizes.minTouchTarget
+                                        )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Tune,
+                                        contentDescription = "Okuyucu Ayarları",
+                                        tint = MaterialTheme.colorScheme.onSurface
+                                    )
                                 }
                             }
                         }
@@ -685,21 +825,27 @@ fun ReaderScreen(
                             .fillMaxWidth()
                             .wrapContentHeight()
                             .onSizeChanged { bottomHudHeightPx = it.height },
-                        color = Color.Black.copy(alpha = 0.85f)
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        shape = RoundedCornerShape(
+                            topStart = AppRadius.lg,
+                            topEnd = AppRadius.lg
+                        ),
+                        shadowElevation = AppElevation.low
                     ) {
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(16.dp),
+                                .padding(horizontal = AppSpacing.lg, vertical = AppSpacing.md),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
                                 text = "Sayfa ${currentPageIdx + 1} / $totalPages",
-                                color = Color.White,
-                                fontSize = 13.sp,
+                                style = MaterialTheme.typography.titleSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
                                 fontWeight = FontWeight.Bold
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
+                            Spacer(modifier = Modifier.height(AppSpacing.xs))
                             val lastPageIndex = (totalPages - 1).coerceAtLeast(0)
                             var sliderPage by remember(currentPageIdx) {
                                 mutableStateOf(currentPageIdx.toFloat())
@@ -716,10 +862,11 @@ fun ReaderScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = SliderDefaults.colors(
                                     thumbColor = MaterialTheme.colorScheme.primary,
-                                    activeTrackColor = MaterialTheme.colorScheme.primary
+                                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                                    inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
                                 )
                             )
-                            Spacer(modifier = Modifier.height(10.dp))
+                            Spacer(modifier = Modifier.height(AppSpacing.sm))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -741,24 +888,44 @@ fun ReaderScreen(
                                 val prevCh = adjacentChapter(1)
                                 val nextCh = adjacentChapter(-1)
 
-                                Button(
+                                FilledTonalButton(
                                     onClick = { prevCh?.let { viewModel.loadChapterInReader(it.id) } },
                                     enabled = prevCh != null,
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF222222))
+                                    modifier = Modifier.heightIn(min = AppSizes.minTouchTarget),
+                                    contentPadding = PaddingValues(
+                                        horizontal = AppSpacing.md,
+                                        vertical = AppSpacing.xs
+                                    )
                                 ) {
-                                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Önceki")
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text("Önceki Bölüm", fontSize = 11.sp)
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = "Önceki"
+                                    )
+                                    Spacer(modifier = Modifier.width(AppSpacing.xs))
+                                    Text(
+                                        text = "Önceki Bölüm",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
                                 }
 
-                                Button(
+                                FilledTonalButton(
                                     onClick = { nextCh?.let { viewModel.loadChapterInReader(it.id) } },
                                     enabled = nextCh != null,
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF222222))
+                                    modifier = Modifier.heightIn(min = AppSizes.minTouchTarget),
+                                    contentPadding = PaddingValues(
+                                        horizontal = AppSpacing.md,
+                                        vertical = AppSpacing.xs
+                                    )
                                 ) {
-                                    Text("Sonraki Bölüm", fontSize = 11.sp)
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "Sonraki")
+                                    Text(
+                                        text = "Sonraki Bölüm",
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                    Spacer(modifier = Modifier.width(AppSpacing.xs))
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                        contentDescription = "Sonraki"
+                                    )
                                 }
                             }
                         }
@@ -770,20 +937,41 @@ fun ReaderScreen(
                     onClick = { viewModel.toggleLiveTranslation(!translationActive) },
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(bottom = if (showHud) bottomHudHeightDp + 16.dp else 24.dp, end = 24.dp)
-                        .border(1.dp, Color.White.copy(alpha = 0.25f), shape = FloatingActionButtonDefaults.shape)
+                        .padding(
+                            bottom = if (showHud) {
+                                bottomHudHeightDp + AppSpacing.lg
+                            } else {
+                                AppSpacing.xl
+                            },
+                            end = AppSpacing.xl
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.7f),
+                            shape = FloatingActionButtonDefaults.shape
+                        )
                         .testTag("translate_toggle_fab"),
-                    containerColor = if (translationActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f) else Color.DarkGray.copy(alpha = 0.45f),
-                    contentColor = Color.White.copy(alpha = 0.90f),
-                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 2.dp, pressedElevation = 4.dp)
+                    containerColor = if (translationActive) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f)
+                    },
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    elevation = FloatingActionButtonDefaults.elevation(
+                        defaultElevation = AppElevation.low,
+                        pressedElevation = AppElevation.medium
+                    )
                 ) {
                     if (isTranslationLoading) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp), color = Color.White, strokeWidth = 2.dp)
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(AppSizes.iconLarge),
+                            color = LocalContentColor.current,
+                            strokeWidth = 2.dp
+                        )
                     } else {
                         Icon(
                             imageVector = Icons.Default.Translate,
-                            contentDescription = "Çeviri",
-                            tint = Color.White.copy(alpha = 0.90f)
+                            contentDescription = "Çeviri"
                         )
                     }
                 }
@@ -792,138 +980,112 @@ fun ReaderScreen(
     }
 
     if (showSettingsSheet) {
+        val sheetScrollState = rememberScrollState()
         ModalBottomSheet(
             onDismissRequest = { showSettingsSheet = false },
-            containerColor = Color(0xFF1E1E1E)
+            containerColor = MaterialTheme.colorScheme.surface,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            shape = MaterialTheme.shapes.extraLarge,
         ) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(24.dp)
+                    .verticalScroll(sheetScrollState)
+                    .padding(horizontal = AppSpacing.xl, vertical = AppSpacing.lg)
             ) {
                 Text(
                     text = "Okuyucu & Çeviri Tercihleri",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
                 )
-                Spacer(modifier = Modifier.height(16.dp))
-                Text("Okuma Yönü:", color = Color.Gray, fontSize = 13.sp)
+                Spacer(modifier = Modifier.height(AppSpacing.lg))
+                ReaderSheetSectionHeader("Okuma Yönü:")
                 val directions = listOf("Dikey", "Yatay")
-                Row(modifier = Modifier.padding(vertical = 8.dp)) {
-                    directions.forEach { d ->
-                        val isSel = d == readingDirection
-                        Button(
-                            onClick = { coroutineScope.launch { viewModel.preferences.setReadingMode(d) } },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isSel) MaterialTheme.colorScheme.primary else Color(0xFF2C2C2C)
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                    directions.forEachIndexed { index, d ->
+                        SegmentedButton(
+                            selected = d == readingDirection,
+                            onClick = {
+                                coroutineScope.launch { viewModel.preferences.setReadingMode(d) }
+                            },
+                            shape = SegmentedButtonDefaults.itemShape(
+                                index = index,
+                                count = directions.size
                             ),
-                            modifier = Modifier.padding(end = 8.dp)
-                        ) {
-                            Text(d, color = Color.White)
-                        }
+                            label = { Text(d) }
+                        )
                     }
                 }
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("Çeviri Motoru:", color = Color.Gray, fontSize = 13.sp)
+                ReaderSheetSectionHeader("Çeviri Motoru:")
                 val engines = listOf("Otomatik", "Gemini", "DeepL", "ML Kit", "Google")
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
-                        .padding(vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .padding(vertical = AppSpacing.xs),
+                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)
                 ) {
                     engines.forEach { eng ->
-                        val isSel = eng == translationEngine
-                        Button(
+                        ReaderChoiceChip(
+                            label = eng,
+                            selected = eng == translationEngine,
                             onClick = { viewModel.setTranslationEngine(eng) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isSel) MaterialTheme.colorScheme.primary else Color(0xFF2C2C2C)
-                            ),
-                            modifier = Modifier.widthIn(min = 84.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp)
-                        ) {
-                            Text(
-                                eng,
-                                color = Color.White,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
+                            minWidth = 84.dp,
+                        )
                     }
                 }
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("Çeviri Dilleri:", color = Color.Gray, fontSize = 13.sp)
-                Spacer(modifier = Modifier.height(6.dp))
+                ReaderSheetSectionHeader("Çeviri Dilleri:")
                 LanguageSettingRow(
                     label = "Kaynak Dil",
                     value = resolvedSourceLabel,
                     onClick = { showSourceLanguagePicker = true },
                 )
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
                 LanguageSettingRow(
                     label = "Hedef Dil",
                     value = targetLanguageLabel,
                     onClick = { showTargetLanguagePicker = true },
                 )
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text("Otomatik Çeviri", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        Text("Sayfa açıldığında çeviri kendiliğinden başlar", color = Color.Gray, fontSize = 11.sp)
-                    }
-                    Switch(
-                        checked = autoTranslateEnabled,
-                        onCheckedChange = { checked ->
-                            coroutineScope.launch { viewModel.preferences.setAutoTranslate(checked) }
-                        }
-                    )
-                }
-                Spacer(modifier = Modifier.height(12.dp))
-                Text("Balon & Yazı Stili:", color = Color.Gray, fontSize = 13.sp)
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
+                ReaderToggleRow(
+                    title = "Otomatik Çeviri",
+                    subtitle = "Sayfa açıldığında çeviri kendiliğinden başlar",
+                    checked = autoTranslateEnabled,
+                    onCheckedChange = { checked ->
+                        coroutineScope.launch { viewModel.preferences.setAutoTranslate(checked) }
+                    },
+                )
+                ReaderSheetSectionHeader("Balon & Yazı Stili:")
                 val styles = listOf("Doğal Balon", "Alt Yazı (Şeffaf)", "Koyu Zemin")
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .horizontalScroll(rememberScrollState())
-                        .padding(vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        .padding(vertical = AppSpacing.xs),
+                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)
                 ) {
                     styles.forEach { st ->
-                        val isSel = st == translationBubbleStyle
-                        Button(
-                            onClick = { coroutineScope.launch { viewModel.preferences.setTranslationBubbleStyle(st) } },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isSel) MaterialTheme.colorScheme.primary else Color(0xFF2C2C2C)
-                            ),
-                            modifier = Modifier.widthIn(min = 112.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp)
-                        ) {
-                            Text(
-                                st,
-                                color = Color.White,
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
+                        ReaderChoiceChip(
+                            label = st,
+                            selected = st == translationBubbleStyle,
+                            onClick = {
+                                coroutineScope.launch {
+                                    viewModel.preferences.setTranslationBubbleStyle(st)
+                                }
+                            },
+                            minWidth = 112.dp,
+                        )
                     }
                 }
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
                 var opacitySliderValue by remember(translationOpacity) {
                     mutableFloatStateOf(translationOpacity.toFloat())
                 }
-                Text("Balon Opaklığı: %${opacitySliderValue.roundToInt()}", color = Color.White, fontSize = 13.sp)
+                Text(
+                    text = "Balon Opaklığı: %${opacitySliderValue.roundToInt()}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
                 Slider(
                     value = opacitySliderValue,
                     onValueChange = { opacitySliderValue = it },
@@ -936,33 +1098,25 @@ fun ReaderScreen(
                     steps = 15,
                     colors = SliderDefaults.colors(
                         thumbColor = MaterialTheme.colorScheme.primary,
-                        activeTrackColor = MaterialTheme.colorScheme.primary
+                        activeTrackColor = MaterialTheme.colorScheme.primary,
+                        inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
                     )
                 )
-                Spacer(modifier = Modifier.height(12.dp))
-                HorizontalDivider(color = Color.DarkGray)
-                Spacer(modifier = Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.BugReport, contentDescription = null, tint = if (isDebugMode) Color(0xFF00E676) else Color.Gray, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("RT-DETR AI Balon Debug Modu", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                        }
-                        Text("Balon ve OCR kutularını ekranda dikdörtgenlerle görselleştirir", color = Color.Gray, fontSize = 11.sp)
-                    }
-                    Switch(
-                        checked = isDebugMode,
-                        onCheckedChange = { checked -> viewModel.setDebugMode(checked) }
-                    )
-                }
-                Spacer(modifier = Modifier.height(24.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
+                ReaderToggleRow(
+                    title = "RT-DETR AI Balon Debug Modu",
+                    subtitle = "Balon ve OCR kutularını ekranda dikdörtgenlerle görselleştirir",
+                    checked = isDebugMode,
+                    onCheckedChange = { checked -> viewModel.setDebugMode(checked) },
+                    leadingIcon = Icons.Default.BugReport,
+                    leadingIconTint = if (isDebugMode) {
+                        Color(0xFF00E676)
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                )
+                Spacer(modifier = Modifier.height(AppSpacing.xl))
             }
         }
     }
@@ -1012,14 +1166,33 @@ fun ReaderScreen(
             onDismissRequest = {
                 if (!correctionSaving) showCorrectionDialog = false
             },
-            title = { Text("Çeviriyi Düzelt", color = Color.White) },
+            title = {
+                Text(
+                    text = "Çeviriyi Düzelt",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
             text = {
                 Column {
-                    Text("Orijinal Metin:", color = Color.Gray, fontSize = 12.sp)
-                    Text(correctionOriginal, color = Color.LightGray, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text("Çeviri:", color = Color.Gray, fontSize = 12.sp)
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Orijinal Metin:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = correctionOriginal,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(AppSpacing.md))
+                    Text(
+                        text = "Çeviri:",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(AppSpacing.xs))
                     OutlinedTextField(
                         value = newText,
                         onValueChange = {
@@ -1027,14 +1200,14 @@ fun ReaderScreen(
                             correctionSaveError = null
                         },
                         modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = Color.White,
-                            unfocusedTextColor = Color.White
-                        )
                     )
                     correctionSaveError?.let { error ->
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(error, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                        Spacer(modifier = Modifier.height(AppSpacing.sm))
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
                     }
                 }
             },
@@ -1076,7 +1249,9 @@ fun ReaderScreen(
                     Text("İptal")
                 }
             },
-            containerColor = Color(0xFF1E1E1E)
+            containerColor = MaterialTheme.colorScheme.surface,
+            titleContentColor = MaterialTheme.colorScheme.onSurface,
+            textContentColor = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }

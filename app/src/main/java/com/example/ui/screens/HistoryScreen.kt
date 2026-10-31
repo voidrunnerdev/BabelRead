@@ -1,45 +1,44 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import com.example.i18n.Text
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
 import com.example.data.pref.ReadingHistoryEntry
+import com.example.i18n.Text
+import com.example.ui.components.AppScaffold
+import com.example.ui.components.AppTopBar
+import com.example.ui.components.MangaCover
+import com.example.ui.components.StateView
+import com.example.ui.components.SurfaceCard
+import com.example.ui.theme.AppSizes
+import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -52,55 +51,49 @@ fun HistoryScreen(
 ) {
     val history by viewModel.readingHistory.collectAsState()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFF121212))
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 16.dp, end = 8.dp, top = 14.dp, bottom = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                "Okuma Geçmişi",
-                color = Color.White,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.weight(1f)
+    AppScaffold(
+        topBar = {
+            AppTopBar(
+                title = "Okuma Geçmişi",
+                actions = {
+                    if (history.isNotEmpty()) {
+                        TextButton(
+                            onClick = { viewModel.clearReadingHistory() },
+                            modifier = Modifier
+                                .heightIn(min = AppSizes.minTouchTarget)
+                                .testTag("history_clear_all")
+                        ) {
+                            Text(
+                                text = "Temizle",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
             )
-            if (history.isNotEmpty()) {
-                TextButton(
-                    onClick = { viewModel.clearReadingHistory() },
-                    modifier = Modifier.testTag("history_clear_all")
-                ) {
-                    Text("Temizle", color = Color.Gray)
-                }
-            }
         }
-
+    ) { paddingValues ->
         if (history.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Icon(
-                        imageVector = Icons.Default.History,
-                        contentDescription = null,
-                        tint = Color.DarkGray,
-                        modifier = Modifier.size(64.dp)
-                    )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text("Henüz okuma geçmişi yok.", color = Color.Gray, fontSize = 15.sp)
-                    Spacer(modifier = Modifier.height(6.dp))
-                    Text(
-                        "Okumaya başladığın bölümler burada görünecek.",
-                        color = Color.DarkGray,
-                        fontSize = 12.sp
-                    )
-                }
-            }
+            StateView(
+                title = "Henüz okuma geçmişi yok.",
+                message = "Okumaya başladığın bölümler burada görünecek.",
+                icon = Icons.Outlined.History,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+            )
         } else {
-            LazyColumn(modifier = Modifier.fillMaxSize()) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues),
+                contentPadding = PaddingValues(
+                    horizontal = AppSpacing.lg,
+                    vertical = AppSpacing.sm
+                ),
+                verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+            ) {
                 items(history, key = { it.mangaId }) { entry ->
                     HistoryRow(
                         entry = entry,
@@ -119,51 +112,46 @@ private fun HistoryRow(
     onClick: () -> Unit,
     onDelete: () -> Unit
 ) {
-    Card(
+    SurfaceCard(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 5.dp)
-            .clickable(onClick = onClick)
             .testTag("history_row_${entry.mangaId}"),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1E1E))
+        onClick = onClick,
+        contentPadding = PaddingValues(AppSpacing.md)
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(10.dp),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AsyncImage(
-                model = entry.coverUrl,
-                contentDescription = null,
-                contentScale = ContentScale.Crop,
+            MangaCover(
+                imageUrl = entry.coverUrl,
+                title = entry.title,
                 modifier = Modifier
-                    .size(width = 44.dp, height = 60.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color(0xFF252525))
+                    .width(48.dp)
+                    .height(68.dp)
             )
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(AppSpacing.md))
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.Center
             ) {
                 Text(
                     text = entry.title,
-                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(3.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xxs))
                 Text(
                     text = entry.chapterTitle.replace(Regex("^\\[[A-Z-]+\\]\\s*"), ""),
-                    color = Color(0xFFBDBDBD),
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(3.dp))
+                Spacer(modifier = Modifier.height(AppSpacing.xxs))
                 val pageText = if (entry.totalPages > 1) {
                     "Sayfa ${(entry.pageIndex + 1).coerceAtMost(entry.totalPages)}/${entry.totalPages} · "
                 } else {
@@ -171,19 +159,21 @@ private fun HistoryRow(
                 }
                 Text(
                     text = pageText + historyRelativeTime(entry.updatedAt),
-                    color = Color.Gray,
-                    fontSize = 11.sp
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             IconButton(
                 onClick = onDelete,
-                modifier = Modifier.testTag("history_delete_${entry.mangaId}")
+                modifier = Modifier
+                    .size(AppSizes.minTouchTarget)
+                    .testTag("history_delete_${entry.mangaId}")
             ) {
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Geçmişten kaldır",
-                    tint = Color.Gray,
-                    modifier = Modifier.size(18.dp)
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(AppSizes.icon)
                 )
             }
         }
