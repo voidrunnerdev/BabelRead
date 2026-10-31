@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.preference.PreferenceManager
 import com.example.data.net.WebViewCookieJar
+import com.example.data.parser.NetworkManager
 import com.example.extensions.ExtensionManager
 import com.example.i18n.UiTranslations
 import eu.kanade.tachiyomi.network.NetworkHelper
@@ -24,6 +25,7 @@ class BabelReadApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        NetworkManager.initialize(this)
         registerInjektServices()
         UiTranslations.load(this)
         ExtensionManager.init(this)

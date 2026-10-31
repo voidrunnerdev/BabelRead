@@ -1,9 +1,12 @@
 package com.example.data.parser
 
+import android.content.Context
 import com.example.data.net.CloudflareChallengeException
 import com.example.data.net.CloudflareDetector
 import com.example.data.net.PageRefererRegistry
 import com.example.data.net.WebViewCookieJar
+import com.example.data.net.WebViewIdentity
+import com.example.data.net.toSafeWebViewHeaders
 import eu.kanade.tachiyomi.source.model.FilterList
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
@@ -65,7 +68,13 @@ interface MangaSource {
 }
 
 object NetworkManager {
-    const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    @Volatile
+    var USER_AGENT: String = WebViewIdentity.DEFAULT_USER_AGENT
+        private set
+
+    fun initialize(context: Context) {
+        USER_AGENT = WebViewIdentity.infer(context)
+    }
 
     private class HostGate {
         val semaphore = java.util.concurrent.Semaphore(3)
@@ -85,7 +94,9 @@ object NetworkManager {
             .addInterceptor { chain ->
                 val request = chain.request()
                 val requestBuilder = request.newBuilder()
-                    .header("User-Agent", USER_AGENT)
+                if (request.header("User-Agent").isNullOrEmpty()) {
+                    requestBuilder.header("User-Agent", USER_AGENT)
+                }
                 if (request.header("Referer") == null) {
                     val referer = PageRefererRegistry.refererFor(request.url.toString())
                         ?: "https://${request.url.host}/"
@@ -112,7 +123,6 @@ object NetworkManager {
     }
 
     fun isCloudflareChallenge(response: okhttp3.Response): Boolean {
-        if (response.code != 403 && response.code != 503) return false
         if (response.header("cf-mitigated").equals("challenge", ignoreCase = true)) return true
         val server = response.header("Server").orEmpty()
         if (!server.contains("cloudflare", ignoreCase = true)) return false
@@ -131,15 +141,21 @@ object NetworkManager {
                 val response = withContext(Dispatchers.IO) {
                     client.newCall(request).execute()
                 }
-                if (response.isSuccessful) {
-                    return response
-                }
                 val challenge = withContext(Dispatchers.IO) { isCloudflareChallenge(response) }
                 if (challenge) {
                     val host = request.url.host
                     val challengedUrl = request.url.toString()
                     response.close()
-                    throw CloudflareChallengeException(host, challengedUrl, sourceName)
+                    throw CloudflareChallengeException(
+                        host,
+                        challengedUrl,
+                        sourceName,
+                        request.method,
+                        request.headers.toSafeWebViewHeaders(),
+                    )
+                }
+                if (response.isSuccessful) {
+                    return response
                 }
                 response.close()
                 if (attempt >= maxAttempts) {

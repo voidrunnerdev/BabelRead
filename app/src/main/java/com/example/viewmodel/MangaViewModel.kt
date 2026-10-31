@@ -14,6 +14,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
 import com.example.data.db.*
 import com.example.data.net.CloudflareChallengeException
+import com.example.data.net.toSafeWebViewHeaders
 import com.example.data.parser.*
 import com.example.data.pref.MangaPreferences
 import com.example.data.pref.ReadingHistoryEntry
@@ -394,7 +395,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: CloudflareChallengeException) {
-                            beginCloudflareVerification(e.host, e.challengedUrl) {
+                            beginCloudflareVerification(e) {
                                 runGlobalSearch(rawQuery)
                             }
                             GlobalSearchGroup(source.name, emptyList(), "Cloudflare doğrulaması gerekiyor. Doğrulayıp yeniden deneyin.")
@@ -421,16 +422,21 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     // CLOUDFLARE DOĞRULAMA KÖPRÜSÜ
-    data class CfChallenge(val host: String, val url: String)
+    data class CfChallenge(
+        val host: String,
+        val url: String,
+        val method: String,
+        val headers: Map<String, String>,
+    )
 
     private val _cfChallenge = MutableStateFlow<CfChallenge?>(null)
     val cfChallenge = _cfChallenge.asStateFlow()
 
     private var cfRetryAction: (() -> Unit)? = null
 
-    fun beginCloudflareVerification(host: String, url: String, retry: () -> Unit) {
+    fun beginCloudflareVerification(e: CloudflareChallengeException, retry: () -> Unit) {
         cfRetryAction = retry
-        _cfChallenge.value = CfChallenge(host, url)
+        _cfChallenge.value = CfChallenge(e.host, e.challengedUrl, e.method, e.headers)
     }
 
     fun completeCloudflareVerification() {
@@ -743,7 +749,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: CloudflareChallengeException) {
-                beginCloudflareVerification(e.host, e.challengedUrl) {
+                beginCloudflareVerification(e) {
                     loadWebCategory(sourceName, url)
                 }
                 _webCatalogStatus.value = "Cloudflare doğrulaması gerekiyor: ${e.host}"
@@ -804,7 +810,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: CloudflareChallengeException) {
-                beginCloudflareVerification(e.host, e.challengedUrl) {
+                beginCloudflareVerification(e) {
                     scanWebSiteCatalog(sourceName, listUrl)
                 }
                 _webCatalogStatus.value = "Cloudflare doğrulaması gerekiyor: ${e.host}"
@@ -968,7 +974,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 throw e
             } catch (e: CloudflareChallengeException) {
                 if (requestId == discoverGeneration.get()) {
-                    beginCloudflareVerification(e.host, e.challengedUrl) {
+                    beginCloudflareVerification(e) {
                         fetchDiscoverItems(criteria, isNextPage = false, pageToFetch = 1)
                     }
                     _discoverError.value = "Cloudflare doğrulaması gerekiyor: ${e.host}. Açılan pencerede doğrulayın."
@@ -1157,7 +1163,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 throw e
             } catch (e: CloudflareChallengeException) {
                 if (detailLoadGeneration.get() == requestId) {
-                    beginCloudflareVerification(e.host, e.challengedUrl) {
+                    beginCloudflareVerification(e) {
                         loadMangaDetail(mangaId, sourceName)
                     }
                     if (_detailManga.value == null && _detailChapters.value.isEmpty()) {
@@ -1520,7 +1526,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 throw e
             } catch (e: CloudflareChallengeException) {
                 if (readerGeneration.get() != loadGeneration) return@launch
-                beginCloudflareVerification(e.host, e.challengedUrl) {
+                beginCloudflareVerification(e) {
                     loadChapterInReader(chapterId)
                 }
                 _readerError.value = "Cloudflare doğrulaması gerekiyor: ${e.host}. Açılan pencerede doğrulayınca bölüm otomatik yüklenecek."
@@ -1858,7 +1864,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: CancellationException) {
             throw e
         } catch (e: CloudflareChallengeException) {
-            beginCloudflareVerification(e.host, e.challengedUrl) {
+            beginCloudflareVerification(e) {
                 _readerPageRetryTick.value += 1
             }
             null
@@ -3606,7 +3612,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             runCatching {
                                 queueDao.updateQueueStatus(next.chapterId, "CFBekliyor", 0f)
                             }
-                            beginCloudflareVerification(e.host, e.challengedUrl) {
+                            beginCloudflareVerification(e) {
                                 viewModelScope.launch {
                                     runCatching { queueDao.requeueCfPendingDownloads() }
                                 }
@@ -3672,10 +3678,16 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             tempFile.delete()
                             throw IOException("Aralık isteği reddedildi, sayfa baştan indirilecek: $urlString")
                         }
+                        if (NetworkManager.isCloudflareChallenge(response)) {
+                            throw CloudflareChallengeException(
+                                response.request.url.host,
+                                urlString,
+                                "İndirme",
+                                response.request.method,
+                                response.request.headers.toSafeWebViewHeaders(),
+                            )
+                        }
                         if (!response.isSuccessful) {
-                            if (NetworkManager.isCloudflareChallenge(response)) {
-                                throw CloudflareChallengeException(response.request.url.host, urlString, "İndirme")
-                            }
                             throw IOException("Page download failed: $urlString (${response.code})")
                         }
                         val body = response.body ?: throw IOException("Empty page response: $urlString")

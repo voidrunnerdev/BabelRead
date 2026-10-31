@@ -1,6 +1,8 @@
 package com.example.ui.screens
 
 import android.webkit.CookieManager
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
@@ -33,11 +35,13 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.data.net.WebViewCookieJar
+import com.example.data.net.WebViewIdentity
 import com.example.data.parser.NetworkManager
 import com.example.i18n.Text
 import com.example.ui.theme.AppRadius
 import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 @Composable
 fun CloudflareVerifyDialog(
@@ -46,6 +50,16 @@ fun CloudflareVerifyDialog(
     onCancel: () -> Unit
 ) {
     val cookieTarget = challenge.url.ifBlank { challenge.host }
+    val targetUrl = remember(challenge.host, challenge.url, challenge.method) {
+        challengeTargetUrl(challenge)
+    }
+    val userAgent = remember(challenge.headers) {
+        challenge.headers.entries
+            .firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }
+            ?.value
+            ?.takeIf { it.isNotBlank() }
+            ?: NetworkManager.USER_AGENT
+    }
     val initialClearance = remember(cookieTarget) {
         WebViewCookieJar.cfClearanceFor(cookieTarget)
     }
@@ -77,7 +91,7 @@ fun CloudflareVerifyDialog(
                     )
                     Spacer(modifier = Modifier.height(AppSpacing.sm))
                     Text(
-                        text = "Site bot koruması istiyor. Doğrulama çoğu zaman otomatik tamamlanır; gerekirse aşağıdaki kutucuğu işaretleyip 'Doğruladım' düğmesine dokunun.",
+                        text = "Site bot koruması istiyor. Doğrulama çoğu zaman otomatik tamamlanır; gerekirse sayfadaki kontrolü tamamlayıp 'Doğruladım' düğmesine dokunun.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -90,7 +104,7 @@ fun CloudflareVerifyDialog(
                         .clip(RoundedCornerShape(AppRadius.sm))
                         .background(MaterialTheme.colorScheme.background)
                 ) {
-                    key(challenge.host, challenge.url) {
+                    key(challenge.host, challenge.url, challenge.method) {
                         val released = remember { java.util.concurrent.atomic.AtomicBoolean(false) }
                         AndroidView(
                             modifier = Modifier.fillMaxSize(),
@@ -99,30 +113,27 @@ fun CloudflareVerifyDialog(
                                     settings.javaScriptEnabled = true
                                     settings.domStorageEnabled = true
                                     settings.loadsImagesAutomatically = true
-                                    settings.userAgentString = NetworkManager.USER_AGENT
+                                    settings.useWideViewPort = true
+                                    settings.loadWithOverviewMode = true
+                                    settings.cacheMode = WebSettings.LOAD_DEFAULT
+                                    settings.setSupportMultipleWindows(true)
+                                    settings.setSupportZoom(true)
+                                    settings.builtInZoomControls = true
+                                    settings.displayZoomControls = false
+                                    WebViewIdentity.apply(this, userAgent)
                                     CookieManager.getInstance().setAcceptCookie(true)
                                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                                     WebViewCookieJar.clearCfClearance(cookieTarget)
+                                    webChromeClient = WebChromeClient()
                                     webViewClient = object : WebViewClient() {
                                         private var verified = false
                                         private var checks = 0
 
-                                        private fun isChallengedTitle(title: String): Boolean {
-                                            val lower = title.lowercase()
-                                            return lower.contains("just a moment") ||
-                                                lower.contains("bir dakika") ||
-                                                lower.contains("attention required") ||
-                                                lower.contains("lütfen bekleyin") ||
-                                                lower.contains("checking your browser") ||
-                                                lower.contains("tarayıcınız kontrol ediliyor")
-                                        }
-
-                                        private fun checkVerified(view: WebView) {
+                                        private fun checkVerified() {
                                             if (released.get() || verified) return
                                             CookieManager.getInstance().flush()
                                             val clearance = WebViewCookieJar.cfClearanceFor(cookieTarget)
-                                            val changed = clearance != null && clearance != initialClearance
-                                            if (changed && !isChallengedTitle(view.title.orEmpty())) {
+                                            if (clearance != null && clearance != initialClearance) {
                                                 verified = true
                                                 onVerified()
                                             }
@@ -131,7 +142,7 @@ fun CloudflareVerifyDialog(
                                         private fun scheduleCheck(view: WebView) {
                                             view.postDelayed({
                                                 if (!released.get() && !verified) {
-                                                    checkVerified(view)
+                                                    checkVerified()
                                                     if (!verified && checks < 24) {
                                                         checks++
                                                         scheduleCheck(view)
@@ -142,11 +153,11 @@ fun CloudflareVerifyDialog(
 
                                         override fun onPageFinished(view: WebView, url: String?) {
                                             if (released.get()) return
-                                            checkVerified(view)
+                                            checkVerified()
                                             scheduleCheck(view)
                                         }
                                     }
-                                    loadUrl(challenge.url.ifBlank { "https://${challenge.host}/" })
+                                    loadUrl(targetUrl, challenge.headers)
                                 }
                             },
                             onRelease = { webView ->
@@ -184,7 +195,7 @@ fun CloudflareVerifyDialog(
                                 manualError = null
                                 onVerified()
                             } else {
-                                manualError = "Doğrulama henüz algılanmadı. Kutucuğu işaretleyip birkaç saniye bekleyin."
+                                manualError = "Doğrulama henüz algılanmadı. Sayfadaki kontrolü tamamlayıp birkaç saniye bekleyin."
                             }
                         }
                     ) {
@@ -194,4 +205,18 @@ fun CloudflareVerifyDialog(
             }
         }
     }
+}
+
+private fun challengeTargetUrl(challenge: MangaViewModel.CfChallenge): String {
+    if (challenge.method.equals("GET", ignoreCase = true)) {
+        return challenge.url.ifBlank { "https://${challenge.host}/" }
+    }
+    return challenge.url.toHttpUrlOrNull()
+        ?.newBuilder()
+        ?.encodedPath("/")
+        ?.query(null)
+        ?.fragment(null)
+        ?.build()
+        ?.toString()
+        ?: "https://${challenge.host}/"
 }

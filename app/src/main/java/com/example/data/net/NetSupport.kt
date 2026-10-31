@@ -3,7 +3,9 @@ package com.example.data.net
 import android.webkit.CookieManager
 import okhttp3.Cookie
 import okhttp3.CookieJar
+import okhttp3.Headers
 import okhttp3.HttpUrl
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 object PageRefererRegistry {
@@ -35,8 +37,38 @@ object PageRefererRegistry {
 class CloudflareChallengeException(
     val host: String,
     val challengedUrl: String,
-    sourceName: String
+    sourceName: String,
+    val method: String = "GET",
+    val headers: Map<String, String> = emptyMap(),
 ) : java.io.IOException("Cloudflare doğrulaması gerekiyor: $host ($sourceName)")
+
+fun Headers.toSafeWebViewHeaders(): Map<String, String> {
+    val result = LinkedHashMap<String, String>()
+    for (name in names()) {
+        val value = values(name).firstOrNull() ?: continue
+        val lowerName = name.lowercase(Locale.ENGLISH)
+        val lowerValue = value.lowercase(Locale.ENGLISH)
+        if (lowerName in unsafeWebViewHeaders) continue
+        if (lowerName.startsWith("proxy-")) continue
+        if (lowerName == "connection" && lowerValue == "upgrade") continue
+        result[name] = value
+    }
+    return result
+}
+
+private val unsafeWebViewHeaders = setOf(
+    "content-length",
+    "host",
+    "trailer",
+    "te",
+    "upgrade",
+    "cookie",
+    "cookie2",
+    "keep-alive",
+    "transfer-encoding",
+    "set-cookie",
+    "origin",
+)
 
 object CloudflareDetector {
     fun looksLikeChallengeHtml(body: String): Boolean {

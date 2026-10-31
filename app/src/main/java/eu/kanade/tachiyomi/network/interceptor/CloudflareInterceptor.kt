@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.network.interceptor
 
 import com.example.data.net.CloudflareChallengeException
 import com.example.data.net.CloudflareDetector
+import com.example.data.net.toSafeWebViewHeaders
 import okhttp3.Interceptor
 import okhttp3.Response
 
@@ -16,20 +17,30 @@ class CloudflareInterceptor : Interceptor {
         val request = chain.request()
         val response = chain.proceed(request)
 
-        if (response.code != 403 && response.code != 503) return response
-
         val mitigated = response.header("cf-mitigated").equals("challenge", ignoreCase = true)
-        val fromCloudflare = mitigated ||
-            response.header("Server").orEmpty().contains("cloudflare", ignoreCase = true)
-        if (!fromCloudflare) return response
+        if (!mitigated) {
+            val server = response.header("Server").orEmpty()
+            if (!server.contains("cloudflare", ignoreCase = true)) return response
 
-        val challenged = mitigated || runCatching {
-            CloudflareDetector.looksLikeChallengeHtml(response.peekBody(64 * 1024).string())
-        }.getOrDefault(false)
-        if (!challenged) return response
+            val contentType = response.header("Content-Type").orEmpty()
+            if (contentType.isNotBlank() && !contentType.contains("text/html", ignoreCase = true)) {
+                return response
+            }
+
+            val challenged = runCatching {
+                CloudflareDetector.looksLikeChallengeHtml(response.peekBody(64 * 1024).string())
+            }.getOrDefault(false)
+            if (!challenged) return response
+        }
 
         val host = request.url.host
         response.close()
-        throw CloudflareChallengeException(host, request.url.toString(), "Eklenti")
+        throw CloudflareChallengeException(
+            host,
+            request.url.toString(),
+            "Eklenti",
+            request.method,
+            request.headers.toSafeWebViewHeaders(),
+        )
     }
 }
