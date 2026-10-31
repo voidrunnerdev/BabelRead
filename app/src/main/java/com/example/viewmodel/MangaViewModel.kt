@@ -25,8 +25,8 @@ import com.example.data.web.WebSite
 import com.example.data.web.WebSiteSource
 import com.example.data.web.WebSiteStore
 import com.example.extensions.ExtensionMangaSource
-import com.example.extensions.languageCode
 import com.example.i18n.TranslationLanguages
+import eu.kanade.tachiyomi.source.model.FilterList
 import com.example.service.BubbleBox
 import com.example.service.BubbleDetector
 import com.example.service.BulkLocalImportResult
@@ -129,9 +129,18 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     val selectedSource = MutableStateFlow("Cihaz / Yerel Mangalar")
     val discoverTab = MutableStateFlow("Popüler")
     val discoverQuery = MutableStateFlow("")
-    val filterGenre = MutableStateFlow<String?>(null)
-    val filterStatus = MutableStateFlow<String?>(null)
-    val filterLanguage = MutableStateFlow<String?>(null)
+
+    private val _sourceFilters = MutableStateFlow(DiscoverFilterState())
+    val sourceFilters = _sourceFilters.asStateFlow()
+    private val filterSessions = mutableMapOf<String, SourceFilterSession>()
+    private var filterLoadGeneration = 0L
+
+    private data class SourceFilterSession(
+        val filterList: FilterList,
+        val defaultNodes: List<SourceFilterNode>,
+        var nodes: List<SourceFilterNode>,
+        var version: Int = 0
+    )
 
     private val _discoverLoading = MutableStateFlow(false)
     val discoverLoading = _discoverLoading.asStateFlow()
@@ -146,45 +155,117 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val _isDiscoverEndReached = MutableStateFlow(false)
     val isEndReached = _isDiscoverEndReached.asStateFlow()
 
+    fun loadSourceFilters(sourceName: String) {
+        val generation = ++filterLoadGeneration
+        filterSessions[sourceName]?.let { session ->
+            publishSourceFilters(sourceName, session)
+            return
+        }
+        _sourceFilters.value = DiscoverFilterState(sourceName = sourceName, loading = true)
+        viewModelScope.launch {
+            val result = runCatching {
+                withContext(Dispatchers.IO) {
+                    MangaSourceRegistry.getSource(sourceName).getFilterList()
+                }
+            }
+            if (generation != filterLoadGeneration) return@launch
+            result.onSuccess { filters ->
+                val nodes = SourceFilterAdapter.build(filters)
+                val session = SourceFilterSession(
+                    filterList = filters,
+                    defaultNodes = nodes,
+                    nodes = nodes
+                )
+                filterSessions[sourceName] = session
+                publishSourceFilters(sourceName, session)
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                if (selectedSource.value == sourceName) {
+                    _sourceFilters.value = DiscoverFilterState(
+                        sourceName = sourceName,
+                        error = error.detailedMessage()
+                    )
+                }
+            }
+        }
+    }
+
+    fun applySourceFilters(sourceName: String, nodes: List<SourceFilterNode>) {
+        val session = filterSessions[sourceName] ?: return
+        SourceFilterAdapter.apply(session.filterList, nodes)
+        session.nodes = SourceFilterAdapter.build(session.filterList)
+        session.version++
+        publishSourceFilters(sourceName, session)
+        if (selectedSource.value == sourceName) {
+            fetchDiscoverItems(discoverCriteria(), isNextPage = false, pageToFetch = 1)
+        }
+    }
+
+    fun clearSourceFilters(sourceName: String) {
+        val session = filterSessions[sourceName] ?: return
+        SourceFilterAdapter.apply(session.filterList, session.defaultNodes)
+        session.nodes = session.defaultNodes
+        session.version++
+        publishSourceFilters(sourceName, session)
+        if (selectedSource.value == sourceName) {
+            fetchDiscoverItems(discoverCriteria(), isNextPage = false, pageToFetch = 1)
+        }
+    }
+
+    fun clearSourceFilter(sourceName: String, key: String) {
+        val session = filterSessions[sourceName] ?: return
+        val replacement = SourceFilterAdapter.findNode(session.defaultNodes, key) ?: return
+        val nodes = SourceFilterAdapter.replaceNode(session.nodes, key, replacement)
+        applySourceFilters(sourceName, nodes)
+    }
+
+    private fun publishSourceFilters(sourceName: String, session: SourceFilterSession) {
+        if (selectedSource.value != sourceName) return
+        _sourceFilters.value = DiscoverFilterState(
+            sourceName = sourceName,
+            nodes = session.nodes,
+            defaultNodes = session.defaultNodes,
+            activeFilters = SourceFilterAdapter.activeFilters(
+                session.defaultNodes,
+                session.nodes
+            ),
+            version = session.version
+        )
+    }
+
+    private fun appliedFilters(sourceName: String): FilterList {
+        val session = filterSessions[sourceName] ?: return FilterList()
+        val active = SourceFilterAdapter.activeFilters(session.defaultNodes, session.nodes)
+        return if (active.isEmpty()) FilterList() else session.filterList
+    }
+
+    private fun discoverCriteria(): MangaFilterCriteria = MangaFilterCriteria(
+        source = selectedSource.value,
+        tab = discoverTab.value,
+        query = discoverQuery.value,
+        filters = appliedFilters(selectedSource.value)
+    )
+
     fun loadNextDiscoverPage() {
         if (_discoverLoading.value || _isDiscoverEndReached.value) return
         val nextPage = currentDiscoverPage.value + 1
-        val criteria = MangaFilterCriteria(
-            source = selectedSource.value,
-            tab = discoverTab.value,
-            query = discoverQuery.value,
-            genre = filterGenre.value,
-            status = filterStatus.value,
-            lang = filterLanguage.value
-        )
-        fetchDiscoverItems(criteria, isNextPage = true, pageToFetch = nextPage)
+        fetchDiscoverItems(discoverCriteria(), isNextPage = true, pageToFetch = nextPage)
     }
 
     fun refreshDiscover() {
         if (_discoverLoading.value) return
-        val criteria = MangaFilterCriteria(
-            source = selectedSource.value,
-            tab = discoverTab.value,
-            query = discoverQuery.value,
-            genre = filterGenre.value,
-            status = filterStatus.value,
-            lang = filterLanguage.value
-        )
-        fetchDiscoverItems(criteria, isNextPage = false, pageToFetch = 1)
+        fetchDiscoverItems(discoverCriteria(), isNextPage = false, pageToFetch = 1)
     }
 
     private data class MangaFilterCriteria(
         val source: String,
         val tab: String,
         val query: String,
-        val genre: String?,
-        val status: String?,
-        val lang: String?
+        val filters: FilterList = FilterList()
     )
 
     private var discoverJob: Job? = null
     private val discoverGeneration = AtomicLong(0L)
-    private var consecutiveFilteredEmptyPages = 0
 
     // GÖZ AT — SABİTLENEN KAYNAKLAR VE GLOBAL ARAMA
     private val _pinnedSources = MutableStateFlow<Set<String>>(emptySet())
@@ -438,18 +519,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
         chapterDao.insertChapters(entities)
         if (isWebSource(selectedSource.value)) {
-            fetchDiscoverItems(
-                MangaFilterCriteria(
-                    source = selectedSource.value,
-                    tab = discoverTab.value,
-                    query = discoverQuery.value,
-                    genre = filterGenre.value,
-                    status = filterStatus.value,
-                    lang = filterLanguage.value
-                ),
-                isNextPage = false,
-                pageToFetch = 1
-            )
+            fetchDiscoverItems(discoverCriteria(), isNextPage = false, pageToFetch = 1)
         }
         return mangaId
     }
@@ -826,13 +896,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             currentDiscoverPage.value = 1
             _isDiscoverEndReached.value = false
             _discoverItems.value = emptyList()
-            consecutiveFilteredEmptyPages = 0
         }
         val requestId = discoverGeneration.incrementAndGet()
         _discoverLoading.value = true
         val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             _discoverError.value = null
-            var autoLoadNextPage = false
             try {
                 val sourceName = criteria.source.takeIf { name ->
                     name.startsWith("Web: ") || MangaSourceRegistry.sources.any { it.name.equals(name, ignoreCase = true) }
@@ -865,58 +933,30 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             availableLanguages = listOf("TR", "YEREL")
                         )
                     }
-                } else if (criteria.query.isNotBlank()) {
+                } else if (criteria.query.isNotBlank() || criteria.filters.isNotEmpty()) {
                     src.searchMangas(
                         query = criteria.query,
                         page = pageToFetch,
-                        language = criteria.lang,
-                        genre = criteria.genre
+                        filters = criteria.filters
                     )
                 } else {
                     src.getMangas(
                         page = pageToFetch,
                         tab = criteria.tab,
-                        language = criteria.lang,
-                        genre = criteria.genre,
-                        status = criteria.status
+                        filters = criteria.filters
                     )
                 }
 
                 if (requestId != discoverGeneration.get()) return@launch
-                val sourceHadItems = items.isNotEmpty()
                 if (isLocalSource && criteria.query.isNotBlank()) {
                     items = items.filter { it.title.contains(criteria.query.trim(), ignoreCase = true) }
-                }
-                if (!isWebSource && criteria.genre != null && criteria.genre != "Hepsi") {
-                    items = items.filter { it.genres.any { g -> g.contains(criteria.genre, ignoreCase = true) } }
-                }
-                if (!isWebSource && criteria.status != null && criteria.status != "Hepsi") {
-                    items = items.filter { it.status.equals(criteria.status, ignoreCase = true) }
-                }
-                if (!isWebSource && criteria.lang != null && criteria.lang != "Hepsi") {
-                    val label = criteria.lang.trim()
-                    val code = languageCode(label)
-                    items = items.filter { item ->
-                        item.availableLanguages.any { lang ->
-                            lang.equals(label, ignoreCase = true) ||
-                                (code != null && lang.equals(code, ignoreCase = true))
-                        }
-                    }
                 }
 
                 if (requestId != discoverGeneration.get()) return@launch
                 currentDiscoverPage.value = pageToFetch
                 if (items.isEmpty()) {
-                    // A raw page may contain results that the client-side filters remove.
-                    _isDiscoverEndReached.value = !sourceHadItems || isLocalSource
-                    if (sourceHadItems && !isLocalSource) {
-                        consecutiveFilteredEmptyPages++
-                        autoLoadNextPage = consecutiveFilteredEmptyPages < 4
-                    } else {
-                        consecutiveFilteredEmptyPages = 0
-                    }
+                    _isDiscoverEndReached.value = true
                 } else {
-                    consecutiveFilteredEmptyPages = 0
                     if (isNextPage) {
                         _discoverItems.value = (_discoverItems.value + items)
                             .distinctBy { "${it.sourceName}:${it.id}" }
@@ -941,9 +981,6 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 if (requestId == discoverGeneration.get()) {
                     _discoverLoading.value = false
-                    if (autoLoadNextPage && !_isDiscoverEndReached.value) {
-                        loadNextDiscoverPage()
-                    }
                 }
             }
         }
@@ -4113,28 +4150,34 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
 
+        viewModelScope.launch {
+            selectedSource.collectLatest { source ->
+                loadSourceFilters(source)
+            }
+        }
+
         @OptIn(FlowPreview::class)
         val debouncedQuery = discoverQuery.debounce(350L)
         viewModelScope.launch {
             combine(
                 selectedSource,
                 discoverTab,
-                debouncedQuery,
-                filterGenre,
-                filterStatus,
-                filterLanguage
-            ) { array: Array<String?> ->
-                val source = array[0] ?: "Cihaz / Yerel Mangalar"
-                val tab = array[1] ?: "Popüler"
-                val q = array[2] ?: ""
-                val genre = array[3]
-                val status = array[4]
-                val lang = array[5]
-                MangaFilterCriteria(source, tab, q, genre, status, lang)
-            }.collect { criteria ->
+                debouncedQuery
+            ) { source, tab, query ->
+                Triple(source, tab, query)
+            }.collect { (source, tab, query) ->
                 currentDiscoverPage.value = 1
                 _isDiscoverEndReached.value = false
-                fetchDiscoverItems(criteria, isNextPage = false, pageToFetch = 1)
+                fetchDiscoverItems(
+                    MangaFilterCriteria(
+                        source = source,
+                        tab = tab,
+                        query = query,
+                        filters = appliedFilters(source)
+                    ),
+                    isNextPage = false,
+                    pageToFetch = 1
+                )
             }
         }
 

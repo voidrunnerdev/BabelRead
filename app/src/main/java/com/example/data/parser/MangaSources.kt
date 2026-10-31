@@ -4,6 +4,7 @@ import com.example.data.net.CloudflareChallengeException
 import com.example.data.net.CloudflareDetector
 import com.example.data.net.PageRefererRegistry
 import com.example.data.net.WebViewCookieJar
+import eu.kanade.tachiyomi.source.model.FilterList
 import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -39,19 +40,23 @@ data class ChapterModel(
 interface MangaSource {
     val name: String
 
+    fun getFilterList(): FilterList = FilterList()
+
     suspend fun getMangas(
         page: Int = 1,
         tab: String = "Popüler",
         language: String? = null,
         genre: String? = null,
-        status: String? = null
+        status: String? = null,
+        filters: FilterList = FilterList()
     ): List<MangaModel>
 
     suspend fun searchMangas(
         query: String,
         page: Int = 1,
         language: String? = null,
-        genre: String? = null
+        genre: String? = null,
+        filters: FilterList = FilterList()
     ): List<MangaModel>
 
     suspend fun getMangaDetail(mangaId: String): Pair<MangaModel, List<ChapterModel>>
@@ -235,7 +240,8 @@ class LocalDeviceSource : MangaSource {
         tab: String,
         language: String?,
         genre: String?,
-        status: String?
+        status: String?,
+        filters: FilterList
     ): List<MangaModel> = withContext(Dispatchers.IO) {
         emptyList()
     }
@@ -244,7 +250,8 @@ class LocalDeviceSource : MangaSource {
         query: String,
         page: Int,
         language: String?,
-        genre: String?
+        genre: String?,
+        filters: FilterList
     ): List<MangaModel> = withContext(Dispatchers.IO) {
         emptyList()
     }

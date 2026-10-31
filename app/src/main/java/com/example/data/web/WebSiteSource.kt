@@ -6,6 +6,7 @@ import com.example.data.net.PageRefererRegistry
 import com.example.data.parser.ChapterModel
 import com.example.data.parser.MangaModel
 import com.example.data.parser.MangaSource
+import eu.kanade.tachiyomi.source.model.FilterList
 import java.io.IOException
 
 class WebSiteSource(
@@ -19,14 +20,16 @@ class WebSiteSource(
         tab: String,
         language: String?,
         genre: String?,
-        status: String?
+        status: String?,
+        filters: FilterList
     ): List<MangaModel> = emptyList()
 
     override suspend fun searchMangas(
         query: String,
         page: Int,
         language: String?,
-        genre: String?
+        genre: String?,
+        filters: FilterList
     ): List<MangaModel> = emptyList()
 
     override suspend fun getMangaDetail(mangaId: String): Pair<MangaModel, List<ChapterModel>> =

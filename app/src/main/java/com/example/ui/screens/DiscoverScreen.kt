@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FilterList
@@ -37,6 +39,8 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -50,7 +54,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.ScrollableTabRow
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -80,6 +83,7 @@ import com.example.ui.components.AppScaffold
 import com.example.ui.components.AppTopBar
 import com.example.ui.components.MangaCover
 import com.example.ui.components.ManageWebSitesDialog
+import com.example.ui.components.SourceFilterSheet
 import com.example.ui.components.StateView
 import com.example.ui.components.SurfaceCard
 import com.example.ui.theme.AppRadius
@@ -99,9 +103,7 @@ fun DiscoverScreen(
     val selectedSource by viewModel.selectedSource.collectAsState()
     val discoverTab by viewModel.discoverTab.collectAsState()
     val discoverQuery by viewModel.discoverQuery.collectAsState()
-    val filterGenre by viewModel.filterGenre.collectAsState()
-    val filterStatus by viewModel.filterStatus.collectAsState()
-    val filterLanguage by viewModel.filterLanguage.collectAsState()
+    val sourceFilters by viewModel.sourceFilters.collectAsState()
     val loading by viewModel.discoverLoading.collectAsState()
     val items by viewModel.discoverItems.collectAsState()
     val sourceEndReached by viewModel.isEndReached.collectAsState()
@@ -112,13 +114,22 @@ fun DiscoverScreen(
     val webSitePlan by viewModel.webSitePlan.collectAsState()
 
     var sourceMenuExpanded by remember { mutableStateOf(false) }
-    var filterMenuExpanded by remember { mutableStateOf(false) }
+    var showFilterSheet by remember { mutableStateOf(false) }
     var showAddSiteDialog by remember { mutableStateOf(false) }
     var showManageSitesDialog by remember { mutableStateOf(false) }
 
     val sourcesList = MangaSourceRegistry.sources.map { it.name }
     val tabsList = listOf("Popüler", "En Beğenilen", "Yeni", "Güncellenen")
     val isWebSource = viewModel.isWebSource(selectedSource)
+    val isLocalSource = selectedSource.contains("Yerel", ignoreCase = true) ||
+        selectedSource.contains("Cihaz", ignoreCase = true)
+    val showFilterAction = !isWebSource && !isLocalSource &&
+        sourceFilters.sourceName == selectedSource &&
+        (sourceFilters.loading || sourceFilters.hasFilters || sourceFilters.error != null)
+
+    LaunchedEffect(selectedSource) {
+        showFilterSheet = false
+    }
 
     LaunchedEffect(webSites, selectedSource, sourcesList) {
         val missingWebSource = viewModel.isWebSource(selectedSource) &&
@@ -290,19 +301,31 @@ fun DiscoverScreen(
                     }
                 },
                 actions = {
-                    IconButton(
-                        onClick = { filterMenuExpanded = !filterMenuExpanded },
-                        modifier = Modifier.testTag("filter_menu_trigger")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.FilterList,
-                            contentDescription = "Filtreler",
-                            tint = if (filterGenre != null || filterStatus != null || filterLanguage != null) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
+                    if (showFilterAction) {
+                        IconButton(
+                            onClick = { showFilterSheet = true },
+                            modifier = Modifier.testTag("filter_menu_trigger")
+                        ) {
+                            BadgedBox(
+                                badge = {
+                                    if (sourceFilters.activeCount > 0) {
+                                        Badge {
+                                            Text(sourceFilters.activeCount.toString())
+                                        }
+                                    }
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.FilterList,
+                                    contentDescription = "Filtreler",
+                                    tint = if (sourceFilters.activeCount > 0) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
+                                )
                             }
-                        )
+                        }
                     }
                 }
             )
@@ -415,122 +438,55 @@ fun DiscoverScreen(
                 }
             }
 
-            if (filterMenuExpanded) {
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.surface
+            if (!isWebSource &&
+                sourceFilters.sourceName == selectedSource &&
+                sourceFilters.activeFilters.isNotEmpty()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = AppSpacing.lg, vertical = AppSpacing.xs),
+                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(AppSpacing.lg)
+                    sourceFilters.activeFilters.forEach { filter ->
+                        FilterChip(
+                            selected = true,
+                            onClick = {
+                                viewModel.clearSourceFilter(selectedSource, filter.key)
+                            },
+                            label = {
+                                Text(
+                                    text = filter.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            trailingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Close,
+                                    contentDescription = "Filtreyi kaldır",
+                                    modifier = Modifier.size(AppSizes.iconSmall)
+                                )
+                            },
+                            modifier = Modifier
+                                .heightIn(min = AppSizes.minTouchTarget)
+                                .widthIn(max = 220.dp)
+                        )
+                    }
+                    TextButton(
+                        onClick = { viewModel.clearSourceFilters(selectedSource) },
+                        modifier = Modifier.heightIn(min = AppSizes.minTouchTarget)
                     ) {
                         Text(
-                            "Detaylı Filtreleme",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSurface
+                            "Tümünü temizle",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.error
                         )
-                        Spacer(modifier = Modifier.height(AppSpacing.sm))
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.horizontalScroll(rememberScrollState())
-                        ) {
-                            Text(
-                                "Tür: ",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.width(AppSpacing.sm))
-                            val genres = listOf(
-                                "Hepsi", "Aksiyon", "Macera", "Komedi", "Dram", "Fantezi", "Isekai", "Romantik",
-                                "Bilim Kurgu", "Gizem", "Korku", "Doğaüstü", "Webtoon", "Psikolojik", "Gerilim",
-                                "Dövüş Sanatları", "Spor", "Tarihi", "Günlük Yaşam", "Okul", "Büyü", "Zombiler"
-                            )
-                            genres.forEach { g ->
-                                val isSel = (g == "Hepsi" && filterGenre == null) || (g == filterGenre)
-                                FilterChipButton(
-                                    label = g,
-                                    selected = isSel,
-                                    onClick = {
-                                        viewModel.filterGenre.value = if (g == "Hepsi") null else g
-                                    }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(AppSpacing.sm))
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.horizontalScroll(rememberScrollState())
-                        ) {
-                            Text(
-                                "Durum: ",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.width(AppSpacing.sm))
-                            val statuses = listOf("Hepsi", "Devam Ediyor", "Tamamlandı")
-                            statuses.forEach { s ->
-                                val isSel = (s == "Hepsi" && filterStatus == null) || (s == filterStatus)
-                                FilterChipButton(
-                                    label = s,
-                                    selected = isSel,
-                                    onClick = {
-                                        viewModel.filterStatus.value = if (s == "Hepsi") null else s
-                                    }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(AppSpacing.sm))
-
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.horizontalScroll(rememberScrollState())
-                        ) {
-                            Text(
-                                "Çeviri Dili: ",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.width(AppSpacing.sm))
-                            val languages = listOf(
-                                "Hepsi", "Türkçe", "İngilizce", "Fransızca", "İspanyolca",
-                                "Japonca", "Korece", "Çince", "Almanca", "İtalyanca", "Rusça", "Portekizce", "Arapça"
-                            )
-                            languages.forEach { l ->
-                                val isSel = (l == "Hepsi" && filterLanguage == null) || (l == filterLanguage)
-                                FilterChipButton(
-                                    label = l,
-                                    selected = isSel,
-                                    onClick = {
-                                        viewModel.filterLanguage.value = if (l == "Hepsi") null else l
-                                    }
-                                )
-                            }
-                        }
-
-                        Spacer(modifier = Modifier.height(AppSpacing.md))
-
-                        TextButton(
-                            onClick = {
-                                viewModel.filterGenre.value = null
-                                viewModel.filterStatus.value = null
-                                viewModel.filterLanguage.value = null
-                            },
-                            colors = androidx.compose.material3.ButtonDefaults.textButtonColors(
-                                contentColor = MaterialTheme.colorScheme.error
-                            ),
-                            modifier = Modifier
-                                .align(Alignment.End)
-                                .heightIn(min = AppSizes.minTouchTarget)
-                        ) {
-                            Text("Filtreleri Temizle", style = MaterialTheme.typography.labelMedium)
-                        }
                     }
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
 
             Spacer(modifier = Modifier.height(AppSpacing.sm))
@@ -622,6 +578,17 @@ fun DiscoverScreen(
                 }
             }
 
+            if (showFilterSheet && sourceFilters.sourceName == selectedSource) {
+                SourceFilterSheet(
+                    state = sourceFilters,
+                    onDismiss = { showFilterSheet = false },
+                    onApply = { nodes ->
+                        viewModel.applySourceFilters(selectedSource, nodes)
+                        showFilterSheet = false
+                    },
+                    onRetry = { viewModel.loadSourceFilters(selectedSource) }
+                )
+            }
             if (showAddSiteDialog) {
                 AddWebSiteDialog(
                     viewModel = viewModel,

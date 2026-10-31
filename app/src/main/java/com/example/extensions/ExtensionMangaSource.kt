@@ -29,6 +29,8 @@ class ExtensionMangaSource(
 
     override val name: String get() = displayName ?: ext.name
 
+    override fun getFilterList(): FilterList = ext.getFilterList()
+
     private fun String.toB64(): String =
         Base64.encodeToString(toByteArray(), Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
 
@@ -160,8 +162,11 @@ class ExtensionMangaSource(
         language: String?,
         genre: String?,
         status: String?,
+        filters: FilterList,
     ): List<MangaModel> = withContext(Dispatchers.IO) {
-        val listing = if (
+        val listing = if (filters.isNotEmpty()) {
+            ext.getSearchManga(page, "", filters)
+        } else if (
             tab.contains("Yen", ignoreCase = true) ||
             tab.contains("Son", ignoreCase = true) ||
             tab.contains("Güncell", ignoreCase = true) ||
@@ -179,8 +184,9 @@ class ExtensionMangaSource(
         page: Int,
         language: String?,
         genre: String?,
+        filters: FilterList,
     ): List<MangaModel> = withContext(Dispatchers.IO) {
-        ext.getSearchManga(page, query, FilterList()).mangas.map { toModel(it) }
+        ext.getSearchManga(page, query, filters).mangas.map { toModel(it) }
     }
 
     override suspend fun getMangaDetail(mangaId: String): Pair<MangaModel, List<ChapterModel>> =
