@@ -2,7 +2,6 @@ package eu.kanade.tachiyomi.network.interceptor
 
 import com.example.data.net.CloudflareChallengeException
 import com.example.data.net.CloudflareDetector
-import com.example.data.net.WebViewCookieJar
 import okhttp3.Interceptor
 import okhttp3.Response
 
@@ -31,7 +30,6 @@ class CloudflareInterceptor : Interceptor {
 
         val host = request.url.host
         response.close()
-        WebViewCookieJar.clearCfClearance(host)
         throw CloudflareChallengeException(host, request.url.toString(), "Eklenti")
     }
 }

@@ -51,24 +51,59 @@ object CloudflareDetector {
 }
 
 object WebViewCookieJar : CookieJar {
-    fun cfClearanceFor(host: String): String? {
-        if (host.isBlank()) return null
+    fun cfClearanceFor(urlOrHost: String): String? {
+        if (urlOrHost.isBlank()) return null
         return runCatching {
-            val header = CookieManager.getInstance().getCookie("https://$host/") ?: return null
-            header.split(';').firstNotNullOfOrNull { part ->
-                val trimmed = part.trim()
-                if (trimmed.startsWith("cf_clearance=")) {
-                    trimmed.substringAfter('=').trim().ifBlank { null }
-                } else null
+            for (lookupUrl in clearanceLookupUrls(urlOrHost)) {
+                val header = CookieManager.getInstance().getCookie(lookupUrl) ?: continue
+                val clearance = header.split(';').firstNotNullOfOrNull { part ->
+                    val trimmed = part.trim()
+                    if (trimmed.startsWith("cf_clearance=")) {
+                        trimmed.substringAfter('=').trim().ifBlank { null }
+                    } else null
+                }
+                if (clearance != null) return@runCatching clearance
             }
+            null
         }.getOrNull()
     }
 
-    fun clearCfClearance(host: String) {
-        if (host.isBlank()) return
+    fun clearCfClearance(urlOrHost: String) {
+        if (urlOrHost.isBlank()) return
         runCatching {
+            val target = normalizedHttpUrl(urlOrHost) ?: return@runCatching
             val manager = CookieManager.getInstance()
-            manager.setCookie("https://$host/", "cf_clearance=; Max-Age=0; Path=/")
+            val host = target.host
+            val paths = buildSet {
+                add("/")
+                var path = target.path.orEmpty().trimEnd('/')
+                while (path.isNotEmpty() && path != "/") {
+                    add(path)
+                    add("$path/")
+                    path = path.substringBeforeLast('/', "")
+                }
+            }
+            val domains = buildSet {
+                add(host)
+                val withoutWww = host.removePrefix("www.")
+                add(withoutWww)
+                val labels = withoutWww.split('.')
+                if (labels.size > 2) add(labels.takeLast(2).joinToString("."))
+            }
+            for (scheme in listOf(target.protocol, "https").filter { it.isNotBlank() }.distinct()) {
+                for (domain in domains.filter { it.isNotBlank() }) {
+                    for (path in paths) {
+                        val attributes = "Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=$path"
+                        manager.setCookie("$scheme://$domain$path", "cf_clearance=; $attributes")
+                        manager.setCookie("$scheme://$domain$path", "cf_clearance=; $attributes; Domain=$domain")
+                        manager.setCookie("$scheme://$domain$path", "cf_clearance=; $attributes; Domain=.$domain")
+                        if (domain != host) {
+                            manager.setCookie("$scheme://$host$path", "cf_clearance=; $attributes; Domain=$domain")
+                            manager.setCookie("$scheme://$host$path", "cf_clearance=; $attributes; Domain=.$domain")
+                        }
+                    }
+                }
+            }
             manager.flush()
         }
     }
@@ -77,9 +112,18 @@ object WebViewCookieJar : CookieJar {
         if (cookies.isEmpty()) return
         runCatching {
             val manager = CookieManager.getInstance()
+            val now = System.currentTimeMillis()
             for (cookie in cookies) {
-                val value = "${cookie.name}=${cookie.value}; path=${cookie.path}"
-                manager.setCookie(url.toString(), value)
+                if (cookie.expiresAt <= now) continue
+                val attributes = buildString {
+                    append("; Path=").append(cookie.path.ifBlank { "/" })
+                    if (!cookie.hostOnly && cookie.domain.isNotBlank()) {
+                        append("; Domain=").append(cookie.domain)
+                    }
+                    if (cookie.secure) append("; Secure")
+                    if (cookie.httpOnly) append("; HttpOnly")
+                }
+                manager.setCookie(url.toString(), "${cookie.name}=${cookie.value}$attributes")
             }
             manager.flush()
         }
@@ -105,5 +149,17 @@ object WebViewCookieJar : CookieJar {
                 }.getOrNull()
             }
         }.getOrDefault(emptyList())
+    }
+
+    private fun clearanceLookupUrls(urlOrHost: String): List<String> {
+        val target = normalizedHttpUrl(urlOrHost) ?: return emptyList()
+        return listOf(target.toString(), "${target.protocol}://${target.host}/").distinct()
+    }
+
+    private fun normalizedHttpUrl(value: String): java.net.URL? {
+        val raw = if (value.startsWith("http://") || value.startsWith("https://")) value else "https://$value"
+        return runCatching { java.net.URL(raw) }
+            .getOrNull()
+            ?.takeIf { it.host.orEmpty().isNotBlank() }
     }
 }

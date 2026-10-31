@@ -113,10 +113,9 @@ object NetworkManager {
 
     fun isCloudflareChallenge(response: okhttp3.Response): Boolean {
         if (response.code != 403 && response.code != 503) return false
-        val mitigated = response.header("cf-mitigated")
-        if (mitigated != null && mitigated.equals("challenge", ignoreCase = true)) return true
-        val server = response.header("Server").orEmpty().lowercase()
-        if (server.contains("cloudflare")) return true
+        if (response.header("cf-mitigated").equals("challenge", ignoreCase = true)) return true
+        val server = response.header("Server").orEmpty()
+        if (!server.contains("cloudflare", ignoreCase = true)) return false
         val contentType = response.header("Content-Type").orEmpty()
         if (contentType.isNotBlank() && !contentType.contains("text/html", ignoreCase = true)) return false
         val bodyText = runCatching { response.peekBody(16384).string() }.getOrDefault("")
