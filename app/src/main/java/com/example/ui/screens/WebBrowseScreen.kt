@@ -59,6 +59,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import coil.compose.AsyncImage
 import com.example.data.net.PageRefererRegistry
 import com.example.data.net.WebViewIdentity
+import com.example.data.parser.NetworkManager
 import com.example.data.web.CaptureChapter
 import com.example.data.web.CaptureResult
 import com.example.data.web.CaptureSeries
@@ -318,7 +319,7 @@ fun WebBrowseScreen(
                 .padding(padding),
             factory = { ctx ->
                 WebView(ctx).apply {
-                    WebViewIdentity.apply(this)
+                    WebViewIdentity.apply(this, NetworkManager.USER_AGENT)
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     settings.databaseEnabled = true
