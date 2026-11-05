@@ -466,7 +466,7 @@ object BubbleTextLineFitter {
     )
 
     private data class Attempt(
-        val result: BubbleTextFitResult?,
+        val result: BubbleTextFitResult? = null,
         val rejection: BubbleTextRejection? = null
     )
 
