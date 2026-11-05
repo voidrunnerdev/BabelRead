@@ -12,6 +12,7 @@ import android.graphics.RectF
 import android.util.Log
 import com.example.data.db.TranslationCorrectionDao
 import com.example.i18n.TranslationLanguages
+import com.example.util.BubbleLayoutGeometry
 import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
@@ -1337,7 +1338,15 @@ class TranslationService(
     )
 
     private fun textReachOf(block: TextBlockObj): RectF {
-        val reach = Rect(block.boundingBox).apply { union(block.layoutBox) }
+        // Layout boxes may be wider than the safe oval to preserve anchor text.
+        // Use the draw-time-safe part for mask reach so masking cannot spill.
+        val safeLayout = if (block.isBubble) {
+            BubbleLayoutGeometry.clampToSafeOval(block.layoutBox, block.bubbleBox)
+                ?: block.layoutBox
+        } else {
+            block.layoutBox
+        }
+        val reach = Rect(block.boundingBox).apply { union(safeLayout) }
         val reachPadX = max(18f, reach.width() * 0.15f)
         val reachPadY = max(14f, reach.height() * 0.15f)
         return RectF(

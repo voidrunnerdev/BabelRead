@@ -35,6 +35,7 @@ import com.example.service.LocalMangaImporter
 import com.example.service.TextBlockObj
 import com.example.service.TranslationRequest
 import com.example.service.TranslationService
+import com.example.util.BubbleLayoutGeometry
 import com.example.work.NewChapterWorker
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -2779,52 +2780,6 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         return consolidated
                     }
 
-                    // Use the detected bubble's usable interior as the layout area. The OCR
-                    // rectangle is only an association check; sizing from that tight text
-                    // rectangle can leave longer translations needlessly tiny.
-                    // Returns null when the bubble/anchor pair cannot be trusted, so the
-                    // caller can fall back to the OCR text rectangle.
-                    fun centeredLayoutBox(anchor: Rect, bubble: Rect): Rect? {
-                        if (anchor.isEmpty || bubble.isEmpty) return null
-                        val minSide = minOf(bubble.width(), bubble.height()).coerceAtLeast(0)
-                        val margin = (minSide * 0.04f).toInt().coerceAtMost(minSide / 4).coerceAtLeast(0)
-                        val safe = Rect(
-                            bubble.left + margin,
-                            bubble.top + margin,
-                            bubble.right - margin,
-                            bubble.bottom - margin
-                        )
-
-                        // Detector output contains rectangles, not the balloon contour.
-                        // Use the largest rectangle that fits inside the inscribed ellipse
-                        // (about 70% of the detector box), otherwise text at the top and
-                        // bottom lines spills outside the visible rounded bubble.
-                        val centerX = bubble.exactCenterX()
-                        val centerY = bubble.exactCenterY()
-                        val ovalSafe = Rect(
-                            (centerX - bubble.width() * 0.35f).toInt().coerceAtLeast(bubble.left),
-                            (centerY - bubble.height() * 0.35f).toInt().coerceAtLeast(bubble.top),
-                            (centerX + bubble.width() * 0.35f).toInt().coerceAtMost(bubble.right),
-                            (centerY + bubble.height() * 0.35f).toInt().coerceAtMost(bubble.bottom)
-                        )
-                        if (ovalSafe.isEmpty) return null
-                        val safeOval = Rect(ovalSafe)
-                        if (!safeOval.intersect(safe)) return ovalSafe
-
-                        if (safeOval.isEmpty) return null
-                        val anchorIntersection = Rect(anchor)
-                        if (!anchorIntersection.intersect(bubble) || anchorIntersection.isEmpty) {
-                            // A false or mismatched detector must not move unrelated OCR text.
-                            return null
-                        }
-                        // Keep this rectangle centered on the actual bubble. Its 70% width
-                        // and height let the line breaker use the balloon instead of the
-                        // much smaller OCR text box.
-                        val meaningfulGrowth = safeOval.width() >= anchor.width() * 1.10f &&
-                            safeOval.height() >= anchor.height() * 1.10f
-                        return if (meaningfulGrowth) safeOval else Rect(anchor)
-                    }
-
                     // 3. Eşleştirme ve Çeviri Akışı
                     if (yoloBubbles.isNotEmpty()) {
                         val sfxBoxes = yoloBubbles.filter {
@@ -3058,19 +3013,19 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                             analysis.isBubble -> translationService.refineBubbleBounds(bitmap, textBounds, analysis.isDarkBubble)
                                             else -> textBounds
                                         }
-                                    // Size bubble text from the balloon interior. The tight
-                                    // text_bubble detection remains a fallback anchor, but
-                                    // fitting to it left longer translations needlessly tiny.
-                                    val finalTargetBox = (if (finalIsBubble) {
-                                        centeredLayoutBox(textBounds, bubbleBounds)
-                                    } else {
-                                        null
-                                    })
-                                        ?: matchingTextDetection(textBounds)
-                                        ?: Rect(textBounds)
+                                        // Size bubble text from the balloon interior. The tight
+                                        // text_bubble detection remains a fallback anchor, but
+                                        // fitting to it left longer translations needlessly tiny.
+                                        val targetBox = (if (finalIsBubble) {
+                                            BubbleLayoutGeometry.centeredLayoutBox(textBounds, bubbleBounds)
+                                        } else {
+                                            null
+                                        })
+                                            ?: matchingTextDetection(textBounds)
+                                            ?: Rect(textBounds)
                                         candidates.add(
                                             BubbleCandidate(
-                                                targetBox = finalTargetBox,
+                                                targetBox = targetBox,
                                                 text = cleanedText,
                                                 textRect = textBounds,
                                                 isBubble = finalIsBubble,
@@ -3106,15 +3061,16 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     analysis.isBubble -> translationService.refineBubbleBounds(bitmap, cluster.rect, analysis.isDarkBubble)
                                     else -> cluster.rect
                                 }
+                                val targetBox = (if (finalIsBubble) {
+                                    BubbleLayoutGeometry.centeredLayoutBox(cluster.rect, refinedBox)
+                                } else {
+                                    null
+                                })
+                                    ?: matchingTextDetection(cluster.rect)
+                                    ?: Rect(cluster.rect)
                                 candidates.add(
                                     BubbleCandidate(
-                                        targetBox = (if (finalIsBubble) {
-                                            centeredLayoutBox(cluster.rect, refinedBox)
-                                        } else {
-                                            null
-                                        })
-                                            ?: matchingTextDetection(cluster.rect)
-                                            ?: Rect(cluster.rect),
+                                        targetBox = targetBox,
                                         text = cleanedText,
                                         textRect = cluster.rect,
                                         isBubble = finalIsBubble,
@@ -3136,9 +3092,14 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             val analysis = translationService.analyzeBubble(bitmap, raw.rect)
                             if (translationService.isValidDialogueText(cleanedText, isBubble = analysis.isBubble)) {
                                 val refinedBox = if (analysis.isBubble) translationService.refineBubbleBounds(bitmap, raw.rect, analysis.isDarkBubble) else raw.rect
+                                val targetBox = (if (analysis.isBubble) {
+                                    BubbleLayoutGeometry.centeredLayoutBox(raw.rect, refinedBox)
+                                } else {
+                                    null
+                                }) ?: raw.rect
                                 candidates.add(
                                     BubbleCandidate(
-                                        targetBox = (if (analysis.isBubble) centeredLayoutBox(raw.rect, refinedBox) else null) ?: raw.rect,
+                                        targetBox = targetBox,
                                         text = cleanedText,
                                         textRect = raw.rect,
                                         isBubble = analysis.isBubble,
@@ -3230,6 +3191,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     normalizedWidth = normW,
                                     normalizedHeight = normH,
                                     backgroundColor = sampledColor,
+                                    // May intentionally exceed the 70% safe oval to keep
+                                    // anchor readability; visual consumers clamp at draw time.
                                     layoutBox = cand.targetBox,
                                     translationSucceeded = result?.succeeded == true,
                                     coordinateImageWidth = bitmap.width,

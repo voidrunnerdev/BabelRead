@@ -7,6 +7,8 @@ import android.graphics.Typeface
 import android.os.Build
 import android.text.Layout
 import android.text.StaticLayout
+import android.text.TextDirectionHeuristic
+import android.text.TextDirectionHeuristics
 import android.text.TextPaint
 import java.text.BreakIterator
 import java.util.Locale
@@ -33,8 +35,19 @@ object StaticTextLayoutOptimizer {
         val maxLineWidthPx: Float,
         val fitsInside: Boolean,
         val requiredWidthDp: Float,
-        val staticLayout: StaticLayout?
-    )
+        val staticLayout: StaticLayout?,
+        val bubbleTextLayout: BubbleTextLayout? = null,
+        val bubbleTextPaint: TextPaint? = null
+    ) {
+        val hasRenderableLayout: Boolean
+            get() = staticLayout != null || bubbleTextLayout?.lines?.isNotEmpty() == true
+
+        val layoutWidthPx: Float
+            get() = bubbleTextLayout?.widthPx ?: staticLayout?.width?.toFloat() ?: 0f
+
+        val layoutHeightPx: Float
+            get() = bubbleTextLayout?.heightPx ?: staticLayout?.height?.toFloat() ?: 0f
+    }
 
     /**
      * Konuşma balonuna metin yerleştirirken:
@@ -59,7 +72,8 @@ object StaticTextLayoutOptimizer {
         layoutLocale: Locale = Locale.getDefault(),
         isOvalBubble: Boolean = true,
         measureTypeface: Typeface? = null,
-        allowBrokenWords: Boolean = false
+        allowBrokenWords: Boolean = false,
+        textDirection: TextLayoutLocale.Direction = TextLayoutLocale.Direction.LTR
     ): OptimizedLayoutResult {
         require(minSp.isFinite() && maxSp.isFinite() && minSp > 0f && maxSp >= minSp) {
             "Font size range must be finite, positive, and ordered"
@@ -134,6 +148,7 @@ object StaticTextLayoutOptimizer {
                 candidatePaint,
                 safeWidthPx,
                 candidateLineSpacing,
+                textDirection,
                 hyphenation = allowBrokenWords
             )
             val totalH = layout.height.toFloat()
@@ -234,12 +249,14 @@ object StaticTextLayoutOptimizer {
         paint: TextPaint,
         widthPx: Int,
         lineSpacingMultiplier: Float,
+        textDirection: TextLayoutLocale.Direction,
         hyphenation: Boolean = false
     ): StaticLayout {
         val safeWidth = max(8, widthPx)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val builder = StaticLayout.Builder.obtain(text, 0, text.length, paint, safeWidth)
                 .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                .setTextDirection(textDirection.toHeuristic())
                 .setLineSpacing(0f, lineSpacingMultiplier)
                 // Keep font extents that can otherwise clip accented or script-specific glyphs.
                 .setIncludePad(true)
@@ -270,4 +287,12 @@ object StaticTextLayoutOptimizer {
             )
         }
     }
+
+    private fun TextLayoutLocale.Direction.toHeuristic(): TextDirectionHeuristic =
+        if (this == TextLayoutLocale.Direction.RTL) {
+            TextDirectionHeuristics.RTL
+        } else {
+            TextDirectionHeuristics.FIRSTSTRONG_LTR
+        }
+
 }
