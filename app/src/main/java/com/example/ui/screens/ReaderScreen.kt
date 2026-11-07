@@ -1283,7 +1283,10 @@ fun ReaderPageContainer(
     val textLayoutLocale = remember(uiLocale, targetLanguage) {
         TextLayoutLocale.resolveLocale(targetLanguage, uiLocale)
     }
-    val rawBitmapState = remember(chapterId, pageIndex) { mutableStateOf<Bitmap?>(null) }
+    val pageQuality by viewModel.pageQuality.collectAsState()
+    val rawBitmapState = remember(chapterId, pageIndex, pageQuality) {
+        mutableStateOf(viewModel.peekPageBitmap(chapterId, pageIndex)?.takeUnless { it.isRecycled })
+    }
     var rawBitmap by rawBitmapState
     DisposableEffect(rawBitmapState) {
         onDispose {
@@ -1298,7 +1301,7 @@ fun ReaderPageContainer(
     val maskedPagesMap by viewModel.maskedPagesMap.collectAsState()
     val readerPageRetryTick by viewModel.readerPageRetryTick.collectAsState()
 
-    LaunchedEffect(chapterId, pageIndex, rawBitmapIsRecycled, bitmapLoadAttempt, readerPageRetryTick) {
+    LaunchedEffect(chapterId, pageIndex, pageQuality, rawBitmapIsRecycled, bitmapLoadAttempt, readerPageRetryTick) {
         if (rawBitmap == null || rawBitmapIsRecycled) {
             rawBitmap = null
             bitmapLoadFailed = false

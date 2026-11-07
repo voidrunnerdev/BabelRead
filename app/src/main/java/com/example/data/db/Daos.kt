@@ -31,6 +31,42 @@ interface MangaDao {
 
     @Query("DELETE FROM manga WHERE id = :id")
     suspend fun deleteMangaById(id: String)
+
+    @Query("SELECT * FROM manga WHERE linkedFolderId = :folderId ORDER BY title COLLATE NOCASE ASC")
+    suspend fun getMangasByLinkedFolder(folderId: String): List<MangaEntity>
+
+    @Query("UPDATE manga SET linkedAvailable = :available WHERE id = :id")
+    suspend fun updateLinkedAvailability(id: String, available: Boolean)
+
+    @Query("UPDATE manga SET linkedAvailable = :available WHERE linkedFolderId = :folderId")
+    suspend fun updateLinkedFolderAvailability(folderId: String, available: Boolean)
+
+    @Query("SELECT COUNT(*) FROM manga WHERE linkedFolderId = :folderId")
+    suspend fun countMangasForLinkedFolder(folderId: String): Int
+}
+
+@Dao
+interface LinkedFolderDao {
+    @Query("SELECT * FROM linked_folder ORDER BY addedAt DESC")
+    fun getLinkedFolders(): Flow<List<LinkedFolderEntity>>
+
+    @Query("SELECT * FROM linked_folder ORDER BY addedAt DESC")
+    suspend fun getLinkedFoldersSync(): List<LinkedFolderEntity>
+
+    @Query("SELECT * FROM linked_folder WHERE id = :id")
+    suspend fun getLinkedFolderById(id: String): LinkedFolderEntity?
+
+    @Query("SELECT * FROM linked_folder WHERE treeUri = :treeUri")
+    suspend fun getLinkedFoldersByTreeUri(treeUri: String): List<LinkedFolderEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertLinkedFolder(folder: LinkedFolderEntity)
+
+    @Query("DELETE FROM linked_folder WHERE id = :id")
+    suspend fun deleteLinkedFolderById(id: String)
+
+    @Query("UPDATE linked_folder SET lastScanAt = :lastScanAt, lastScanError = :error WHERE id = :id")
+    suspend fun updateScanResult(id: String, lastScanAt: Long, error: String?)
 }
 
 @Dao

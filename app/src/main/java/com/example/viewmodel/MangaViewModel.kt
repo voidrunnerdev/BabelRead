@@ -1,6 +1,8 @@
 package com.example.viewmodel
 
 import android.app.Application
+import android.content.ComponentCallbacks2
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Rect
@@ -13,6 +15,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.room.withTransaction
 import com.example.data.db.*
+import com.example.data.linked.LinkedFolderManager
+import com.example.data.linked.LinkedPageLocator
+import com.example.data.linked.LinkedPageResolver
+import com.example.data.linked.LinkedScanResult
+import com.example.data.linked.LinkedSourceInfo
 import com.example.data.net.CloudflareChallengeException
 import com.example.data.net.toSafeWebViewHeaders
 import com.example.data.parser.*
@@ -36,6 +43,7 @@ import com.example.service.TextBlockObj
 import com.example.service.TranslationRequest
 import com.example.service.TranslationService
 import com.example.util.BubbleLayoutGeometry
+import com.example.util.ReaderBitmapPolicy
 import com.example.work.NewChapterWorker
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -64,6 +72,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val correctionDao = database.translationCorrectionDao()
     private val queueDao = database.downloadQueueDao()
     private val translationCacheDao = database.translationCacheDao()
+    private val linkedFolderDao = database.linkedFolderDao()
+    private val linkedPageResolver = LinkedPageResolver(context)
+    private val linkedFolderManager = LinkedFolderManager(context, database, linkedPageResolver)
 
     val preferences = MangaPreferences(context)
     val translationService = TranslationService(correctionDao, context)
@@ -76,6 +87,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _importStatusText = MutableStateFlow("")
     val importStatusText = _importStatusText.asStateFlow()
+
+    private val _linkedSources = MutableStateFlow<List<LinkedSourceInfo>>(emptyList())
+    val linkedSources = _linkedSources.asStateFlow()
 
     // UI Theme & Layout Toggles
     private val _isGridView = MutableStateFlow(true)
@@ -879,7 +893,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         detectionPrefetchJob?.cancel()
         detectionPrefetchJob = null
         translationPipelineCursor = 0
-        pageBitmapCache.evictAll()
+        evictReaderBitmapCaches()
         viewModelScope.launch {
             if (translate || preferences.autoTranslate.first()) {
                 toggleLiveTranslation(true)
@@ -1345,15 +1359,45 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         emptyList()
     )
 
-    private val pageCacheMaxKb = ((Runtime.getRuntime().maxMemory() / 10L) / 1024L)
-        .coerceIn(8L * 1024L, 64L * 1024L).toInt()
+    private val pageCacheBudgetBytes = ReaderBitmapPolicy.displayCacheBytes(Runtime.getRuntime().maxMemory())
+    private val fullResCacheBudgetBytes = ReaderBitmapPolicy.fullResCacheBytes(Runtime.getRuntime().maxMemory())
     private val maskedPageBudgetBytes = (Runtime.getRuntime().maxMemory() / 12L)
         .coerceIn(6L * 1024L * 1024L, 40L * 1024L * 1024L)
-    private val pageBitmapCache = object : LruCache<String, Bitmap>(pageCacheMaxKb) {
+    private val pageBitmapCache = object : LruCache<String, Bitmap>(pageCacheBudgetBytes.toInt()) {
         override fun sizeOf(key: String, value: Bitmap): Int {
-            return (value.allocationByteCount / 1024).coerceAtLeast(1)
+            return value.allocationByteCount.coerceAtLeast(1)
         }
     }
+    private val fullResBitmapCache = object : LruCache<String, Bitmap>(fullResCacheBudgetBytes.toInt()) {
+        override fun sizeOf(key: String, value: Bitmap): Int {
+            return value.allocationByteCount.coerceAtLeast(1)
+        }
+    }
+    private val pageMemoryCallbacks = object : ComponentCallbacks2 {
+        override fun onConfigurationChanged(newConfig: Configuration) = Unit
+        override fun onLowMemory() = evictReaderBitmapCaches()
+        override fun onTrimMemory(level: Int) {
+            if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+                level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+                level >= ComponentCallbacks2.TRIM_MEMORY_MODERATE
+            ) {
+                evictReaderBitmapCaches()
+            }
+        }
+    }
+
+    private fun evictReaderBitmapCaches() {
+        pageBitmapCache.evictAll()
+        fullResBitmapCache.evictAll()
+    }
+
+    private fun putBitmapIfFits(cache: LruCache<String, Bitmap>, key: String, bitmap: Bitmap) {
+        val entryBytes = bitmap.allocationByteCount.toLong().coerceAtLeast(1L)
+        if (!ReaderBitmapPolicy.cacheEntryFits(entryBytes, cache.maxSize().toLong())) return
+        cache.put(key, bitmap)
+    }
+
+    @Volatile private var lastObservedPageQuality: String? = null
 
     val pageQuality = preferences.pageQuality.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), "Orta")
 
@@ -1405,7 +1449,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             _detectedBubblesMap.value = emptyMap()
             _maskedPagesMap.value = emptyMap()
             _currentPageIndex.value = 0
-            pageBitmapCache.evictAll()
+            evictReaderBitmapCaches()
 
             try {
                 val quick = quickReadPayload
@@ -1460,7 +1504,18 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 _readerManga.value = dbManga
                 val chapterList = chapterDao.getChaptersByMangaIdSync(dbChapter.mangaId)
                 val pages: List<String>
-                if (dbChapter.isDownloaded && dbChapter.localImagePathList.isNotBlank()) {
+                if (dbChapter.linkedFolderId != null) {
+                    val linkedFolder = linkedFolderDao.getLinkedFolderById(dbChapter.linkedFolderId)
+                    if (linkedFolder == null) {
+                        throw IOException("Bağlı klasör kaydı bulunamadı. Kaynağı yeniden bağlayın.")
+                    }
+                    if (!LinkedFolderManager.hasReadPermission(context, linkedFolder.treeUri)) {
+                        throw IOException(
+                            "Bağlı klasör izni kayboldu. Kütüphaneden 'Yeniden Bağla' ile klasörü tekrar seçin."
+                        )
+                    }
+                    pages = LinkedPageLocator.decodeList(dbChapter.linkedPageLocator)
+                } else if (dbChapter.isDownloaded && dbChapter.localImagePathList.isNotBlank()) {
                     pages = PagePathCodec.decode(dbChapter.localImagePathList)
                 } else {
                     val srcName = dbManga.sourceName
@@ -1545,9 +1600,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onPageIndexChanged(index: Int) {
+        val previousIndex = _currentPageIndex.value
         _currentPageIndex.value = index
         recordHistory(index)
-        prefetchNeighborPages(index)
+        prefetchNeighborPages(index, previousIndex)
         viewModelScope.launch {
             val ch = _activeChapter.value ?: return@launch
             chapterDao.updateReadPage(ch.id, index)
@@ -1680,42 +1736,48 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun prefetchNeighborPages(currentIndex: Int) {
+    private fun prefetchNeighborPages(currentIndex: Int, previousIndex: Int = currentIndex) {
         val pages = _readerPages.value
-        val validIndices = (currentIndex - 1..currentIndex + 1)
-            .filter { it in pages.indices }
-            .toSet()
+        val movingForward = currentIndex > previousIndex
+        val movingBackward = currentIndex < previousIndex
+        val behind = if (movingBackward) 3 else 2
+        val ahead = if (movingForward) 3 else 2
+        val range = (currentIndex - behind)..(currentIndex + ahead)
+        val validIndices = range.filter { it in pages.indices }.toSet()
 
         prefetchJobMap.entries.toList()
             .filter { it.key !in validIndices }
             .forEach { (index, job) ->
                 job.cancel()
                 prefetchJobMap.remove(index)
-        }
+            }
 
-        val range = currentIndex - 1..currentIndex + 1
         val chapterId = _activeChapter.value?.id ?: return
+        val quality = pageQuality.value
         for (i in range) {
-            if (i in pages.indices) {
-                if (prefetchJobMap[i]?.isActive != true) {
-                    prefetchJobMap[i] = viewModelScope.launch(Dispatchers.IO) {
-                        try {
-                            val quality = preferences.pageQuality.first()
-                            val cacheKey = pageCacheKey(chapterId, i, quality, fullRes = false)
-                            if (pageBitmapCache.get(cacheKey) != null) return@launch
-                            val path = pages[i]
-                            prefetchDecodeSemaphore.withPermit {
-                                loadCachedPageBitmap(cacheKey, path, fullRes = false, quality = quality)
-                            }
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            // Ignored
-                        } finally {
-                            if (prefetchJobMap[i] === coroutineContext[Job]) {
-                                prefetchJobMap.remove(i)
-                            }
-                        }
+            if (i !in validIndices) continue
+            if (peekDisplayBitmap(chapterId, i, quality) != null) continue
+            if (prefetchJobMap[i]?.isActive == true) continue
+            prefetchJobMap[i] = viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val currentQuality = preferences.pageQuality.first()
+                    if (peekDisplayBitmap(chapterId, i, currentQuality) != null) return@launch
+                    val path = pages[i]
+                    prefetchDecodeSemaphore.withPermit {
+                        loadCachedPageBitmap(
+                            pageCacheKey(chapterId, i, currentQuality, fullRes = false),
+                            path,
+                            fullRes = false,
+                            quality = currentQuality
+                        )
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // Ignored
+                } finally {
+                    if (prefetchJobMap[i] === coroutineContext[Job]) {
+                        prefetchJobMap.remove(i)
                     }
                 }
             }
@@ -1726,10 +1788,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val pageJobsMutex = Mutex()
 
     private fun pageCacheKey(chapterId: String, index: Int, quality: String, fullRes: Boolean): String {
-        // The same page can be decoded at Low, Medium, High, or OCR full
-        // resolution. Keep those bitmaps separate so a preference change cannot
-        // reuse a bitmap decoded with an older, lower quality profile.
-        val profile = if (fullRes && quality != "Yüksek") {
+        val profile = if (fullRes) {
             "full"
         } else {
             when (quality) {
@@ -1739,6 +1798,25 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         return "${chapterId}_${index}_$profile"
+    }
+
+    private fun bitmapCacheFor(fullRes: Boolean): LruCache<String, Bitmap> =
+        if (fullRes) fullResBitmapCache else pageBitmapCache
+
+    fun peekPageBitmap(chapterId: String, index: Int): Bitmap? {
+        if (_activeChapter.value?.id != chapterId) return null
+        if (index !in _readerPages.value.indices) return null
+        return peekDisplayBitmap(chapterId, index, pageQuality.value)
+    }
+
+    private fun peekDisplayBitmap(chapterId: String, index: Int, quality: String): Bitmap? {
+        val cacheKey = pageCacheKey(chapterId, index, quality, fullRes = false)
+        val cached = pageBitmapCache.get(cacheKey) ?: return null
+        if (cached.isRecycled) {
+            pageBitmapCache.remove(cacheKey)
+            return null
+        }
+        return cached
     }
 
     suspend fun getPageBitmap(index: Int, fullRes: Boolean = false): Bitmap? {
@@ -1756,9 +1834,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             _activeChapter.value?.id != chapterId ||
             _readerPages.value !== pages
         ) return null
-        val effectiveFullRes = fullRes && quality != "Yüksek"
-        val cacheKey = pageCacheKey(chapterId, index, quality, effectiveFullRes)
-        val bitmap = loadCachedPageBitmap(cacheKey, path, effectiveFullRes, quality)
+        val cacheKey = pageCacheKey(chapterId, index, quality, fullRes)
+        val bitmap = loadCachedPageBitmap(cacheKey, path, fullRes, quality)
         return bitmap?.takeIf {
             !it.isRecycled &&
                 readerGeneration.get() == generation &&
@@ -1767,10 +1844,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun loadCachedPageBitmap(cacheKey: String, path: String, fullRes: Boolean, quality: String): Bitmap? {
-        val cached = pageBitmapCache.get(cacheKey)
+        val cache = bitmapCacheFor(fullRes)
+        val cached = cache.get(cacheKey)
         if (cached != null) {
             if (!cached.isRecycled) return cached
-            pageBitmapCache.remove(cacheKey)
+            cache.remove(cacheKey)
         }
 
         val deferred = pageJobsMutex.withLock {
@@ -1784,7 +1862,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             loadAndScaleBitmap(path, fullRes = fullRes, quality = quality)
                         }
                         if (bmp != null) {
-                            pageBitmapCache.put(cacheKey, bmp)
+                            putBitmapIfFits(cache, cacheKey, bmp)
                         }
                         bmp
                     } finally {
@@ -1810,25 +1888,24 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun loadAndScaleBitmap(path: String, fullRes: Boolean = false, quality: String): Bitmap? = withContext(Dispatchers.IO) {
         try {
-            val maxPixels = when {
-                fullRes -> 8_000_000L
-                quality == "Düşük" -> 2_500_000L
-                quality == "Yüksek" -> 8_000_000L
-                else -> 5_000_000L
+            val maxPixels = if (fullRes) {
+                ReaderBitmapPolicy.FULL_RES_MAX_PIXELS
+            } else {
+                ReaderBitmapPolicy.DISPLAY_MAX_PIXELS
+            }
+            val targetWidth = if (fullRes) {
+                0
+            } else {
+                ReaderBitmapPolicy.displayTargetWidthPx(
+                    context.resources.displayMetrics.widthPixels,
+                    quality
+                )
+            }
+            if (LinkedPageLocator.isEncodedLocator(path)) {
+                return@withContext linkedPageResolver.decodeSampled(path, maxPixels, targetWidth)
             }
             fun sampleFor(width: Int, height: Int): Int {
-                if (width <= 0 || height <= 0) return 4
-                var sample = 1
-                while (true) {
-                    val sampledWidth = width / sample
-                    val sampledHeight = height / sample
-                    if (sampledWidth <= 0 || sampledHeight <= 0 ||
-                        (sampledWidth.toLong() * sampledHeight.toLong() <= maxPixels &&
-                            maxOf(sampledWidth, sampledHeight) <= 8192)
-                    ) break
-                    sample *= 2
-                }
-                return sample
+                return ReaderBitmapPolicy.chooseSampleSize(width, height, targetWidth, maxPixels)
             }
             fun decodeLocal(filePath: String): Bitmap? {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -3308,7 +3385,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun queueChapterDownload(mangaId: String, chapterId: String) {
         viewModelScope.launch {
             val chapter = chapterDao.getChapterById(chapterId) ?: return@launch
-            if (chapter.isDownloaded) return@launch
+            if (chapter.isDownloaded || chapter.linkedFolderId != null) return@launch
             val manga = mangaDao.getMangaById(mangaId) ?: return@launch
             val queueItem = DownloadQueueItemEntity(
                 chapterId = chapterId,
@@ -3356,7 +3433,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             .map { it.chapterId }
             .toSet()
         val queueItems = chapters.asSequence()
-            .filterNot { it.isDownloaded || it.id in queuedChapterIds }
+            .filterNot { it.isDownloaded || it.linkedFolderId != null || it.id in queuedChapterIds }
             .map { chapter ->
                 DownloadQueueItemEntity(
                     chapterId = chapter.id,
@@ -3742,6 +3819,105 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun refreshLinkedSources() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { linkedFolderManager.sourceInfos() }
+                .onSuccess { _linkedSources.value = it }
+        }
+    }
+
+    fun linkLocalFolder(
+        treeUri: Uri,
+        mode: String,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            _isImporting.value = true
+            _importStatusText.value = if (mode == LinkedFolderEntity.MODE_LIBRARY_ROOT) {
+                "Bağlı klasör kitaplığı taranıyor..."
+            } else {
+                "Bağlı klasör taranıyor..."
+            }
+            try {
+                val res: LinkedScanResult = linkedFolderManager.linkFolder(treeUri, mode) { status ->
+                    _importStatusText.value = status
+                }
+                onResult(res.success, res.message)
+            } catch (e: Exception) {
+                onResult(false, "Klasör bağlama hatası: ${e.localizedMessage ?: e.message}")
+            } finally {
+                refreshLinkedSources()
+                _isImporting.value = false
+                _importStatusText.value = ""
+            }
+        }
+    }
+
+    fun linkLocalFolderSingle(treeUri: Uri, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+        linkLocalFolder(treeUri, LinkedFolderEntity.MODE_SINGLE_MANGA, onResult)
+    }
+
+    fun linkLocalFolderLibrary(treeUri: Uri, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+        linkLocalFolder(treeUri, LinkedFolderEntity.MODE_LIBRARY_ROOT, onResult)
+    }
+
+    fun rescanLinkedFolder(folderId: String, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+        viewModelScope.launch {
+            _isImporting.value = true
+            _importStatusText.value = "Bağlı klasör yeniden taranıyor..."
+            try {
+                val res = linkedFolderManager.rescanFolder(folderId) { status ->
+                    _importStatusText.value = status
+                }
+                onResult(res.success, res.message)
+            } catch (e: Exception) {
+                onResult(false, "Bağlı klasör taranamadı: ${e.localizedMessage ?: e.message}")
+            } finally {
+                refreshLinkedSources()
+                _isImporting.value = false
+                _importStatusText.value = ""
+            }
+        }
+    }
+
+    fun relinkLinkedFolder(
+        folderId: String,
+        treeUri: Uri,
+        onResult: (Boolean, String) -> Unit = { _, _ -> }
+    ) {
+        viewModelScope.launch {
+            _isImporting.value = true
+            _importStatusText.value = "Bağlı klasör yeniden bağlanıyor..."
+            try {
+                val res = linkedFolderManager.relinkFolder(folderId, treeUri) { status ->
+                    _importStatusText.value = status
+                }
+                onResult(res.success, res.message)
+            } catch (e: Exception) {
+                onResult(false, "Klasör yeniden bağlanamadı: ${e.localizedMessage ?: e.message}")
+            } finally {
+                refreshLinkedSources()
+                _isImporting.value = false
+                _importStatusText.value = ""
+            }
+        }
+    }
+
+    fun detachLinkedFolder(folderId: String, onResult: (Boolean, String) -> Unit = { _, _ -> }) {
+        viewModelScope.launch {
+            try {
+                val (success, message) = linkedFolderManager.detachFolder(folderId)
+                withContext(Dispatchers.Main) { onResult(success, message) }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    onResult(false, "Bağlantı kaldırılamadı: ${e.localizedMessage ?: e.message}")
+                }
+            } finally {
+                refreshLinkedSources()
+            }
+        }
+    }
+
     fun importLocalArchives(
         uris: List<Uri>,
         title: String? = null,
@@ -3959,14 +4135,19 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     delay(25)
                 }
 
-                val isLocal = manga.sourceName.contains("Yerel", ignoreCase = true) || manga.sourceName.equals("Local", ignoreCase = true) || manga.id.startsWith("local_")
+                val isLinked = manga.linkedFolderId != null
+                val isLocal = !isLinked && (
+                    manga.sourceName.contains("Yerel", ignoreCase = true) ||
+                        manga.sourceName.equals("Local", ignoreCase = true) ||
+                        manga.id.startsWith("local_")
+                )
                 val pathsToStage = linkedSetOf<File>()
                 if (isLocal) {
                     pathsToStage += File(context.filesDir, "local_imports/${manga.id}")
                     pathsToStage += File(context.filesDir, "local_imports/${manga.id.removePrefix("local_")}")
                 }
 
-                if (manga.coverUrl.startsWith("/") || manga.coverUrl.startsWith("file://")) {
+                if (!isLinked && (manga.coverUrl.startsWith("/") || manga.coverUrl.startsWith("file://"))) {
                     pathsToStage += File(manga.coverUrl.removePrefix("file://"))
                 }
 
@@ -3974,7 +4155,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 // Stage both legacy manga folders and chapter folders across all storage roots.
                 downloadRoots.forEach { root -> pathsToStage += File(root, manga.id) }
                 chapters.forEach { ch ->
-                    if (ch.localImagePathList.isNotBlank()) {
+                    if (ch.linkedFolderId == null && ch.localImagePathList.isNotBlank()) {
                         PagePathCodec.decode(ch.localImagePathList).forEach { path ->
                             pathsToStage += File(path.trim().removePrefix("file://"))
                         }
@@ -4010,16 +4191,20 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 synchronized(downloadStateLock) {
                     chapterIdsToCancel.forEach(cancelledDownloadIds::remove)
                 }
+                if (isLinked) linkedPageResolver.deleteCachedCover(manga.id)
 
                 val undeletedPaths = stagedFiles.filterNot { entry ->
                     if (entry.staged.isDirectory) entry.staged.deleteRecursively() else entry.staged.delete()
                 }
 
                 withContext(Dispatchers.Main) {
-                    val message = if (undeletedPaths.isEmpty()) {
-                        "\"${manga.title}\" ve tüm dosyaları cihazdan tamamen silindi."
-                    } else {
-                        "\"${manga.title}\" kayıtları silindi; bazı dosyalar depolamadan kaldırılamadı."
+                    val message = when {
+                        isLinked -> "\"${manga.title}\" kütüphaneden kaldırıldı. " +
+                            "Bağlı klasördeki kaynak dosyalarınıza dokunulmadı."
+                        undeletedPaths.isEmpty() ->
+                            "\"${manga.title}\" ve tüm dosyaları cihazdan tamamen silindi."
+                        else ->
+                            "\"${manga.title}\" kayıtları silindi; bazı dosyalar depolamadan kaldırılamadı."
                     }
                     onFinished(true, message)
                 }
@@ -4064,7 +4249,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
                 downloadedChapters.forEach { chapter ->
                     val manga = mangaDao.getMangaById(chapter.mangaId)
-                    val localImport = manga?.id?.startsWith("local_") == true ||
+                    val localImport = chapter.linkedFolderId != null ||
+                        manga?.id?.startsWith("local_") == true ||
                         manga?.sourceName?.contains("yerel", ignoreCase = true) == true ||
                         chapter.localImagePathList.contains("${File.separator}local_imports${File.separator}")
                     if (!localImport) {
@@ -4095,9 +4281,22 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     fun getYoloModelInfo(): Map<String, String> = bubbleDetector.yoloDetector.getModelInfo()
 
     init {
+        context.registerComponentCallbacks(pageMemoryCallbacks)
         MangaSourceRegistry.webSourceResolver = { sourceName ->
             webSiteStore.siteBySourceName(sourceName)?.let { site ->
                 WebSiteSource(site, context)
+            }
+        }
+
+        viewModelScope.launch {
+            preferences.pageQuality.distinctUntilChanged().collect { quality ->
+                val previous = lastObservedPageQuality
+                lastObservedPageQuality = quality
+                if (previous != null && previous != quality) {
+                    pageBitmapCache.evictAll()
+                    prefetchJobMap.values.toList().forEach { it.cancel() }
+                    prefetchJobMap.clear()
+                }
             }
         }
 
@@ -4106,6 +4305,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             // web sayfa önbelleği yalnızca bu oturumda güvenilir sayılır.
             runCatching { database.webPageCacheDao().deleteOlderThan(Long.MAX_VALUE) }
         }
+
+        refreshLinkedSources()
 
         viewModelScope.launch {
             preferences.pinnedSources.collect { pinned ->
@@ -4193,6 +4394,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         viewModelScope.coroutineContext.cancelChildren()
+        context.unregisterComponentCallbacks(pageMemoryCallbacks)
         prefetchJobMap.values.forEach { it.cancel() }
         prefetchJobMap.clear()
         translationJobs.values.forEach { it.cancel() }
@@ -4201,7 +4403,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         activePageJobs.clear()
         inProgressPages.clear()
         _isTranslationLoading.value = false
-        pageBitmapCache.evictAll()
+        evictReaderBitmapCaches()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { bubbleDetector.yoloDetector.closeSession() }
         }

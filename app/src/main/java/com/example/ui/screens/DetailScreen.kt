@@ -176,13 +176,17 @@ fun DetailScreen(
                                 Text("Buradan İtibaren Okundu İşaretle")
                             }
                         },
-                        dismissButton = {
-                            TextButton(onClick = {
-                                viewModel.queueAllChaptersFromHere(m.id, act.chapterNumber)
-                                showContextMenu = false
-                            }) {
-                                Text("Buradan İtibaren İndir")
+                        dismissButton = if (act.linkedFolderId == null) {
+                            {
+                                TextButton(onClick = {
+                                    viewModel.queueAllChaptersFromHere(m.id, act.chapterNumber)
+                                    showContextMenu = false
+                                }) {
+                                    Text("Buradan İtibaren İndir")
+                                }
                             }
+                        } else {
+                            null
                         }
                     )
                 }
@@ -267,40 +271,42 @@ fun DetailScreen(
                                 }
                             }
 
-                            OutlinedButton(
-                                onClick = {
-                                    viewModel.queueAllChapters(
-                                        m.id,
-                                        selectedChapterLang.takeUnless { it == "Hepsi" }
+                            if (m.linkedFolderId == null) {
+                                OutlinedButton(
+                                    onClick = {
+                                        viewModel.queueAllChapters(
+                                            m.id,
+                                            selectedChapterLang.takeUnless { it == "Hepsi" }
+                                        )
+                                    },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = AppSizes.minTouchTarget)
+                                        .testTag("download_all_btn"),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        contentColor = MaterialTheme.colorScheme.primary
                                     )
-                                },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = AppSizes.minTouchTarget)
-                                    .testTag("download_all_btn"),
-                                colors = ButtonDefaults.outlinedButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.primary
-                                )
-                            ) {
-                                if (aggregateDownloadProgress != null) {
-                                    DownloadProgressIcon(
-                                        progress = aggregateDownloadProgress,
-                                        modifier = Modifier.size(AppSizes.iconLarge)
-                                    )
-                                    Spacer(modifier = Modifier.width(AppSpacing.sm))
-                                    Text(
-                                        text = "İndiriliyor %${(aggregateDownloadProgress.coerceIn(0f, 1f) * 100).roundToInt()}",
-                                        style = MaterialTheme.typography.labelLarge,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                } else {
-                                    Icon(Icons.Default.Download, contentDescription = null)
-                                    Spacer(modifier = Modifier.width(AppSpacing.sm))
-                                    Text(
-                                        text = "Tümünü İndir",
-                                        style = MaterialTheme.typography.labelLarge,
-                                        fontWeight = FontWeight.Bold
-                                    )
+                                ) {
+                                    if (aggregateDownloadProgress != null) {
+                                        DownloadProgressIcon(
+                                            progress = aggregateDownloadProgress,
+                                            modifier = Modifier.size(AppSizes.iconLarge)
+                                        )
+                                        Spacer(modifier = Modifier.width(AppSpacing.sm))
+                                        Text(
+                                            text = "İndiriliyor %${(aggregateDownloadProgress.coerceIn(0f, 1f) * 100).roundToInt()}",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    } else {
+                                        Icon(Icons.Default.Download, contentDescription = null)
+                                        Spacer(modifier = Modifier.width(AppSpacing.sm))
+                                        Text(
+                                            text = "Tümünü İndir",
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -609,60 +615,62 @@ fun ChapterRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                when {
-                    chapter.isDownloaded -> {
-                        IconButton(onClick = {}) {
-                            Icon(
-                                imageVector = Icons.Default.CloudDone,
-                                contentDescription = "İndirildi",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(AppSizes.iconLarge)
+            if (chapter.linkedFolderId == null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    when {
+                        chapter.isDownloaded -> {
+                            IconButton(onClick = {}) {
+                                Icon(
+                                    imageVector = Icons.Default.CloudDone,
+                                    contentDescription = "İndirildi",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(AppSizes.iconLarge)
+                                )
+                            }
+                        }
+
+                        queueItem != null && queueItem.status == "İndiriliyor" -> {
+                            DownloadProgressIcon(
+                                progress = queueItem.progress,
+                                modifier = Modifier.testTag("download_progress_${chapter.id}"),
+                                onClick = onCancelClick
                             )
                         }
-                    }
 
-                    queueItem != null && queueItem.status == "İndiriliyor" -> {
-                        DownloadProgressIcon(
-                            progress = queueItem.progress,
-                            modifier = Modifier.testTag("download_progress_${chapter.id}"),
-                            onClick = onCancelClick
-                        )
-                    }
+                        queueItem != null && queueItem.status == "Başarısız" -> {
+                            IconButton(
+                                onClick = onRetryClick,
+                                modifier = Modifier.testTag("download_retry_${chapter.id}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.ErrorOutline,
+                                    contentDescription = "İndirme başarısız, tekrar dene",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(AppSizes.iconLarge)
+                                )
+                            }
+                        }
 
-                    queueItem != null && queueItem.status == "Başarısız" -> {
-                        IconButton(
-                            onClick = onRetryClick,
-                            modifier = Modifier.testTag("download_retry_${chapter.id}")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ErrorOutline,
-                                contentDescription = "İndirme başarısız, tekrar dene",
-                                tint = MaterialTheme.colorScheme.error,
-                                modifier = Modifier.size(AppSizes.iconLarge)
+                        queueItem != null -> {
+                            DownloadProgressIcon(
+                                progress = 0f,
+                                modifier = Modifier.testTag("download_queued_${chapter.id}"),
+                                onClick = onCancelClick
                             )
                         }
-                    }
 
-                    queueItem != null -> {
-                        DownloadProgressIcon(
-                            progress = 0f,
-                            modifier = Modifier.testTag("download_queued_${chapter.id}"),
-                            onClick = onCancelClick
-                        )
-                    }
-
-                    else -> {
-                        IconButton(
-                            onClick = onDownloadClick,
-                            modifier = Modifier.testTag("download_chapter_${chapter.id}")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Outlined.Download,
-                                contentDescription = "İndir",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.size(AppSizes.iconLarge)
-                            )
+                        else -> {
+                            IconButton(
+                                onClick = onDownloadClick,
+                                modifier = Modifier.testTag("download_chapter_${chapter.id}")
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Download,
+                                    contentDescription = "İndir",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(AppSizes.iconLarge)
+                                )
+                            }
                         }
                     }
                 }

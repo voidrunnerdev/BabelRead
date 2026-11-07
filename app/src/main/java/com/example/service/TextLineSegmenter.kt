@@ -17,8 +17,8 @@ data class SegmentedTextLine(
  *
  * PP-OCR recognition models expect one text line per crop. The comic detector
  * returns text blocks (often a whole balloon paragraph), so this class builds a
- * text-ink mask and uses projection profiles to recover lines. It intentionally
- * avoids a second detector model.
+ * text-ink mask and uses projection profiles to recover lines. It is used when
+ * the PP-OCRv5 detection model is unavailable or its result is unusable.
  */
 class TextLineSegmenter {
 

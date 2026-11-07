@@ -101,6 +101,7 @@ dependencies {
   implementation(libs.androidx.documentfile)
   implementation(libs.junrar)
   implementation(libs.androidx.security.crypto)
+  implementation(libs.libarchive)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.okhttp)

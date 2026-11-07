@@ -14,9 +14,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         TranslationCorrectionEntity::class,
         DownloadQueueItemEntity::class,
         TranslatedPageCacheEntity::class,
-        WebPageCacheEntity::class
+        WebPageCacheEntity::class,
+        LinkedFolderEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class MangaDatabase : RoomDatabase() {
@@ -26,6 +27,7 @@ abstract class MangaDatabase : RoomDatabase() {
     abstract fun downloadQueueDao(): DownloadQueueDao
     abstract fun translationCacheDao(): TranslationCacheDao
     abstract fun webPageCacheDao(): WebPageCacheDao
+    abstract fun linkedFolderDao(): LinkedFolderDao
 
     companion object {
         @Volatile
@@ -76,6 +78,34 @@ abstract class MangaDatabase : RoomDatabase() {
             }
         }
 
+        // Bağlı klasörler yalnızca metadata saklar; mevcut mangalar ve okuma
+        // ilerlemesi korunur, kullanıcı dosyaları uygulamaya kopyalanmaz.
+        private val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `linked_folder` (" +
+                        "`id` TEXT NOT NULL, " +
+                        "`treeUri` TEXT NOT NULL, " +
+                        "`displayName` TEXT NOT NULL, " +
+                        "`mode` TEXT NOT NULL, " +
+                        "`addedAt` INTEGER NOT NULL, " +
+                        "`lastScanAt` INTEGER NOT NULL, " +
+                        "`lastScanError` TEXT, " +
+                        "PRIMARY KEY(`id`))"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_linked_folder_treeUri` " +
+                        "ON `linked_folder` (`treeUri`)"
+                )
+                db.execSQL("ALTER TABLE `manga` ADD COLUMN `linkedFolderId` TEXT")
+                db.execSQL("ALTER TABLE `manga` ADD COLUMN `linkedRelativePath` TEXT")
+                db.execSQL("ALTER TABLE `manga` ADD COLUMN `linkedAvailable` INTEGER")
+                db.execSQL("ALTER TABLE `chapter` ADD COLUMN `linkedFolderId` TEXT")
+                db.execSQL("ALTER TABLE `chapter` ADD COLUMN `linkedRelativePath` TEXT")
+                db.execSQL("ALTER TABLE `chapter` ADD COLUMN `linkedPageLocator` TEXT")
+            }
+        }
+
         fun getDatabase(context: Context): MangaDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -85,7 +115,7 @@ abstract class MangaDatabase : RoomDatabase() {
                 )
                 // Deliberately omit destructive fallback: schema changes must ship
                 // an explicit Migration so manga and reading progress are preserved.
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                 .build()
                 INSTANCE = instance
                 instance

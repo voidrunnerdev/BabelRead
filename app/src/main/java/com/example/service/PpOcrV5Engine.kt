@@ -22,10 +22,11 @@ import java.nio.FloatBuffer
 import kotlin.math.ceil
 
 /**
- * PP-OCRv5 mobile recognizer (recognition-only).
+ * PP-OCRv5 mobile recognizer with DBNet line detection.
  *
- * The detector still comes from RT-DETR. This class only turns a text block
- * into line crops, runs the PP-OCRv5 CTC recognizer, and maps text back to the
+ * A text block is split into line crops by the PP-OCRv5 detector when its
+ * asset is available, falling back to the heuristic segmenter otherwise. Each
+ * line is then run through the PP-OCRv5 CTC recognizer and mapped back to the
  * original page coordinates.
  */
 class PpOcrV5Engine(context: Context) {
@@ -55,6 +56,7 @@ class PpOcrV5Engine(context: Context) {
 
     private val appContext = context.applicationContext
     private val lineSegmenter = TextLineSegmenter()
+    private val detector = PpOcrV5Detector(appContext)
     private val sessionMutex = Mutex()
 
     @Volatile
@@ -76,7 +78,9 @@ class PpOcrV5Engine(context: Context) {
      * session creation do not block the translation pipeline.
      */
     suspend fun prewarm(): Boolean = withContext(Dispatchers.IO) {
-        ensureInitialized()
+        val loaded = ensureInitialized()
+        if (loaded) detector.prewarm()
+        loaded
     }
 
     suspend fun recognizeBlock(
@@ -92,13 +96,22 @@ class PpOcrV5Engine(context: Context) {
             forceVertical: Boolean = false,
             forceHorizontal: Boolean = false
         ): BlockAttempt {
-            val lines = lineSegmenter.segment(
-                bitmap,
-                region,
-                language,
-                forceVertical = forceVertical,
-                forceHorizontal = forceHorizontal
-            )
+            val detected = if (!forceVertical && !forceHorizontal) {
+                detector.detect(bitmap, region)
+            } else {
+                emptyList()
+            }
+            val lines = if (detected.isNotEmpty()) {
+                detectedToLines(detected, language, forceVertical, forceHorizontal)
+            } else {
+                lineSegmenter.segment(
+                    bitmap,
+                    region,
+                    language,
+                    forceVertical = forceVertical,
+                    forceHorizontal = forceHorizontal
+                )
+            }
             val vertical = if (lines.isEmpty()) {
                 isJapanese(primaryLanguage) && region.height() > region.width() * 1.8f
             } else {
@@ -153,6 +166,31 @@ class PpOcrV5Engine(context: Context) {
             )
         }
         merged
+    }
+
+    private fun detectedToLines(
+        detected: List<PpOcrV5Detector.DetectedLine>,
+        language: String,
+        forceVertical: Boolean,
+        forceHorizontal: Boolean
+    ): List<SegmentedTextLine> {
+        val japanese = isJapanese(language)
+        val lines = detected.map { line ->
+            val rect = Rect(line.rect)
+            val vertical = when {
+                forceVertical -> true
+                forceHorizontal -> false
+                japanese -> rect.height() > rect.width() * 1.5f
+                else -> false
+            }
+            SegmentedTextLine(rect, vertical)
+        }
+        val vertical = lines.count { it.vertical } * 2 >= lines.size
+        return if (vertical) {
+            lines.sortedByDescending { it.rect.right }
+        } else {
+            lines.sortedBy { it.rect.top }
+        }
     }
 
     private fun overlapsExisting(

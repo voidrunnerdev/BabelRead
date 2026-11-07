@@ -37,6 +37,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.example.data.db.MangaEntity
+import com.example.data.db.LinkedFolderEntity
+import com.example.data.linked.LinkedSourceInfo
 import com.example.i18n.Text
 import com.example.ui.components.AppScaffold
 import com.example.ui.components.AppTopBar
@@ -64,10 +66,13 @@ fun LibraryScreen(
     val isGridView by viewModel.isGridView.collectAsState()
     val isImporting by viewModel.isImporting.collectAsState()
     val importStatusText by viewModel.importStatusText.collectAsState()
+    val linkedSources by viewModel.linkedSources.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
     var showImportSheet by remember { mutableStateOf(false) }
     var mangaToDelete by remember { mutableStateOf<MangaEntity?>(null) }
+    var linkedFolderToRelink by remember { mutableStateOf<String?>(null) }
+    var linkedSourceToDetach by remember { mutableStateOf<LinkedSourceInfo?>(null) }
     var showSelectionMode by remember { mutableStateOf(false) }
     var selectedMangaIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var showMergeDialog by remember { mutableStateOf(false) }
@@ -135,6 +140,48 @@ fun LibraryScreen(
                 }
             }
         }
+    }
+
+    val linkedFolderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: android.net.Uri? ->
+        uri?.let {
+            viewModel.linkLocalFolderSingle(it) { _, msg ->
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(msg)
+                }
+            }
+        }
+    }
+
+    val linkedLibraryPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: android.net.Uri? ->
+        uri?.let {
+            viewModel.linkLocalFolderLibrary(it) { _, msg ->
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(msg)
+                }
+            }
+        }
+    }
+
+    val relinkFolderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri: android.net.Uri? ->
+        val folderId = linkedFolderToRelink
+        linkedFolderToRelink = null
+        if (uri != null && folderId != null) {
+            viewModel.relinkLinkedFolder(folderId, uri) { _, msg ->
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(msg)
+                }
+            }
+        }
+    }
+
+    LaunchedEffect(showImportSheet) {
+        if (showImportSheet) viewModel.refreshLinkedSources()
     }
 
     LaunchedEffect(mangas) {
@@ -400,6 +447,7 @@ fun LibraryScreen(
                     .fillMaxWidth()
                     .padding(horizontal = AppSpacing.xl)
                     .padding(bottom = AppSpacing.xxl)
+                    .verticalScroll(rememberScrollState())
             ) {
                 Text(
                     text = "Cihazınızdan Manga Yükleyin",
@@ -472,6 +520,34 @@ fun LibraryScreen(
                 Spacer(modifier = Modifier.height(AppSpacing.sm))
 
                 ImportOption(
+                    title = "Klasör Bağla (kopyalamadan)",
+                    description = "Tek manga olarak bağlayın; doğrudan resimler Bölüm 1, alt klasörler ve CBZ/ZIP dosyaları bölüm olur",
+                    icon = Icons.Default.Link,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                    onClick = {
+                        showImportSheet = false
+                        linkedFolderPickerLauncher.launch(null)
+                    },
+                    modifier = Modifier.testTag("link_folder_option")
+                )
+
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
+
+                ImportOption(
+                    title = "Klasör Kitaplığı Bağla",
+                    description = "Kök klasördeki her alt klasör bir manga olur; sayfalar uygulamaya kopyalanmadan okunur",
+                    icon = Icons.Default.LibraryBooks,
+                    tint = MaterialTheme.colorScheme.secondary,
+                    onClick = {
+                        showImportSheet = false
+                        linkedLibraryPickerLauncher.launch(null)
+                    },
+                    modifier = Modifier.testTag("link_library_option")
+                )
+
+                Spacer(modifier = Modifier.height(AppSpacing.sm))
+
+                ImportOption(
                     title = "Resim Dosyaları (Çoklu Seçim)",
                     description = "Galeriden veya dosyalardan manga sayfalarını topluca seçin",
                     icon = Icons.Default.PhotoLibrary,
@@ -482,6 +558,35 @@ fun LibraryScreen(
                     },
                     modifier = Modifier.testTag("import_images_option")
                 )
+
+                if (linkedSources.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(AppSpacing.xl))
+                    Text(
+                        text = "Bağlı Klasörler",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(AppSpacing.xs))
+                    linkedSources.forEach { source ->
+                        LinkedSourceRow(
+                            source = source,
+                            onRescan = {
+                                viewModel.rescanLinkedFolder(source.folder.id) { _, msg ->
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar(msg)
+                                    }
+                                }
+                            },
+                            onRelink = {
+                                linkedFolderToRelink = source.folder.id
+                                relinkFolderPickerLauncher.launch(null)
+                            },
+                            onDetach = { linkedSourceToDetach = source }
+                        )
+                        Spacer(modifier = Modifier.height(AppSpacing.sm))
+                    }
+                }
             }
         }
     }
@@ -867,6 +972,69 @@ fun LibraryScreen(
             shape = MaterialTheme.shapes.extraLarge
         )
     }
+
+    if (linkedSourceToDetach != null) {
+        val source = linkedSourceToDetach!!
+        AlertDialog(
+            onDismissRequest = { linkedSourceToDetach = null },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.LinkOff,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error
+                )
+            },
+            title = {
+                Text(
+                    text = "Bağlantı Kaldırılsın mı?",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            text = {
+                Text(
+                    text = "\"${source.folder.displayName}\" bağlantısı kaldırılacak ve bu klasörden " +
+                        "eklenen ${source.mangaCount} manga kütüphaneden çıkarılacak. " +
+                        "Kaynak dosyalarınız silinmez; okuma ilerlemesi bu kayıtlar için kaybolur.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val folderId = source.folder.id
+                        linkedSourceToDetach = null
+                        viewModel.detachLinkedFolder(folderId) { _, msg ->
+                            coroutineScope.launch {
+                                snackbarHostState.showSnackbar(msg)
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier
+                        .heightIn(min = AppSizes.minTouchTarget)
+                        .testTag("confirm_detach_linked_source")
+                ) {
+                    Text("Kaldır", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { linkedSourceToDetach = null },
+                    modifier = Modifier.heightIn(min = AppSizes.minTouchTarget)
+                ) {
+                    Text("İptal", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = MaterialTheme.shapes.extraLarge
+        )
+    }
 }
 
 @Composable
@@ -1063,6 +1231,109 @@ private fun ImportOption(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LinkedSourceRow(
+    source: LinkedSourceInfo,
+    onRescan: () -> Unit,
+    onRelink: () -> Unit,
+    onDetach: () -> Unit
+) {
+    val folder = source.folder
+    val modeLabel = if (folder.mode == LinkedFolderEntity.MODE_LIBRARY_ROOT) {
+        "Klasör kitaplığı"
+    } else {
+        "Tek manga"
+    }
+    val hasError = !source.permissionGranted || !folder.lastScanError.isNullOrBlank()
+    val statusText = when {
+        !source.permissionGranted ->
+            folder.lastScanError ?: "İzin kayboldu — yeniden bağla"
+        !folder.lastScanError.isNullOrBlank() -> folder.lastScanError
+        else -> "${source.mangaCount} manga"
+    }
+    SurfaceCard(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        border = BorderStroke(
+            1.dp,
+            if (hasError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outlineVariant
+        ),
+        contentPadding = PaddingValues(AppSpacing.md)
+    ) {
+        Column {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    tint = if (hasError) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    },
+                    modifier = Modifier.size(AppSizes.iconLarge)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = folder.displayName,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "$modeLabel • $statusText",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (hasError) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(AppSpacing.xs))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (source.permissionGranted) {
+                    TextButton(
+                        onClick = onRescan,
+                        modifier = Modifier
+                            .heightIn(min = AppSizes.minTouchTarget)
+                            .testTag("rescan_linked_source_${folder.id}")
+                    ) {
+                        Text("Yeniden Tara")
+                    }
+                }
+                if (hasError) {
+                    TextButton(
+                        onClick = onRelink,
+                        modifier = Modifier
+                            .heightIn(min = AppSizes.minTouchTarget)
+                            .testTag("relink_linked_source_${folder.id}")
+                    ) {
+                        Text("Yeniden Bağla")
+                    }
+                }
+                TextButton(
+                    onClick = onDetach,
+                    modifier = Modifier
+                        .heightIn(min = AppSizes.minTouchTarget)
+                        .testTag("detach_linked_source_${folder.id}")
+                ) {
+                    Text("Kaldır", color = MaterialTheme.colorScheme.error)
+                }
             }
         }
     }

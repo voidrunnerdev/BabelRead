@@ -19,7 +19,10 @@ data class MangaEntity(
     val originLanguage: String = "Japonca",
     val availableLanguages: String = "TR, EN",
     val isFavorite: Boolean = false,
-    val addedAt: Long = System.currentTimeMillis()
+    val addedAt: Long = System.currentTimeMillis(),
+    val linkedFolderId: String? = null,
+    val linkedRelativePath: String? = null,
+    val linkedAvailable: Boolean? = null
 )
 
 @Entity(
@@ -37,8 +40,30 @@ data class ChapterEntity(
     val isDownloaded: Boolean = false,
     val localImagePathList: String = "", // comma-separated paths
     val totalPages: Int = 0,
-    val language: String = "tr"
+    val language: String = "tr",
+    val linkedFolderId: String? = null,
+    val linkedRelativePath: String? = null,
+    val linkedPageLocator: String? = null
 )
+
+@Entity(
+    tableName = "linked_folder",
+    indices = [Index(value = ["treeUri"])]
+)
+data class LinkedFolderEntity(
+    @PrimaryKey val id: String,
+    val treeUri: String,
+    val displayName: String,
+    val mode: String = MODE_SINGLE_MANGA,
+    val addedAt: Long = System.currentTimeMillis(),
+    val lastScanAt: Long = 0L,
+    val lastScanError: String? = null
+) {
+    companion object {
+        const val MODE_SINGLE_MANGA = "single"
+        const val MODE_LIBRARY_ROOT = "library"
+    }
+}
 
 @Entity(tableName = "translation_correction")
 data class TranslationCorrectionEntity(
