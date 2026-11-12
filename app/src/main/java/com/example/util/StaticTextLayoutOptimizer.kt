@@ -178,7 +178,7 @@ object StaticTextLayoutOptimizer {
             for (line in 0 until (layout.lineCount - 1).coerceAtLeast(0)) {
                 val lineEnd = layout.getLineEnd(line)
                 if (lineEnd < cleanText.length && !lineBreakIterator.isBoundary(lineEnd)) {
-                    if (!allowBrokenWords || layout.getLineWidth(line) < targetWidthPx * 0.30f {
+                    if (!allowBrokenWords || layout.getLineWidth(line) < targetWidthPx * 0.55f {
                         hasIllegalLineBreak = true
                         break
                     }
@@ -190,7 +190,7 @@ object StaticTextLayoutOptimizer {
             } else {
                 0f
             }
-            val requiredWidthPx = maxLineW
+            val requiredWidthPx = max(maxLineW, ovalRequiredWidthPx)
             val fitsHorizontally = requiredWidthPx <= targetWidthPx && !hasIllegalLineBreak
 
             val safeVerticalPaddingPx = max(1.5f, textSizePx * 0.10f)
