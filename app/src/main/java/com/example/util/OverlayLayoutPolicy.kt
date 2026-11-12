@@ -9,7 +9,7 @@ object OverlayLayoutPolicy {
 
     const val READABLE_MIN_SP = 6f
     const val READABLE_SUBTITLE_SP = 8f
-    const val MIN_FORCED_DRAW_SCALE =0.55f
+    const val MIN_FORCED_DRAW_SCALE = 0.7f
 
     data class VerticalBounds(val top: Float, val height: Float)
     data class SubtitleFit(val fitsInside: Boolean, val fontSizeSp: Float)
