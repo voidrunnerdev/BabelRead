@@ -227,9 +227,7 @@ object StaticTextLayoutOptimizer {
                 0f
             }
             val requiredWidthPx = max(maxLineW, ovalRequiredWidthPx)
-            val avgCharsPerLine = if (layout.lineCount > 0) cleanText.length.toFloat() / layout.lineCount else 0f
-            val isSliverChop = layout.lineCount >= 4 && avgCharsPerLine < 3.2f && cleanText.length > 12
-            val fitsHorizontally = requiredWidthPx <= targetWidthPx && !hasIllegalLineBreak && !isSliverChop
+            val fitsHorizontally = requiredWidthPx <= targetWidthPx && !hasIllegalLineBreak
 
             val safeVerticalPaddingPx = max(1.5f, textSizePx * 0.10f)
             val fitsVertically = totalH + safeVerticalPaddingPx * 2f <= targetHeightPx

@@ -2004,6 +2004,7 @@ fun ReaderPageContainer(
                                     }
                                     if (sourceBox.isEmpty) return null
                                     val fallbackGeo = geometryFor(sourceBox)
+                                    val shouldFallbackToOriginal = !block.translationSucceeded || block.translatedText.isBlank()
                                     return PlacedOverlayBox(
                                         block = block,
                                         leftDp = fallbackGeo.leftDp,
@@ -2011,10 +2012,12 @@ fun ReaderPageContainer(
                                         widthDp = fallbackGeo.widthDp,
                                         heightDp = fallbackGeo.heightDp,
                                         layoutResult = opt,
-                                        paddingHDp = 0.dp,
-                                        paddingVDp = 0.dp,
-                                        showOriginalFallback = true,
-                                        fallbackSourceBounds = Rect(sourceBox)
+                                        paddingHDp = geo.padH,
+                                        paddingVDp = geo.padV,
+                                        showOriginalFallback = shouldFallbackToOriginal,
+                                        fallbackSourceBounds = Rect(sourceBox),
+                                        forceTextToFitBox = !shouldFallbackToOriginal,
+                                        boldBoost = boldBoost
                                     )
                                 }
                             }
@@ -2070,25 +2073,18 @@ fun ReaderPageContainer(
                     // metinlerden ÖNCE çizilir; böylece hiçbir zemin komşu
                     // bir metni örtemez ve zeminlerin kırpılmasına gerek kalmaz.
                     val peekHiddenStates = remember { mutableStateMapOf<String, Boolean>() }
+                    fun canRenderOverlayBox(placed: PlacedOverlayBox): Boolean {
+                        val block = placed.block
+                        if (placed.showOriginalFallback) return false
+                        if (!block.translationSucceeded || block.translatedText.isBlank()) return false
+                        if (!placed.layoutResult.hasRenderableLayout) return false
+                        if (placed.layoutResult.layoutWidthPx <= 0f || placed.layoutResult.layoutHeightPx <= 0f) return false
+                        return placed.layoutResult.fitsInside || placed.forceTextToFitBox
+                    }
                     placedOverlays.forEach { placed ->
                         val block = placed.block
                         val overlayKey = "$pageIndex:${block.boundingBox}:${block.originalText}:${placed.showOriginalFallback}"
-                        val isSliver = OverlayLayoutPolicy.isPathologicalSliver(
-                            widthDp = placed.widthDp.value,
-                            heightDp = placed.heightDp.value,
-                            lineCount = placed.layoutResult.lineCount,
-                            textLength = block.translatedText.length
-                        )
-                        if (placed.showOriginalFallback || peekHiddenStates[overlayKey] == true ||
-                            !block.translationSucceeded ||
-                            !OverlayLayoutPolicy.shouldDrawBackground(
-                                hasText = block.translatedText.isNotBlank(),
-                                hasLayout = placed.layoutResult.hasRenderableLayout,
-                                fitsInside = placed.layoutResult.fitsInside,
-                                forceTextToFitBox = placed.forceTextToFitBox,
-                                isSliver = isSliver
-                            )
-                        ) {
+                        if (placed.showOriginalFallback || peekHiddenStates[overlayKey] == true || !canRenderOverlayBox(placed)) {
                             return@forEach
                         }
                         val isSubtitleMode = bubbleStyle == "Alt Yazı (Şeffaf)" || !block.isBubble
@@ -2209,8 +2205,10 @@ fun ReaderPageContainer(
                         }
                         val boxWidth = (boxRight - boxLeft).coerceAtLeast(1.dp)
                         val boxHeight = (boxBottom - boxTop).coerceAtLeast(1.dp)
-                        val cornerRadius = if (isSubtitleMode) 6.dp else {
-                            (minOf(boxWidth.value, boxHeight.value) * 0.45f).coerceIn(4f, 26f).dp
+                        val isRectangularBox = !block.isBubble || block.bubbleBox.isEmpty ||
+                            (placed.layoutResult.bubbleTextLayout?.contourProfile?.isRectangularLike == true)
+                        val cornerRadius = if (isSubtitleMode || isRectangularBox) 6.dp else {
+                            (minOf(boxWidth.value, boxHeight.value) * 0.35f).coerceIn(4f, 20f).dp
                         }
                         Box(
                             modifier = Modifier
@@ -2231,12 +2229,12 @@ fun ReaderPageContainer(
                                         if (bgWidth <= 0f || bgHeight <= 0f) {
                                             return@drawBehind
                                         }
-                                        if (contour != null && contour.isRectangularLike) {
+                                        if (isRectangularBox || (contour != null && contour.isRectangularLike)) {
                                             drawRoundRect(
                                                 color = boxBackground,
                                                 topLeft = Offset(inset, inset),
                                                 size = Size(bgWidth, bgHeight),
-                                                cornerRadius = CornerRadius(4.dp.toPx())
+                                                cornerRadius = CornerRadius(6.dp.toPx())
                                             )
                                         } else {
                                             drawOval(
@@ -2431,6 +2429,7 @@ fun ReaderPageContainer(
                                 }
                             }
                         } else {
+                            if (!canRenderOverlayBox(placed)) return@key
                             val isSfxOutlineStyle = !block.isBubble && bubbleStyle != "Alt Yazı (Şeffaf)"
                             val textColor = when {
                                 isSfxOutlineStyle -> if (block.isDarkBubble) Color.White else Color(0xFF111111)

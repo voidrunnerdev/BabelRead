@@ -189,7 +189,7 @@ data class BubbleLineEnvelope(
                 val row = floor(fracY * profile.rowCount).toInt().coerceIn(0, profile.rowCount - 1)
                 spanForProfileRow(profile, row)
             }
-            EnvelopeShapeKind.ROUNDED_RECTANGLE -> ScanlineSpan(centerX, centerX)
+            EnvelopeShapeKind.ROUNDED_RECTANGLE -> ScanlineSpan(contentLeft, contentRight)
         }
     }
 
@@ -230,7 +230,7 @@ data class BubbleLineEnvelope(
                 if (minRight <= maxLeft) ScanlineSpan(centerX, centerX)
                 else ScanlineSpan(maxLeft, minRight)
             }
-            EnvelopeShapeKind.ROUNDED_RECTANGLE -> ScanlineSpan(centerX, centerX)
+            EnvelopeShapeKind.ROUNDED_RECTANGLE -> ScanlineSpan(contentLeft, contentRight)
         }
     }
 
