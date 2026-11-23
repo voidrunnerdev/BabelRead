@@ -111,6 +111,7 @@ internal class LinkedArchiveReader private constructor(
             }
             return@synchronized output.toByteArray()
         }
+        null
     }
 
     override fun close() = synchronized(lock) {

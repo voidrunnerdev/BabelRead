@@ -498,7 +498,7 @@ class LinkedFolderScanner(
         }
 
         private val VOLUME_OR_CHAPTER_REGEX = Regex(
-            "^(vol\.?|volume|cilt|ch\.?|chapter|bölüm|bolum|part|book|season|ep\.?|episode|v|c)\s*\d+.*$",
+            """^(vol\.?|volume|cilt|ch\.?|chapter|bölüm|bolum|part|book|season|ep\.?|episode|v|c)\s*\d+.*$""",
             RegexOption.IGNORE_CASE
         )
 

@@ -2061,7 +2061,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _isTranslationLoading.value = false
 
         if (restartIfActive && _translationActive.value && _activeChapter.value != null) {
-            startSequentialTranslation(currentIdx)
+            startSequentialTranslation()
         }
     }
 
