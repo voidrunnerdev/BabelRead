@@ -1537,11 +1537,7 @@ fun ReaderPageContainer(
                                     text = measuredText,
                                     bounds = textBounds,
                                     minSp = minSp,
-                                    maxSp = minOf(
-                                        geo.heightDp.value * 0.55f,
-                                        geo.widthDp.value * 0.34f,
-                                        harmonizedMaxSpCap ?: 30f
-                                    ).coerceIn(minSp, 30f),
+                                    maxSp = (geo.heightDp.value * 0.55f).coerceIn(minSp, 32f),
                                     density = density.density,
                                     spToPx = { fontSizeSp ->
                                         with(density) { fontSizeSp.sp.toPx() }
@@ -1577,11 +1573,7 @@ fun ReaderPageContainer(
                                     horizontalPaddingDp = bubbleGeo.padH.value,
                                     verticalPaddingDp = bubbleGeo.padV.value,
                                     minSp = minSp,
-                                    maxSp = minOf(
-                                        bubbleGeo.heightDp.value * 0.55f,
-                                        bubbleGeo.widthDp.value * 0.34f,
-                                        harmonizedMaxSpCap ?: 30f
-                                    ).coerceIn(minSp, 30f),
+                                    maxSp = (bubbleGeo.heightDp.value * 0.55f).coerceIn(minSp, 32f),
                                     density = density.density,
                                     spToPx = { fontSizeSp ->
                                         with(density) { fontSizeSp.sp.toPx() }
@@ -1679,14 +1671,7 @@ fun ReaderPageContainer(
                                     }
                                 }
                             } else {
-                                val rawBubbleBounds = p1BubbleBounds()
-                                // Do not let an un-separated detector bubble overlap a neighboring
-                                // separated text box (causes two bubbles' text to collide on screen).
-                                val bubbleBounds = rawBubbleBounds?.takeUnless { candidateRect ->
-                                    boldBoost || preparedBoxes.withIndex().any { (otherIdx, otherBox) ->
-                                        otherIdx != blockIndex && Rect.intersects(candidateRect, otherBox)
-                                    }
-                                }
+                                val bubbleBounds = p1BubbleBounds()
                                 val bubbleGeo = bubbleBounds?.let { geometryFor(it) }
                                 val contourProfile = if (validMasked != null && bubbleBounds != null) {
                                     contourCache.getOrPut(blockIndex) {
@@ -1718,7 +1703,7 @@ fun ReaderPageContainer(
                                             candidateGeo
                                         }
 
-                                        // 1. Unified crisp manga lettering: condensed bold, ZERO hyphens, down to 8.0sp floor.
+                                        // 1. Unified crisp manga lettering: standard scale, ZERO hyphens, down to 8.0sp floor.
                                         optimizeBubbleEnvelope(
                                             effectiveGeo,
                                             minSp = 8.0f,
@@ -1735,7 +1720,16 @@ fun ReaderPageContainer(
                                             contourProfile = profile
                                         )?.takeIf { it.fitsInside && it.fontSizeSp >= 8.0f }?.let { return it }
 
-                                        // 3. Only when whole words cannot fit cleanly: allow Turkish syllable hyphenation, down to 8.0sp.
+                                        // 3. Tighter condensation (0.85x), still ZERO hyphens, ensuring intact words.
+                                        optimizeBubbleEnvelope(
+                                            effectiveGeo,
+                                            minSp = 8.0f,
+                                            allowBrokenWords = false,
+                                            textScaleX = 0.85f,
+                                            contourProfile = profile
+                                        )?.takeIf { it.fitsInside && it.fontSizeSp >= 8.0f }?.let { return it }
+
+                                        // 4. Only when whole words cannot fit cleanly: allow Turkish syllable hyphenation (0.90x).
                                         optimizeBubbleEnvelope(
                                             effectiveGeo,
                                             minSp = 8.0f,
@@ -1744,7 +1738,7 @@ fun ReaderPageContainer(
                                             contourProfile = profile
                                         )?.takeIf { it.fitsInside && it.fontSizeSp >= 8.0f }?.let { return it }
 
-                                        // 4. Dense extreme bubble: tighter scaleX (0.84x) with hyphenation, locked to readable 8.0sp floor.
+                                        // 5. Dense extreme bubble: tighter scaleX (0.84x) with hyphenation, locked to readable 8.0sp floor.
                                         return optimizeBubbleEnvelope(
                                             effectiveGeo,
                                             minSp = 8.0f,
@@ -2018,49 +2012,7 @@ fun ReaderPageContainer(
                             layoutBlock(idx, blk)?.let { idx to it }
                         }
 
-                        // 2. Geçiş: Sayfa medyan diyalog puntosunu bulup gereksiz büyüyen
-                        // küçük balonları sayfa ritmine göre dengeli tavana çek.
-                        val pageBaseSp = PageFontHarmonizer.computePageBaselineSp(
-                            firstPass.map { (_, placed) ->
-                                val isNormal = bubbleStyle != "Alt Yazı (Şeffaf)" &&
-                                    placed.block.isBubble &&
-                                    !placed.showOriginalFallback
-                                PageFontHarmonizer.BubbleSample(
-                                    fontSizeSp = placed.layoutResult.fontSizeSp,
-                                    text = placed.block.translatedText,
-                                    isNormalSpeechBubble = isNormal,
-                                    fitsInside = placed.layoutResult.fitsInside
-                                )
-                            }
-                        )
-                        val placements = if (pageBaseSp == null) {
-                            firstPass.map { it.second }
-                        } else {
-                            firstPass.map { (idx, placed) ->
-                                val isNormal = bubbleStyle != "Alt Yazı (Şeffaf)" &&
-                                    placed.block.isBubble &&
-                                    !placed.showOriginalFallback
-                                val capSp = if (isNormal) {
-                                    PageFontHarmonizer.harmonizedCapSp(
-                                        currentSp = placed.layoutResult.fontSizeSp,
-                                        text = placed.block.translatedText,
-                                        pageBaseSp = pageBaseSp
-                                    )
-                                } else {
-                                    null
-                                }
-                                if (capSp != null) {
-                                    val reLayout = layoutBlock(idx, placed.block, harmonizedMaxSpCap = capSp)
-                                    if (reLayout != null && reLayout.layoutResult.fitsInside && !reLayout.showOriginalFallback) {
-                                        reLayout
-                                    } else {
-                                        placed
-                                    }
-                                } else {
-                                    placed
-                                }
-                            }
-                        }
+                        val placements = firstPass.map { it.second }
                         placements
                         }
                     }

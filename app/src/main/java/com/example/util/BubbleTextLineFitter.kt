@@ -65,7 +65,7 @@ object BubbleTextLineFitter {
     private const val WIDTH_SAFETY = 0.985f
     private const val FIT_EPSILON = 0.5f
     private const val MAX_DP_TOKENS = 140
-    private const val HYPHEN_PENALTY = 1.20f
+    private const val HYPHEN_PENALTY = 150.0f
     private const val ORPHAN_PENALTY = 1.50f
     private const val CONJUNCTION_PENALTY = 250.0f
     private const val HOURGLASS_PENALTY = 0.85f
@@ -655,21 +655,19 @@ object BubbleTextLineFitter {
             }
         }
 
-        // Prefer exact maxL lines so the outer contour band loop does not oscillate back to
-        // a smaller lineCount that already failed; fall back to fewer lines only if maxL is unreachable.
-        val targetLines = if (dp[maxL][n].isFinite()) {
-            maxL
-        } else {
-            var bestL = -1
-            var bestCost = inf
-            for (l in 1 until maxL) {
-                if (dp[l][n] < bestCost) {
-                    bestCost = dp[l][n]
+        var bestL = -1
+        var bestCost = inf
+        for (l in 1..maxL) {
+            val cost = dp[l][n]
+            if (cost.isFinite()) {
+                // Pick the line count with the lowest DP cost (avoiding forced stretching).
+                if (cost < bestCost - 0.05f) {
+                    bestCost = cost
                     bestL = l
                 }
             }
-            bestL
         }
+        val targetLines = bestL
         if (targetLines <= 0) return null
 
         val result = ArrayList<DraftLine>(targetLines)

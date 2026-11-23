@@ -94,19 +94,27 @@ object BubbleLayoutGeometry {
         requireDistinctBubble: Boolean = false
     ): Rect? {
         if (bubble.isEmpty || anchor.isEmpty || pageBounds.isEmpty) return null
-        // TextBlockObj defaults bubbleBox to boundingBox when detection has no
-        // distinct balloon. Treating that OCR box as a bubble would reintroduce
-        // the old targetBox-based P1 layout and could spill outside the balloon.
         if (requireDistinctBubble && bubble == anchor) return null
         val clipped = Rect(bubble)
         if (!clipped.intersect(pageBounds) || clipped.isEmpty) return null
-        // A detector box that only holds the OCR center is still unsafe: P1
-        // would derive its envelope from a bubble that cannot contain the source
-        // text. Require the whole anchor so neither P1 nor expansion clips it.
-        if (!clipped.contains(anchor)) return null
-        // Page clipping can turn a distinct bubble into the OCR anchor.
-        if (requireDistinctBubble && clipped == anchor) return null
-        return clipped
+
+        val effectiveBubble = if (clipped.contains(anchor)) {
+            clipped
+        } else if (Rect.intersects(clipped, anchor)) {
+            val interW = (minOf(clipped.right, anchor.right) - maxOf(clipped.left, anchor.left)).coerceAtLeast(0)
+            val interH = (minOf(clipped.bottom, anchor.bottom) - maxOf(clipped.top, anchor.top)).coerceAtLeast(0)
+            val anchorArea = (anchor.width().toLong() * anchor.height().toLong()).coerceAtLeast(1L)
+            val interArea = interW.toLong() * interH.toLong()
+            if (interArea >= anchorArea * 0.35f || clipped.contains(anchor.centerX(), anchor.centerY())) {
+                Rect(clipped).apply { union(anchor) }
+            } else {
+                return null
+            }
+        } else {
+            return null
+        }
+        if (requireDistinctBubble && effectiveBubble == anchor) return null
+        return effectiveBubble
     }
 
     /**
