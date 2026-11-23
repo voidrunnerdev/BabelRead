@@ -1350,12 +1350,11 @@ fun ReaderPageContainer(
                     else -> null
                 }
 
-                val measureTypeface = remember(ctx) {
+                val comicTypeface = remember(ctx) {
                     try {
-                        val base = androidx.core.content.res.ResourcesCompat.getFont(
+                        androidx.core.content.res.ResourcesCompat.getFont(
                             ctx, com.example.R.font.comic_neue
-                        ) ?: Typeface.DEFAULT
-                        Typeface.create(base, Typeface.BOLD)
+                        ) ?: Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                     } catch (_: Exception) {
                         Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                     }
@@ -1412,7 +1411,7 @@ fun ReaderPageContainer(
                         bubbleStyle,
                         pageOriginalWidth,
                         pageOriginalHeight,
-                        measureTypeface,
+                        comicTypeface,
                         condensedTypeface,
                         renderedBitmap,
                         validMasked,
@@ -1548,7 +1547,7 @@ fun ReaderPageContainer(
                                         measuredText
                                     ),
                                     isOvalBubble = !isSub,
-                                    measureTypeface = typefaceOverride ?: if (isSub) measureTypeface else condensedTypeface,
+                                    measureTypeface = typefaceOverride ?: if (isSub) condensedTypeface else comicTypeface,
                                     allowBrokenWords = allowBrokenWords,
                                     textScaleX = textScaleX
                                 )
@@ -1580,7 +1579,7 @@ fun ReaderPageContainer(
                                     },
                                     layoutLocale = textLayoutLocale,
                                     targetLanguage = targetLanguage,
-                                    measureTypeface = typefaceOverride ?: condensedTypeface,
+                                    measureTypeface = typefaceOverride ?: comicTypeface,
                                     allowBrokenWords = allowBrokenWords,
                                     textScaleX = textScaleX,
                                     contourProfile = contourProfile
@@ -1803,20 +1802,30 @@ fun ReaderPageContainer(
                                             // Exact width can underestimate emergency-wrapped tokens;
                                             // bounded geometric growth gives the next measurement more
                                             // room without immediately filling the whole speech bubble.
+                                            val maxAllowedWidth = if (p1BubbleBounds() != null) {
+                                                safeBubble.width()
+                                            } else {
+                                                maxOf(
+                                                    safeBubble.width(),
+                                                    (pageOriginalWidth * 0.35f).toInt().coerceAtLeast((48f * density.density).toInt())
+                                                )
+                                            }
                                             val nextWidth = maxOf(
                                                 expanded.width(),
                                                 requiredWidthPx,
                                                 ceil(expanded.width() * 1.30f).toInt()
-                                            ).coerceAtMost(safeBubble.width())
+                                            ).coerceAtMost(maxAllowedWidth)
                                             val nextHeight = maxOf(
                                                 expanded.height(),
                                                 requiredHeightPx,
                                                 ceil(expanded.height() * 1.30f).toInt()
-                                            ).coerceAtMost(safeBubble.height())
+                                            ).coerceAtMost(maxOf(safeBubble.height(), (50f * density.density).toInt()))
+                                            val maxLeft = maxOf(safeBubble.left, (pageOriginalWidth.toInt() - nextWidth).coerceAtLeast(0))
                                             val left = (anchorX - nextWidth / 2f).roundToInt()
-                                                .coerceIn(safeBubble.left, safeBubble.right - nextWidth)
+                                                .coerceIn(0, maxLeft)
+                                            val maxTop = maxOf(safeBubble.top, (pageOriginalHeight.toInt() - nextHeight).coerceAtLeast(0))
                                             val top = (anchorY - nextHeight / 2f).roundToInt()
-                                                .coerceIn(safeBubble.top, safeBubble.bottom - nextHeight)
+                                                .coerceIn(0, maxTop)
                                             val next = Rect(left, top, left + nextWidth, top + nextHeight)
                                             if (next == expanded) break
                                             expanded = next
@@ -1858,7 +1867,8 @@ fun ReaderPageContainer(
                                         opt = brokenFit
                                     } else {
                                         val condensedAttempts = listOf(
-                                            0.92f to condensedTypeface,
+                                            0.92f to (if (isSub) condensedTypeface else comicTypeface),
+                                            0.85f to (if (isSub) condensedTypeface else comicTypeface),
                                             0.85f to condensedTypeface
                                         )
                                         for ((scaleX, face) in condensedAttempts) {
@@ -1907,7 +1917,7 @@ fun ReaderPageContainer(
                                                 allowBrokenWords = true,
                                                 textOverride = hyphenatedLastResort,
                                                 textScaleX = 0.85f,
-                                                typefaceOverride = condensedTypeface
+                                                typefaceOverride = if (isSub) condensedTypeface else comicTypeface
                                             )
                                             // Strict BallonsTranslator boundary policy: NEVER expand beyond the original
                                             // detected speech balloon. The balloon's drawn borders and surrounding artwork
@@ -1920,9 +1930,15 @@ fun ReaderPageContainer(
                                                 allowBrokenWords = true,
                                                 textOverride = hyphenatedLastResort,
                                                 textScaleX = 0.80f,
-                                                typefaceOverride = condensedTypeface
+                                                typefaceOverride = if (isSub) condensedTypeface else comicTypeface
                                             )
-                                            if (opt.hasRenderableLayout) {
+                                            val isSliver = OverlayLayoutPolicy.isPathologicalSliver(
+                                                widthDp = geo.widthDp.value,
+                                                heightDp = geo.heightDp.value,
+                                                lineCount = opt.lineCount,
+                                                textLength = cleanText.length
+                                            )
+                                            if (opt.hasRenderableLayout && !isSliver) {
                                                 return PlacedOverlayBox(
                                                     block = block,
                                                     leftDp = geo.leftDp,
@@ -1935,6 +1951,36 @@ fun ReaderPageContainer(
                                                     forceTextToFitBox = !opt.fitsInside,
                                                     boldBoost = boldBoost
                                                 )
+                                            } else if (isSliver) {
+                                                val targetWidthDp = maxOf(geo.widthDp, 48.dp)
+                                                val shiftLeftDp = ((targetWidthDp - geo.widthDp) / 2f).coerceAtLeast(0.dp)
+                                                val recoveredLeftDp = (geo.leftDp - shiftLeftDp).coerceAtLeast(2.dp)
+                                                val recoveredGeo = geo.copy(
+                                                    leftDp = recoveredLeftDp,
+                                                    widthDp = targetWidthDp
+                                                )
+                                                val recoveredOpt = optimize(
+                                                    recoveredGeo,
+                                                    minSp = 7.0f,
+                                                    allowBrokenWords = false,
+                                                    textOverride = cleanText,
+                                                    typefaceOverride = if (isSub) condensedTypeface else comicTypeface
+                                                )
+                                                if (recoveredOpt.hasRenderableLayout) {
+                                                    val neededHeightDp = with(density) { recoveredOpt.totalHeightPx.toDp() } + geo.padV * 2f
+                                                    return PlacedOverlayBox(
+                                                        block = block,
+                                                        leftDp = recoveredGeo.leftDp,
+                                                        topDp = recoveredGeo.topDp,
+                                                        widthDp = recoveredGeo.widthDp,
+                                                        heightDp = maxOf(recoveredGeo.heightDp, neededHeightDp),
+                                                        layoutResult = recoveredOpt,
+                                                        paddingHDp = geo.padH,
+                                                        paddingVDp = geo.padV,
+                                                        forceTextToFitBox = false,
+                                                        boldBoost = boldBoost
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -2027,13 +2073,20 @@ fun ReaderPageContainer(
                     placedOverlays.forEach { placed ->
                         val block = placed.block
                         val overlayKey = "$pageIndex:${block.boundingBox}:${block.originalText}:${placed.showOriginalFallback}"
+                        val isSliver = OverlayLayoutPolicy.isPathologicalSliver(
+                            widthDp = placed.widthDp.value,
+                            heightDp = placed.heightDp.value,
+                            lineCount = placed.layoutResult.lineCount,
+                            textLength = block.translatedText.length
+                        )
                         if (placed.showOriginalFallback || peekHiddenStates[overlayKey] == true ||
                             !block.translationSucceeded ||
                             !OverlayLayoutPolicy.shouldDrawBackground(
                                 hasText = block.translatedText.isNotBlank(),
                                 hasLayout = placed.layoutResult.hasRenderableLayout,
                                 fitsInside = placed.layoutResult.fitsInside,
-                                forceTextToFitBox = placed.forceTextToFitBox
+                                forceTextToFitBox = placed.forceTextToFitBox,
+                                isSliver = isSliver
                             )
                         ) {
                             return@forEach

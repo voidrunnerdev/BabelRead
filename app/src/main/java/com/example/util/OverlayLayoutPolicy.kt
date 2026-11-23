@@ -58,10 +58,32 @@ object OverlayLayoutPolicy {
     fun canForceTextToFit(fontSizeSp: Float, drawScale: Float): Boolean =
         fontSizeSp >= READABLE_MIN_SP && drawScale >= MIN_FORCED_DRAW_SCALE
 
+    const val MIN_READABLE_OVERLAY_WIDTH_DP = 44f
+    const val MIN_CHARS_PER_LINE_THRESHOLD = 3.2f
+    const val MIN_HORIZONTAL_ASPECT_RATIO = 0.35f
+
+    /**
+     * Detects narrow vertical slivers that chop horizontal words into 1-2 letter
+     * fragments (e.g. PU \n CEZASI \n İÇİN BU \n KONUDA \n NE DÜŞÜ- \n NÜ-).
+     */
+    fun isPathologicalSliver(
+        widthDp: Float,
+        heightDp: Float,
+        lineCount: Int,
+        textLength: Int
+    ): Boolean {
+        if (widthDp < 36f) return true
+        val aspect = widthDp / heightDp.coerceAtLeast(1f)
+        if (aspect < MIN_HORIZONTAL_ASPECT_RATIO && textLength > 12) return true
+        if (lineCount >= 4 && (textLength.toFloat() / lineCount) < MIN_CHARS_PER_LINE_THRESHOLD) return true
+        return false
+    }
+
     fun shouldDrawBackground(
         hasText: Boolean,
         hasLayout: Boolean,
         fitsInside: Boolean,
-        forceTextToFitBox: Boolean
-    ): Boolean = hasText && hasLayout && (fitsInside || forceTextToFitBox)
+        forceTextToFitBox: Boolean,
+        isSliver: Boolean = false
+    ): Boolean = hasText && hasLayout && (fitsInside || forceTextToFitBox) && !isSliver
 }

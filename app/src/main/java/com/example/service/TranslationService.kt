@@ -1324,8 +1324,10 @@ class TranslationService(
         if (bitmap.isRecycled || textRect.width() <= 0 || textRect.height() <= 0) return textRect
         val width = bitmap.width
         val height = bitmap.height
-        val maxExpandX = (textRect.width() * 0.35f).toInt().coerceIn(6, max(6, width))
-        val maxExpandY = (textRect.height() * 0.30f).toInt().coerceIn(6, max(6, height))
+        val scanHorizonX = maxOf(textRect.width() * 1.5f, textRect.height() * 0.65f, 60f)
+        val scanHorizonY = maxOf(textRect.height() * 1.2f, textRect.width() * 0.65f, 60f)
+        val maxExpandX = scanHorizonX.toInt().coerceIn(6, max(6, width))
+        val maxExpandY = scanHorizonY.toInt().coerceIn(6, max(6, height))
 
         fun isBorderPixel(px: Int): Boolean {
             val lum = (Color.red(px) * 0.299 + Color.green(px) * 0.587 + Color.blue(px) * 0.114)
