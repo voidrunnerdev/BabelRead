@@ -1436,12 +1436,27 @@ fun ReaderPageContainer(
                                 // Never clip or recenter a fallback layout against the
                                 // bubble here: it can be the OCR anchor itself and would
                                 // be silently shrunk. Only page bounds may clip it.
-                                BubbleLayoutGeometry.prepareBubbleTextLayoutBox(
+                                val layoutBox = BubbleLayoutGeometry.prepareBubbleTextLayoutBox(
                                     layout = Rect(block.layoutBox),
                                     bubble = Rect(block.bubbleBox),
                                     anchor = Rect(block.boundingBox),
                                     pageBounds = pageBounds
                                 )
+                                val bubbleW = if (!block.bubbleBox.isEmpty) block.bubbleBox.width() else 0
+                                if (layoutBox.height() > 0 && layoutBox.width().toFloat() / layoutBox.height().toFloat() < 0.50f) {
+                                    val safeBubble = BubbleLayoutGeometry.reliableBubbleBounds(block.bubbleBox, block.boundingBox, pageBounds)
+                                    val targetW = when {
+                                        safeBubble != null && safeBubble.width() > layoutBox.width() -> safeBubble.width()
+                                        bubbleW > layoutBox.width() -> bubbleW
+                                        else -> maxOf(layoutBox.width(), (layoutBox.height() * 0.60f).toInt())
+                                    }
+                                    val pageW = pageOriginalWidth.toInt().coerceAtLeast(1)
+                                    val shiftX = ((targetW - layoutBox.width()) / 2).coerceAtLeast(0)
+                                    val newLeft = (layoutBox.left - shiftX).coerceIn(0, (pageW - targetW).coerceAtLeast(0))
+                                    Rect(newLeft, layoutBox.top, newLeft + targetW, layoutBox.bottom)
+                                } else {
+                                    layoutBox
+                                }
                             }
                         }
                         val boldBoostFlags = separateNearbyBoxes(
@@ -1977,7 +1992,7 @@ fun ReaderPageContainer(
                                                         layoutResult = recoveredOpt,
                                                         paddingHDp = geo.padH,
                                                         paddingVDp = geo.padV,
-                                                        forceTextToFitBox = false,
+                                                        forceTextToFitBox = true,
                                                         boldBoost = boldBoost
                                                     )
                                                 }
@@ -2576,8 +2591,28 @@ fun ReaderPageContainer(
                                     }
                                 }
                             }
+                        } else {
+                            // Sığmayan veya çizilemeyen kutularda etkileşim güvencesi:
+                            // Kullanıcı balona dokunduğunda çeviri diyalogda gösterilir.
+                            Box(
+                                modifier = Modifier
+                                    .absoluteOffset(x = boxLeft, y = boxTop)
+                                    .width(boxWidth)
+                                    .height(boxHeight)
+                                    .clickable { showFallbackTranslation = true },
+                                contentAlignment = Alignment.TopEnd
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .padding(2.dp)
+                                        .background(Color(0xFF008577).copy(alpha = 0.88f), RoundedCornerShape(3.dp))
+                                        .padding(horizontal = 4.dp, vertical = 1.dp)
+                                ) {
+                                    Text("TR", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
                         }
-                        if (placed.showOriginalFallback && showFallbackTranslation) {
+                        if (showFallbackTranslation) {
                             AlertDialog(
                                 onDismissRequest = { showFallbackTranslation = false },
                                 title = { Text("Yerleşime sığmayan çeviri") },

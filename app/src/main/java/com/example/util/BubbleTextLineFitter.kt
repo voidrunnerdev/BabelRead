@@ -640,19 +640,15 @@ object BubbleTextLineFitter {
             }
         }
 
-        val targetLines = if (dp[maxL][n].isFinite()) {
-            maxL
-        } else {
-            var bestL = -1
-            var bestCost = inf
-            for (l in 1 until maxL) {
-                if (dp[l][n] < bestCost) {
-                    bestCost = dp[l][n]
-                    bestL = l
-                }
+        var bestL = -1
+        var bestCost = inf
+        for (l in 1..maxL) {
+            if (dp[l][n] < bestCost) {
+                bestCost = dp[l][n]
+                bestL = l
             }
-            bestL
         }
+        val targetLines = bestL
         if (targetLines <= 0) return null
 
         val result = ArrayList<DraftLine>(targetLines)
