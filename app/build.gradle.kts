@@ -9,7 +9,7 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
-    applicationId = "com.babelread.app"
+    applicationId = "com.babelread.app.test"
     minSdk = 24
     targetSdk = 36
     versionCode = 3
@@ -47,7 +47,12 @@ android {
       signingConfig = signingConfigs.getByName("release")
     }
     debug {
-      signingConfig = signingConfigs.getByName("debugConfig")
+      val localDebugKeystore = file("${rootDir}/debug.keystore")
+      signingConfig = if (localDebugKeystore.exists()) {
+        signingConfigs.getByName("debugConfig")
+      } else {
+        signingConfigs.getByName("debug")
+      }
     }
   }
   compileOptions {

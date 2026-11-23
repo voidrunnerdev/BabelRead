@@ -9,6 +9,7 @@ import androidx.work.*
 import com.example.data.db.ChapterEntity
 import com.example.data.db.MangaDatabase
 import com.example.data.parser.MangaSourceRegistry
+import com.example.extensions.ExtensionManager
 import com.example.data.pref.MangaPreferences
 import com.example.data.web.WebCaptureParser
 import com.example.data.web.WebPageExtractor
@@ -49,6 +50,8 @@ class NewChapterWorker(
     }
 
     override suspend fun doWork(): Result {
+        // Cold-start WorkManager runs may start before MainActivity loads installed APK extensions.
+        runCatching { ExtensionManager.ensureLoaded(applicationContext) }
         val database = MangaDatabase.getDatabase(applicationContext)
         val mangaDao = database.mangaDao()
         val chapterDao = database.chapterDao()

@@ -9,5 +9,5 @@ data class ExtensionMeta(
     val isNsfw: Boolean,
     val apkPath: String,
 ) {
-    val displayLanguage: String get() = language.uppercase()
+    val displayLanguage: String get() = language.uppercase(java.util.Locale.ROOT)
 }

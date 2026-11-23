@@ -108,12 +108,24 @@ class LinkedFolderManager(
         val folder = linkedFolderDao.getLinkedFolderById(folderId)
             ?: return@withContext (false to "Bağlı klasör kaydı bulunamadı.")
         val mangas = mangaDao.getMangasByLinkedFolder(folderId)
+        val chapterIds = mangas.flatMap { manga ->
+            database.chapterDao().getChaptersByMangaIdSync(manga.id).map { it.id }
+        }
         database.withTransaction {
             mangas.forEach { manga ->
                 database.chapterDao().deleteChaptersForManga(manga.id)
                 mangaDao.deleteMangaById(manga.id)
             }
             linkedFolderDao.deleteLinkedFolderById(folderId)
+        }
+        val cacheDao = database.translationCacheDao()
+        chapterIds.distinct().forEach { chapterId ->
+            runCatching {
+                cacheDao.pathsByChapterPrefix(chapterId).forEach { path ->
+                    runCatching { java.io.File(path).delete() }
+                }
+                cacheDao.deleteByChapterPrefix(chapterId)
+            }
         }
         mangas.forEach { manga -> resolver.deleteCachedCover(manga.id) }
         val stillUsed = linkedFolderDao.getLinkedFoldersByTreeUri(folder.treeUri).isNotEmpty()

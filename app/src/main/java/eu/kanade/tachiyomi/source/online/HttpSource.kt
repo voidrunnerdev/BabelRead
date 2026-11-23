@@ -71,8 +71,11 @@ abstract class HttpSource : CatalogueSource {
     /**
      * Returns the request for getting the source image.
      */
-    protected open fun imageRequest(page: Page): Request =
-        GET(page.imageUrl!!, headers)
+    protected open fun imageRequest(page: Page): Request {
+        val imageUrl = page.imageUrl
+            ?: throw java.io.IOException("Sayfa görsel adresi bulunamadı")
+        return GET(imageUrl, headers)
+    }
 
     /**
      * Fetches the image for the given [page]. Used by the host app.

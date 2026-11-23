@@ -2,12 +2,15 @@ package com.example.data.web
 
 import android.content.Context
 import android.webkit.CookieManager
+import android.webkit.WebSettings
 import android.webkit.WebResourceError
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.example.data.net.CloudflareChallengeException
 import com.example.data.net.PageRefererRegistry
+import com.example.data.net.WebViewIdentity
 import com.example.data.parser.NetworkManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -40,6 +43,8 @@ object WebPageExtractor {
                     PageRefererRegistry.registerForUrls(urls, siteOrigin)
                 }
                 urls
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 emptyList()
             } finally {
@@ -126,6 +131,8 @@ object WebPageExtractor {
                 delay(900)
                 scrollThrough(webView, maxSteps = 36, pauseMs = 320L)
                 evalJs(webView, WebScripts.CAPTURE)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 null
             } finally {
@@ -136,17 +143,35 @@ object WebPageExtractor {
     }
 
     private fun newWebView(context: Context): WebView = WebView(context).apply {
+        WebViewIdentity.apply(this, NetworkManager.USER_AGENT)
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = true
+        settings.allowFileAccess = false
+        settings.allowContentAccess = false
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
         settings.loadsImagesAutomatically = true
         settings.blockNetworkImage = false
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
     }
 
+    private fun isHttpUrl(url: String?): Boolean {
+        val lower = url?.trim()?.lowercase() ?: return false
+        return lower.startsWith("https://") || lower.startsWith("http://")
+    }
+
     private suspend fun loadPage(webView: WebView, url: String): Boolean {
+        if (!isHttpUrl(url)) return false
         val loaded = CompletableDeferred<Boolean>()
         webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(
+                view: WebView?,
+                request: WebResourceRequest?
+            ): Boolean {
+                val target = request?.url?.toString()
+                return !isHttpUrl(target)
+            }
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 if (!loaded.isCompleted) loaded.complete(true)
             }
@@ -159,6 +184,14 @@ object WebPageExtractor {
                 if (request?.isForMainFrame == true && !loaded.isCompleted) {
                     loaded.complete(false)
                 }
+            }
+
+            override fun onRenderProcessGone(
+                view: WebView?,
+                detail: RenderProcessGoneDetail?
+            ): Boolean {
+                if (!loaded.isCompleted) loaded.complete(false)
+                return true
             }
         }
         webView.loadUrl(url)

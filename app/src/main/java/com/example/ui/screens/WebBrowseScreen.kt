@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.graphics.Bitmap
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -174,7 +176,7 @@ fun WebBrowseScreen(
                 if (pages.isEmpty()) {
                     feedback = "Bu sayfada okunacak görsel bulunamadı. Bir bölüm (okuma) sayfası açıp tekrar deneyin."
                 } else {
-                    PageRefererRegistry.registerForUrls(pages, baseUrl.ifBlank { currentUrl })
+                    PageRefererRegistry.registerForUrls(pages, currentUrl.ifBlank { baseUrl })
                     if (showPicker) {
                         quickReadRequest = QuickReadRequest(
                             title = pageTitle.ifBlank { "Hızlı Okuma" },
@@ -322,14 +324,29 @@ fun WebBrowseScreen(
                     WebViewIdentity.apply(this, NetworkManager.USER_AGENT)
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    settings.databaseEnabled = true
+                    settings.allowFileAccess = false
+                    settings.allowContentAccess = false
+                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                     settings.loadsImagesAutomatically = true
                     settings.useWideViewPort = true
                     settings.loadWithOverviewMode = true
+                    settings.setSupportMultipleWindows(false)
+                    settings.javaScriptCanOpenWindowsAutomatically = false
+                    settings.setSupportZoom(true)
+                    settings.builtInZoomControls = true
+                    settings.displayZoomControls = false
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                     webChromeClient = WebChromeClient()
                     webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView?,
+                            request: WebResourceRequest?
+                        ): Boolean {
+                            val scheme = request?.url?.scheme?.lowercase()
+                            return scheme != "http" && scheme != "https"
+                        }
+
                         override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
                             if (url != null) currentUrl = url
                         }
@@ -338,8 +355,24 @@ fun WebBrowseScreen(
                             if (url != null) currentUrl = url
                         }
                     }
-                    loadUrl(baseUrl)
+                    val trimmedUrl = baseUrl.trim()
+                    if (trimmedUrl.startsWith("https://", ignoreCase = true) ||
+                        trimmedUrl.startsWith("http://", ignoreCase = true)
+                    ) {
+                        loadUrl(trimmedUrl)
+                    }
                     webViewRef = this
+                }
+            },
+            onRelease = { webView ->
+                if (webViewRef === webView) webViewRef = null
+                runCatching {
+                    webView.stopLoading()
+                    webView.webChromeClient = null
+                    webView.webViewClient = WebViewClient()
+                    webView.loadUrl("about:blank")
+                    webView.removeAllViews()
+                    webView.destroy()
                 }
             }
         )
@@ -407,7 +440,7 @@ fun WebBrowseScreen(
             onConfirm = { selectedPages, translate ->
                 quickReadRequest = null
                 if (selectedPages.isNotEmpty()) {
-                    PageRefererRegistry.registerForUrls(selectedPages, baseUrl.ifBlank { currentUrl })
+                    PageRefererRegistry.registerForUrls(selectedPages, currentUrl.ifBlank { baseUrl })
                     val chapterId = viewModel.startQuickRead(
                         sourceName = sourceName,
                         pageTitle = quickRequest.title,

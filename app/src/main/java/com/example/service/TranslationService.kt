@@ -1,12 +1,16 @@
 package com.example.service
 
+import com.example.util.BubbleContourExtractor
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
+import android.graphics.BlurMaskFilter
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.Log
@@ -81,7 +85,12 @@ data class TextBlockObj(
     val coordinateImageHeight: Int = 0
 )
 
-data class TranslationRequest(val id: String, val text: String)
+data class TranslationRequest(
+    val id: String,
+    val text: String,
+    val maxCharsHint: Int? = null,
+    val shapeHint: String? = null
+)
 data class TranslationResult(val id: String, val translatedText: String?, val error: String? = null) {
     val succeeded: Boolean get() = !translatedText.isNullOrBlank()
 }
@@ -101,7 +110,10 @@ class TranslationService(
     context: Context
 ) {
     private val appContext = context.applicationContext
-    private val ppOcrV5Engine by lazy { PpOcrV5Engine(appContext) }
+    private val ppOcrV5EngineLazy = lazy { PpOcrV5Engine(appContext, PpOcrV5Engine.Variant.MULTILINGUAL) }
+    private val ppOcrV5Engine: PpOcrV5Engine by ppOcrV5EngineLazy
+    private val ppOcrV5EnEngineLazy = lazy { PpOcrV5Engine(appContext, PpOcrV5Engine.Variant.ENGLISH_ONLY) }
+    private val ppOcrV5EnEngine: PpOcrV5Engine by ppOcrV5EnEngineLazy
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -324,6 +336,9 @@ class TranslationService(
             "right", "run", "sorry", "stay", "stop", "sure", "thanks", "there", "wait",
             "what", "when", "where", "who", "why", "wow", "yes"
         )
+        val isAllCaps = possibleName.any(Char::isLetter) &&
+            possibleName.all { !it.isLetter() || it.isUpperCase() }
+        if (isAllCaps) return false
         return possibleName.matches(Regex("^[\\p{Lu}][\\p{L}\\p{M}'’]+$")) &&
             possibleName.lowercase(Locale.ROOT) !in commonDialogueWords
     }
@@ -405,12 +420,81 @@ class TranslationService(
         return performOcr(bitmap, originLanguage, applyPageMarginFilter = true)
     }
 
+    private fun isPpOcrEnglishEngine(engine: String): Boolean =
+        engine.equals("PP-OCRv5 EN", ignoreCase = true)
+
     private fun isPpOcrEngine(engine: String): Boolean =
-        engine.equals("PP-OCRv5", ignoreCase = true)
+        engine.equals("PP-OCRv5", ignoreCase = true) || isPpOcrEnglishEngine(engine)
+
+    private fun ppEngineFor(ocrEngine: String): PpOcrV5Engine =
+        if (isPpOcrEnglishEngine(ocrEngine)) ppOcrV5EnEngine else ppOcrV5Engine
+
+    fun isOcrEngineAvailable(ocrEngine: String): Boolean =
+        if (isPpOcrEngine(ocrEngine)) ppEngineFor(ocrEngine).isReady() else true
+
+    fun isPpOcrEnglishModelInstalled(): Boolean =
+        PpOcrV5Engine.hasModelAsset(appContext, PpOcrV5Engine.Variant.ENGLISH_ONLY)
+
+    /**
+     * Fetches the live catalog of Gemini models available to the user's API key
+     * via `GET /v1beta/models` and filters to `generateContent`-capable text models.
+     */
+    suspend fun fetchAvailableGeminiModels(apiKey: String): Result<List<GeminiModelInfo>> =
+        withContext(Dispatchers.IO) {
+            val trimmedKey = apiKey.trim()
+            if (trimmedKey.isEmpty()) {
+                return@withContext Result.failure(
+                    IllegalStateException("Modelleri listelemek için önce Gemini API anahtarını girin.")
+                )
+            }
+            try {
+                val collected = mutableListOf<GeminiModelInfo>()
+                var pageToken: String? = null
+                var pageCount = 0
+                do {
+                    currentCoroutineContext().ensureActive()
+                    val url = buildString {
+                        append("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000")
+                        if (!pageToken.isNullOrBlank()) {
+                            append("&pageToken=")
+                            append(URLEncoder.encode(pageToken, "UTF-8"))
+                        }
+                    }
+                    val request = Request.Builder()
+                        .url(url)
+                        .header("x-goog-api-key", trimmedKey)
+                        .get()
+                        .build()
+                    val (pageModels, nextToken) = executeCancellable(request, geminiClient).use { response ->
+                        if (!response.isSuccessful) {
+                            val msg = when (response.code) {
+                                400, 401, 403 -> "Gemini API anahtarı geçersiz veya yetkisiz (HTTP ${response.code})."
+                                429 -> "Gemini API istek sınırına ulaşıldı (HTTP 429). Biraz sonra tekrar deneyin."
+                                else -> "Modeller alınamadı (HTTP ${response.code})."
+                            }
+                            throw IOException(msg)
+                        }
+                        val body = response.body?.string()
+                            ?: throw IOException("Gemini API boş yanıt döndürdü.")
+                        GeminiModelCatalog.parseModelsPage(body)
+                    }
+                    collected.addAll(pageModels)
+                    pageToken = nextToken
+                    pageCount++
+                } while (!pageToken.isNullOrBlank() && pageCount < 5)
+
+                Result.success(GeminiModelCatalog.sortForPicker(collected))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "Gemini model listesi alınamadı: ${e.message}")
+                Result.failure(e)
+            }
+        }
 
     suspend fun prewarmOcrEngine(ocrEngine: String): Boolean {
         return if (isPpOcrEngine(ocrEngine)) {
-            ppOcrV5Engine.prewarm()
+            ppEngineFor(ocrEngine).prewarm()
         } else {
             false
         }
@@ -713,9 +797,15 @@ class TranslationService(
     ): List<RectAndText> = withContext(Dispatchers.Default) {
         if (bitmap.isRecycled || regions.isEmpty()) return@withContext emptyList()
         if (isPpOcrEngine(ocrEngine)) {
-            if (!ppOcrV5Engine.isReady()) {
-                Log.e(TAG, "PP-OCRv5 recognizer is unavailable")
-                throw IllegalStateException("PP-OCRv5 recognizer could not be loaded")
+            val activePpEngine = ppEngineFor(ocrEngine)
+            if (!activePpEngine.isReady()) {
+                Log.e(TAG, "$ocrEngine recognizer is unavailable")
+                val errMsg = if (isPpOcrEnglishEngine(ocrEngine)) {
+                    "en_PP-OCRv5_mobile_rec.onnx bulunamadı. Dosyayı assets/models/ klasörüne ekleyin."
+                } else {
+                    "PP-OCRv5 recognizer could not be loaded"
+                }
+                throw IllegalStateException(errMsg)
             }
             val ppResults = mutableListOf<RectAndText>()
             for (region in regions) {
@@ -731,7 +821,7 @@ class TranslationService(
                 )
                 if (expanded.width() < 8 || expanded.height() < 8) continue
                 ppResults.addAll(
-                    ppOcrV5Engine.recognizeBlock(bitmap, expanded, originLanguage).map {
+                    activePpEngine.recognizeBlock(bitmap, expanded, originLanguage).map {
                         RectAndText(it.rect, cleanOcrArtifacts(it.text, originLanguage))
                     }
                 )
@@ -753,7 +843,7 @@ class TranslationService(
             } catch (_: Exception) {
                 null
             } ?: continue
-            val cropGuard = BitmapRecycleGuard(crop)
+            val cropGuard = if (crop !== bitmap) BitmapRecycleGuard(crop) else null
             try {
                 val blocks = performOcr(
                     crop,
@@ -775,7 +865,7 @@ class TranslationService(
                     )
                 }
             } finally {
-                cropGuard.recycleWhenSafe()
+                cropGuard?.recycleWhenSafe()
             }
         }
         resolveCollidingBlocks(results)
@@ -803,17 +893,17 @@ class TranslationService(
         fun isVerticalCjkColumn(block: RectAndText): Boolean =
             isCjkText(block.text) && block.rect.height() > block.rect.width() * 1.5f
 
+        val columnBucketPx = max(24, (bitmap.width / 24))
         fun compareReadingOrder(a: RectAndText, b: RectAndText): Int {
-            if (isVerticalCjkColumn(a) && isVerticalCjkColumn(b)) {
-                val minWidth = min(a.rect.width(), b.rect.width()).toFloat()
-                val sameColumn = abs(a.rect.exactCenterX() - b.rect.exactCenterX()) < minWidth * 0.6f
-                return if (sameColumn) {
-                    a.rect.top.compareTo(b.rect.top).takeIf { it != 0 }
-                        ?: b.rect.right.compareTo(a.rect.right)
-                } else {
-                    b.rect.right.compareTo(a.rect.right).takeIf { it != 0 }
-                        ?: a.rect.top.compareTo(b.rect.top)
-                }
+            val aVert = isVerticalCjkColumn(a)
+            val bVert = isVerticalCjkColumn(b)
+            if (aVert != bVert) return if (aVert) -1 else 1
+            if (aVert) {
+                val aCol = a.rect.centerX() / columnBucketPx
+                val bCol = b.rect.centerX() / columnBucketPx
+                return bCol.compareTo(aCol).takeIf { it != 0 }
+                    ?: a.rect.top.compareTo(b.rect.top).takeIf { it != 0 }
+                    ?: b.rect.right.compareTo(a.rect.right)
             }
             return a.rect.top.compareTo(b.rect.top).takeIf { it != 0 }
                 ?: a.rect.left.compareTo(b.rect.left)
@@ -1438,6 +1528,72 @@ class TranslationService(
                     interArea > maskArea * 0.25f || interArea > otherArea * 0.35f
                 }
                 if (!coversText) {
+                    // For real speech bubbles, paint the EDT-extracted safe interior polygon first
+                    // so stray edge glyphs (e.g. "NED", "EEL LIKE" extending outside the OCR box)
+                    // are cleanly erased without touching the inked bubble border.
+                    if (hasDistinctBubbleBounds) {
+                        val cleanContour = BubbleContourExtractor.extractFromBitmap(
+                            bitmap = sourceBitmap,
+                            bubbleBox = bubbleBox,
+                            anchorBox = textRect,
+                            pageOriginalWidth = sourceBitmap.width.toFloat(),
+                            pageOriginalHeight = sourceBitmap.height.toFloat(),
+                            isDarkBubble = block.isDarkBubble,
+                            marginScale = 0.55f
+                        )
+                        val clampedBubble = Rect(
+                            bubbleBox.left.coerceIn(0, (sourceBitmap.width - 1).coerceAtLeast(0)),
+                            bubbleBox.top.coerceIn(0, (sourceBitmap.height - 1).coerceAtLeast(0)),
+                            bubbleBox.right.coerceIn(1, sourceBitmap.width.coerceAtLeast(1)),
+                            bubbleBox.bottom.coerceIn(1, sourceBitmap.height.coerceAtLeast(1))
+                        )
+                        if (cleanContour != null && cleanContour.isUsable && !clampedBubble.isEmpty) {
+                            val bW = clampedBubble.width().toFloat()
+                            val bH = clampedBubble.height().toFloat()
+                            val rowCountF = cleanContour.rowCount.toFloat()
+                            val firstR = cleanContour.firstValidRow
+                            val lastR = cleanContour.lastValidRow
+                            val contourBounds = RectF(
+                                clampedBubble.left + (firstR..lastR).minOf { cleanContour.rowLeftFractions[it] } * bW,
+                                clampedBubble.top + (firstR / rowCountF) * bH,
+                                clampedBubble.left + (firstR..lastR).maxOf { cleanContour.rowRightFractions[it] } * bW,
+                                clampedBubble.top + ((lastR + 1) / rowCountF) * bH
+                            )
+                            val contourArea = (contourBounds.width() * contourBounds.height()).coerceAtLeast(1f)
+                            val contourCoversNeighbor = (protectedReaches + otherTextReaches).any { other ->
+                                val inter = RectF()
+                                if (!inter.setIntersect(contourBounds, other)) return@any false
+                                val interArea = inter.width() * inter.height()
+                                val otherArea = (other.width() * other.height()).coerceAtLeast(1f)
+                                interArea > contourArea * 0.20f || interArea > otherArea * 0.25f
+                            }
+                            if (!contourCoversNeighbor) {
+                                val contourPath = Path()
+                                val topY = clampedBubble.top + (firstR / rowCountF) * bH
+                                val bottomY = clampedBubble.top + ((lastR + 1) / rowCountF) * bH
+                                contourPath.moveTo(clampedBubble.left + cleanContour.rowLeftFractions[firstR] * bW, topY)
+                                contourPath.lineTo(clampedBubble.left + cleanContour.rowRightFractions[firstR] * bW, topY)
+                                for (r in firstR..lastR) {
+                                    val y = clampedBubble.top + ((r + 0.5f) / rowCountF) * bH
+                                    contourPath.lineTo(clampedBubble.left + cleanContour.rowRightFractions[r] * bW, y)
+                                }
+                                contourPath.lineTo(clampedBubble.left + cleanContour.rowRightFractions[lastR] * bW, bottomY)
+                                contourPath.lineTo(clampedBubble.left + cleanContour.rowLeftFractions[lastR] * bW, bottomY)
+                                for (r in lastR downTo firstR) {
+                                    val y = clampedBubble.top + ((r + 0.5f) / rowCountF) * bH
+                                    contourPath.lineTo(clampedBubble.left + cleanContour.rowLeftFractions[r] * bW, y)
+                                }
+                                contourPath.close()
+                                val featheredPaint = Paint(paint).apply {
+                                    maskFilter = BlurMaskFilter(1.5f, BlurMaskFilter.Blur.NORMAL)
+                                }
+                                canvas.drawPath(contourPath, featheredPaint)
+                                val paintedContourRect = Rect()
+                                contourBounds.round(paintedContourRect)
+                                paintedRects.add(paintedContourRect)
+                            }
+                        }
+                    }
                     val cornerRadius = (min(maskRect.width(), maskRect.height()) * 0.35f).coerceIn(4f, 24f)
                     canvas.drawRoundRect(maskRect, cornerRadius, cornerRadius, paint)
                     val paintedRect = Rect()
@@ -1677,7 +1833,8 @@ class TranslationService(
         if (isDeepLSelected && userDeepLApiKey.isBlank()) {
             warnings += "DeepL API anahtarı girilmemiş; yedek çeviri motorları kullanılıyor. Ayarlar bölümünden anahtar ekleyin."
         }
-        val pendingTexts = indicesToTranslate.map { requests[it].text }
+        val pendingRequests = indicesToTranslate.map { requests[it] }
+        val pendingTexts = pendingRequests.map { it.text }
         var batchTranslated: List<String?>? = null
         val batchAttemptedEngines = mutableSetOf<String>()
         var geminiFailure: String? = null
@@ -1700,7 +1857,13 @@ class TranslationService(
                 // Birden çok model/deneme üst üste binerse sayfa dakikalarca
                 // "çeviriliyor" ekranında kalabiliyordu.
                 withTimeoutOrNull(GEMINI_TOTAL_TIMEOUT_MS) {
-                    translateBatchViaGemini(pendingTexts, effectiveGeminiKey, geminiModel, targetEnglishName)
+                    translateBatchViaGemini(
+                        texts = pendingTexts,
+                        apiKey = effectiveGeminiKey,
+                        preferredModel = geminiModel,
+                        targetEnglishName = targetEnglishName,
+                        requests = pendingRequests
+                    )
                 } ?: run {
                     geminiFailure = "zaman aşımı"
                     null
@@ -1828,11 +1991,12 @@ class TranslationService(
         ) {
             engines.add(normalizedPrimaryEngine)
         }
-        // ML Kit yalnızca kullanıcı açıkça seçtiyse denenir; aksi halde
-        // arka planda dil modeli indirip çeviriyi dakikalarca bekletiyordu.
-        listOf("Google", "MyMemory", "DeepL", "Gemini").forEach {
-            if (it.lowercase(Locale.ROOT) !in normalizedSkipEngines && !engines.contains(it)) {
-                engines.add(it)
+        // Kullanıcı açıkça çevrimdışı (ML Kit) motoru seçtiyse metni gizlice buluta gönderme.
+        if (normalizedPrimaryEngine != "ML Kit") {
+            listOf("Google", "MyMemory", "DeepL", "Gemini").forEach {
+                if (it.lowercase(Locale.ROOT) !in normalizedSkipEngines && !engines.contains(it)) {
+                    engines.add(it)
+                }
             }
         }
 
@@ -1861,9 +2025,10 @@ class TranslationService(
         texts: List<String>,
         apiKey: String,
         preferredModel: String = "gemini-flash-latest",
-        targetEnglishName: String = "Turkish"
+        targetEnglishName: String = "Turkish",
+        requests: List<TranslationRequest>? = null
     ): List<String?> = withContext(Dispatchers.IO) {
-        translateBatchViaGeminiInternal(texts, apiKey, preferredModel, targetEnglishName, depth = 0)
+        translateBatchViaGeminiInternal(texts, apiKey, preferredModel, targetEnglishName, depth = 0, requests = requests)
     }
 
     private suspend fun translateBatchViaGeminiInternal(
@@ -1871,7 +2036,8 @@ class TranslationService(
         apiKey: String,
         preferredModel: String,
         targetEnglishName: String,
-        depth: Int
+        depth: Int,
+        requests: List<TranslationRequest>? = null
     ): List<String?> = withContext(Dispatchers.IO) {
         if (texts.isEmpty()) return@withContext emptyList()
         val models = mutableListOf<String>()
@@ -1882,16 +2048,24 @@ class TranslationService(
             if (!models.contains(it)) models.add(it)
         }
 
+        val alignedRequests = requests?.takeIf { it.size == texts.size }
         val jsonArrayInput = JSONArray()
         texts.forEachIndexed { idx, t ->
-            jsonArrayInput.put(JSONObject().put("i", idx).put("t", t))
+            val obj = JSONObject().put("i", idx).put("t", t)
+            val hint = alignedRequests?.getOrNull(idx)
+            hint?.maxCharsHint?.let { maxC ->
+                obj.put("max", maxC)
+                if (maxC <= 32) obj.put("tight", true)
+            }
+            hint?.shapeHint?.let { obj.put("shape", it) }
+            jsonArrayInput.put(obj)
         }
 
         val prompt = buildString {
             appendLine("You are an expert manga and webtoon dialogue translator into natural, expressive $targetEnglishName.")
             appendLine("CRITICAL RULES:")
             appendLine("1. Contextual Scene Flow: Read these dialogue entries as speech from a single continuous manga page/scene. Understand characters, context, and emotion.")
-            appendLine("2. Punchy Comic Phrasing: Keep dialogue punchy, lively, and concise so it fits comfortably inside manga speech bubbles. Avoid clumsy or overly wordy phrasing.")
+            appendLine("2. Punchy Comic Phrasing & Bubble Budget: Keep dialogue punchy, lively, and concise so it fits comfortably inside manga speech bubbles. When an entry includes \"max\" (target character budget) or \"shape\" (\"narrow\"/\"wide\"), stay close to or under \"max\" characters using natural, tight comic dialogue without losing meaning—especially for \"narrow\" vertical bubbles.")
             appendLine("3. Return ONLY a valid JSON array where each element is an object {\"i\": <original index>, \"t\": \"<$targetEnglishName translation>\"}. Cover every input index exactly once, in any order. Do not wrap in markdown or backticks.")
             appendLine("Input JSON:")
             append(jsonArrayInput.toString())
@@ -1913,7 +2087,8 @@ class TranslationService(
                 }
                 val requestBodyData = requestBody.toString()
                     .toRequestBody("application/json".toMediaTypeOrNull())
-                val url = "https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent"
+                val safeModel = model.takeIf { Regex("^[a-zA-Z0-9._-]+$").matches(it) } ?: "gemini-flash-latest"
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$safeModel:generateContent"
                 val request = Request.Builder()
                     .url(url)
                     .header("x-goog-api-key", apiKey)
@@ -1951,7 +2126,7 @@ class TranslationService(
             Log.w(TAG, "Batch bölünüyor (depth=$depth, size=${texts.size})")
             val mid = texts.size / 2
             val left = try {
-                translateBatchViaGeminiInternal(texts.subList(0, mid), apiKey, preferredModel, targetEnglishName, depth + 1)
+                translateBatchViaGeminiInternal(texts.subList(0, mid), apiKey, preferredModel, targetEnglishName, depth + 1, alignedRequests?.subList(0, mid))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -1960,7 +2135,7 @@ class TranslationService(
             }
             val rightSize = texts.size - mid
             val right = try {
-                translateBatchViaGeminiInternal(texts.subList(mid, texts.size), apiKey, preferredModel, targetEnglishName, depth + 1)
+                translateBatchViaGeminiInternal(texts.subList(mid, texts.size), apiKey, preferredModel, targetEnglishName, depth + 1, alignedRequests?.subList(mid, alignedRequests.size))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -2087,6 +2262,12 @@ class TranslationService(
                         }
                         translatorCache.clear()
                         translatorMutexes.clear()
+                    }
+                    if (ppOcrV5EngineLazy.isInitialized()) {
+                        runCatching { ppOcrV5Engine.close() }
+                    }
+                    if (ppOcrV5EnEngineLazy.isInitialized()) {
+                        runCatching { ppOcrV5EnEngine.close() }
                     }
                 } finally {
                     translatorLifecycleMutex.withLock {

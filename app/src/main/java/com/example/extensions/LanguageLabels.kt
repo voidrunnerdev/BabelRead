@@ -1,6 +1,6 @@
 package com.example.extensions
 
-internal fun languageLabel(code: String): String = when (code.trim().lowercase()) {
+internal fun languageLabel(code: String): String = when (code.trim().lowercase(java.util.Locale.ROOT)) {
     "tr" -> "Türkçe"
     "en" -> "İngilizce"
     "all" -> "Çok Dilli"
@@ -70,11 +70,11 @@ internal fun languageLabel(code: String): String = when (code.trim().lowercase()
     "zh-hant" -> "Çince (Geleneksel)"
     "pt-br" -> "Portekizce (Brezilya)"
     "es-419" -> "İspanyolca (Latin Amerika)"
-    else -> code.trim().uppercase()
+    else -> code.trim().uppercase(java.util.Locale.ROOT)
 }
 
 internal fun languageCode(label: String): String? {
-    val key = label.trim().lowercase().replace("\u0307", "")
+    val key = label.trim().lowercase(java.util.Locale.ROOT).replace("\u0307", "").replace('ı', 'i')
     return when (key) {
         "türkçe", "turkish", "tr" -> "tr"
         "ingilizce", "english", "en" -> "en"

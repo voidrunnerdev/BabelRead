@@ -221,7 +221,7 @@ private fun SourcesTab(
                 SourceRow(
                     name = name,
                     subtitle = subtitleFor(name, builtIn, webSites),
-                    isWeb = false,
+                    isWeb = name.startsWith("Web: "),
                     pinned = false,
                     apkPath = (builtIn.firstOrNull { src -> src.name == name } as? ExtensionMangaSource)?.meta?.apkPath,
                     onClick = { onOpenSource(name) },

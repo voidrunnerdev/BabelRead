@@ -16,6 +16,7 @@ data class BubbleBox(
     var translatedText: String = ""
 ) {
     fun toPixelRect(bitmapWidth: Int, bitmapHeight: Int): Rect {
+        if (bitmapWidth <= 0 || bitmapHeight <= 0) return Rect()
         val leftPx = (bounds.left * bitmapWidth).toInt().coerceIn(0, bitmapWidth - 1)
         val topPx = (bounds.top * bitmapHeight).toInt().coerceIn(0, bitmapHeight - 1)
         val rightPx = (bounds.right * bitmapWidth).toInt().coerceIn(leftPx + 1, bitmapWidth)

@@ -3,8 +3,11 @@ package com.example.ui.screens
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -12,11 +15,14 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
@@ -35,7 +41,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,6 +64,8 @@ import com.example.ui.theme.AppSizes
 import com.example.ui.theme.AppSpacing
 import com.example.ui.theme.Success
 import com.example.ui.theme.Warning
+import com.example.service.GeminiModelCatalog
+import com.example.service.GeminiModelInfo
 import com.example.viewmodel.MangaViewModel
 import kotlinx.coroutines.launch
 
@@ -76,6 +88,8 @@ fun SettingsScreen(viewModel: MangaViewModel) {
     val translationOpacity by viewModel.translationOpacity.collectAsState()
     val geminiApiKey by viewModel.preferences.geminiApiKey.collectAsState(initial = "")
     val geminiModel by viewModel.preferences.geminiModel.collectAsState(initial = "gemini-flash-latest")
+    val geminiModelsState by viewModel.geminiModelsState.collectAsState()
+    var showGeminiModelPicker by remember { mutableStateOf(false) }
     val deeplApiKey by viewModel.preferences.deeplApiKey.collectAsState(initial = "")
     val engineTestState by viewModel.engineTestState.collectAsState()
     val engineTestRunning by viewModel.engineTestRunning.collectAsState()
@@ -99,6 +113,7 @@ fun SettingsScreen(viewModel: MangaViewModel) {
     val notificationEnabled by viewModel.preferences.notificationNewChapter.collectAsState(initial = true)
     val checkInterval by viewModel.preferences.updateCheckInterval.collectAsState(initial = 12)
     val translationCacheStats by viewModel.translationCacheStats.collectAsState()
+    val translationCacheTtlDays by viewModel.preferences.translationCacheTtlDays.collectAsState(initial = 30)
 
     val yoloAiEnabled by viewModel.preferences.yoloAiEnabled.collectAsState(initial = true)
     val confidenceThreshold by viewModel.preferences.confidenceThreshold.collectAsState(initial = 0.35f)
@@ -140,7 +155,7 @@ fun SettingsScreen(viewModel: MangaViewModel) {
     LaunchedEffect(geminiModelInput) {
         if (geminiModelInput != geminiModel) {
             kotlinx.coroutines.delay(600)
-            viewModel.preferences.setGeminiModel(geminiModelInput)
+            viewModel.setGeminiModel(geminiModelInput)
         }
     }
 
@@ -213,9 +228,7 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                         trailing = {
                             Switch(
                                 checked = yoloAiEnabled,
-                                onCheckedChange = {
-                                    coroutineScope.launch { viewModel.preferences.setYoloAiEnabled(it) }
-                                }
+                                onCheckedChange = { viewModel.setYoloAiEnabled(it) }
                             )
                         }
                     )
@@ -461,7 +474,7 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                         SettingsSubHeader("OCR Motoru")
                         Spacer(modifier = Modifier.height(AppSpacing.sm))
                         SegmentedChoice(
-                            options = listOf("ML Kit", "PP-OCRv5"),
+                            options = listOf("ML Kit", "PP-OCRv5", "PP-OCRv5 EN"),
                             selected = ocrEngine,
                             onSelect = { engine -> viewModel.setOcrEngine(engine) }
                         )
@@ -469,12 +482,38 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                             Spacer(modifier = Modifier.height(AppSpacing.sm))
                             Text(
                                 text = if (yoloAiEnabled) {
-                                    "PP-OCRv5 deneysel: yalnızca İngilizce ve Japonca; RT-DETR metin kutuları kullanılır."
+                                    "PP-OCRv5: Japonca ve İngilizce (çok dilli); RT-DETR metin kutuları kullanılır."
                                 } else {
                                     "PP-OCRv5 için RT-DETR açık olmalı; şu anda tüm sayfa OCR'ı devre dışı."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Warning
+                            )
+                        } else if (ocrEngine.equals("PP-OCRv5 EN", ignoreCase = true)) {
+                            val enModelInstalled = remember { viewModel.isPpOcrEnglishModelInstalled() }
+                            Spacer(modifier = Modifier.height(AppSpacing.sm))
+                            Text(
+                                text = if (yoloAiEnabled) {
+                                    "PP-OCRv5 EN: yalnızca İngilizce; RT-DETR metin kutuları kullanılır."
+                                } else {
+                                    "PP-OCRv5 EN için RT-DETR açık olmalı; şu anda tüm sayfa OCR'ı devre dışı."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Warning
+                            )
+                            Spacer(modifier = Modifier.height(AppSpacing.xs))
+                            Text(
+                                text = if (enModelInstalled) {
+                                    "Model hazır (en_PP-OCRv5_mobile_rec.onnx)."
+                                } else {
+                                    "Model eksik: en_PP-OCRv5_mobile_rec.onnx dosyasını app/src/main/assets/models/ klasörüne ekleyin."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (enModelInstalled) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.error
+                                }
                             )
                         }
                     }
@@ -554,24 +593,46 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                     ) {
                         SettingsSubHeader("Gemini Modeli")
                         Spacer(modifier = Modifier.height(AppSpacing.sm))
-                        SegmentedChoice(
-                            options = listOf("gemini-flash-latest", "gemini-3.8-flash", "gemini-3.5-flash-lite"),
-                            selected = geminiModel,
-                            onSelect = { model ->
-                                geminiModelInput = model
-                                coroutineScope.launch { viewModel.preferences.setGeminiModel(model) }
+                        OutlinedButton(
+                            onClick = {
+                                showGeminiModelPicker = true
+                                viewModel.refreshGeminiModels(
+                                    force = false,
+                                    apiKeyOverride = geminiKeyInput
+                                )
                             },
-                            label = { it.removePrefix("gemini-") }
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Star,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(AppSpacing.sm))
+                            Text(
+                                text = "Google Modellerini Listele / Seç ($geminiModel)",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(AppSpacing.xs))
+                        Text(
+                            text = "API anahtarınızla Google'ın en yeni modellerini canlı olarak çeker.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
                         Spacer(modifier = Modifier.height(AppSpacing.sm))
                         OutlinedTextField(
                             value = geminiModelInput,
                             onValueChange = { geminiModelInput = it },
-                            label = { Text("Model Adı (Örn: gemini-flash-latest)") },
+                            label = { Text("Özel Model Adı (Manuel Giriş)") },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth()
                         )
+
+                        var showGeminiKey by remember { mutableStateOf(false) }
+                        var showDeeplKey by remember { mutableStateOf(false) }
 
                         Spacer(modifier = Modifier.height(AppSpacing.md))
                         OutlinedTextField(
@@ -580,6 +641,19 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                             label = { Text("Gemini API Anahtarı") },
                             placeholder = { Text("Gemini API anahtarını girin...") },
                             singleLine = true,
+                            visualTransformation = if (showGeminiKey) VisualTransformation.None else PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                autoCorrectEnabled = false
+                            ),
+                            trailingIcon = {
+                                IconButton(onClick = { showGeminiKey = !showGeminiKey }) {
+                                    Icon(
+                                        imageVector = if (showGeminiKey) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                        contentDescription = if (showGeminiKey) "Anahtarı gizle" else "Anahtarı göster"
+                                    )
+                                }
+                            },
                             modifier = Modifier.fillMaxWidth()
                         )
 
@@ -590,6 +664,19 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                             label = { Text("DeepL API Anahtarı (İsteğe Bağlı)") },
                             placeholder = { Text("DeepL anahtarını girin...") },
                             singleLine = true,
+                            visualTransformation = if (showDeeplKey) VisualTransformation.None else PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Password,
+                                autoCorrectEnabled = false
+                            ),
+                            trailingIcon = {
+                                IconButton(onClick = { showDeeplKey = !showDeeplKey }) {
+                                    Icon(
+                                        imageVector = if (showDeeplKey) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                        contentDescription = if (showDeeplKey) "Anahtarı gizle" else "Anahtarı göster"
+                                    )
+                                }
+                            },
                             modifier = Modifier.fillMaxWidth()
                         )
 
@@ -666,9 +753,30 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                             .padding(AppSpacing.lg)
                     ) {
                         Text(
-                            text = "Çevrilen sayfalar; yüklü kaynaklar (eklentiler ve Cihaz/Yerel) için cihazda saklanır ve uygulama yeniden açıldığında beklemeden gösterilir. Kayıtlar en fazla 24 saat tutulur; süresi dolanlar otomatik silinir. Tarayıcıdan (özel siteler) yapılan çeviriler saklanmaz.",
+                            text = "Çevrilen sayfalar tüm kaynaklar (yerel, eklentiler ve Web) için çeviri motoru bazlı ayrı saklanır. Motor değiştirdiğinizde eski çeviriler karışmaz; aynı sayfaya döndüğünüzde beklemeden yüklenir.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(AppSpacing.md))
+                        SettingsSubHeader("Önbellek Saklama Süresi")
+                        Spacer(modifier = Modifier.height(AppSpacing.sm))
+                        val ttlOptions = listOf("7 Gün", "30 Gün", "Süresiz")
+                        val selectedTtl = when (translationCacheTtlDays) {
+                            7 -> "7 Gün"
+                            0 -> "Süresiz"
+                            else -> "30 Gün"
+                        }
+                        SegmentedChoice(
+                            options = ttlOptions,
+                            selected = selectedTtl,
+                            onSelect = { choice ->
+                                val days = when (choice) {
+                                    "7 Gün" -> 7
+                                    "Süresiz" -> 0
+                                    else -> 30
+                                }
+                                viewModel.setTranslationCacheTtlDays(days)
+                            }
                         )
                     }
 
@@ -925,6 +1033,231 @@ fun SettingsScreen(viewModel: MangaViewModel) {
             },
             onDismiss = { showTargetLanguagePicker = false },
         )
+    }
+
+    if (showGeminiModelPicker) {
+        GeminiModelPickerDialog(
+            state = geminiModelsState,
+            selectedModelId = geminiModel,
+            onRefresh = {
+                viewModel.refreshGeminiModels(
+                    force = true,
+                    apiKeyOverride = geminiKeyInput
+                )
+            },
+            onSelect = { selected ->
+                geminiModelInput = selected
+                viewModel.setGeminiModel(selected)
+                showGeminiModelPicker = false
+            },
+            onDismiss = { showGeminiModelPicker = false }
+        )
+    }
+}
+
+@Composable
+private fun GeminiModelPickerDialog(
+    state: MangaViewModel.GeminiModelsUiState,
+    selectedModelId: String,
+    onRefresh: () -> Unit,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var query by remember { mutableStateOf("") }
+    val filteredModels = remember(state.models, query) {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) {
+            state.models
+        } else {
+            state.models.filter {
+                it.id.contains(trimmed, ignoreCase = true) ||
+                    it.displayName.contains(trimmed, ignoreCase = true) ||
+                    it.description.contains(trimmed, ignoreCase = true)
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "Gemini Modelleri",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                IconButton(
+                    onClick = onRefresh,
+                    enabled = !state.isLoading
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = "Yenile"
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+            ) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Model ara (flash, pro, 2.5...)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (state.isLoading) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(160.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(28.dp))
+                            Text(
+                                text = "Google API'den güncel modeller alınıyor...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                } else if (state.error != null && state.models.isEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = AppSpacing.md),
+                        verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                    ) {
+                        Text(
+                            text = state.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        TextButton(onClick = onRefresh) {
+                            Text("Tekrar Dene")
+                        }
+                    }
+                } else {
+                    if (state.error != null) {
+                        Text(
+                            text = state.error,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Warning
+                        )
+                    }
+                    val selectedMissingFromCatalog = state.models.isNotEmpty() &&
+                        selectedModelId.isNotBlank() &&
+                        state.models.none { it.id.equals(selectedModelId, ignoreCase = true) }
+                    if (selectedMissingFromCatalog) {
+                        Text(
+                            text = "Seçili model ($selectedModelId) Google'ın güncel listesinde bulunamadı; aşağıdan güncel bir model seçin.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Warning
+                        )
+                    }
+                    if (filteredModels.isEmpty()) {
+                        Text(
+                            text = "Aramayla eşleşen model bulunamadı.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(vertical = AppSpacing.md)
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 340.dp),
+                            verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
+                        ) {
+                            items(filteredModels, key = { it.id }) { model ->
+                                GeminiModelPickerRow(
+                                    model = model,
+                                    selected = model.id.equals(selectedModelId, ignoreCase = true),
+                                    onClick = { onSelect(model.id) }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Kapat")
+            }
+        }
+    )
+}
+
+@Composable
+private fun GeminiModelPickerRow(
+    model: GeminiModelInfo,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val containerColor = if (selected) {
+        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+    }
+    Surface(
+        color = containerColor,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = AppSpacing.md, vertical = AppSpacing.sm),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = model.displayName,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                val metaParts = buildList {
+                    add(model.id)
+                    GeminiModelCatalog.formatTokenLimit(model.inputTokenLimit)?.let { add("${it} in") }
+                    if (model.supportsThinking) add("Thinking")
+                }
+                Text(
+                    text = metaParts.joinToString(" · "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            if (selected) {
+                Spacer(modifier = Modifier.width(AppSpacing.sm))
+                Icon(
+                    imageVector = Icons.Default.Check,
+                    contentDescription = "Seçili",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
     }
 }
 

@@ -30,8 +30,12 @@ internal class ExtensionLoader(private val context: Context) {
         val pm = context.packageManager
         val pkgInfo = pm.getPackageArchiveInfo(
             apk.absolutePath,
-            PackageManager.GET_CONFIGURATIONS or PackageManager.GET_META_DATA,
+            PackageManager.GET_CONFIGURATIONS or PackageManager.GET_META_DATA or ExtensionSignature.signingFlags(),
         ) ?: throw IllegalStateException("APK okunamadı: ${apk.name}")
+
+        if (!ExtensionSignature.isTrusted(pkgInfo)) {
+            throw SecurityException("Eklenti imzası doğrulanamadı: ${apk.name}")
+        }
 
         val features = pkgInfo.reqFeatures
         if (features == null || features.none { it.name == EXTENSION_FEATURE }) {

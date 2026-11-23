@@ -31,6 +31,8 @@ object ExtensionManager {
     private val reloadMutex = Mutex()
     private var appContext: Context? = null
     private var preferences: MangaPreferences? = null
+    @Volatile
+    private var hasLoadedOnce: Boolean = false
 
     private val _installed = MutableStateFlow<List<InstalledExtension>>(emptyList())
     val installed: StateFlow<List<InstalledExtension>> = _installed.asStateFlow()
@@ -50,9 +52,20 @@ object ExtensionManager {
         scope.launch { reload() }
     }
 
+    suspend fun ensureLoaded(context: Context) {
+        if (appContext == null) {
+            appContext = context.applicationContext
+            preferences = MangaPreferences(context.applicationContext)
+        }
+        if (!hasLoadedOnce || _installed.value.isEmpty()) {
+            reload()
+        }
+    }
+
     suspend fun reload() = withContext(Dispatchers.IO) {
         reloadMutex.withLock {
             val context = requiredContext()
+            ExtensionPageFetcher.clearAll()
             val dir = extensionsDir
             dir.mkdirs()
             val loader = ExtensionLoader(context)
@@ -126,6 +139,7 @@ object ExtensionManager {
                 buildLanguageSources(ext, selections[ext.meta.pkgName].orEmpty())
             }
             MangaSourceRegistry.setExtensionSources(wrapped)
+            hasLoadedOnce = true
             Log.i("ExtensionManager", "Yüklenen eklenti: ${loaded.size}")
         }
     }
@@ -242,30 +256,44 @@ object ExtensionManager {
                         @Suppress("DEPRECATION")
                         val pkgInfo = context.packageManager.getPackageArchiveInfo(
                             tmp.absolutePath,
-                            PackageManager.GET_CONFIGURATIONS or PackageManager.GET_META_DATA or PackageManager.GET_SIGNATURES,
+                            PackageManager.GET_CONFIGURATIONS or PackageManager.GET_META_DATA or ExtensionSignature.signingFlags(),
                         ) ?: throw IllegalStateException("APK okunamadı")
+                        if (!Regex("^[a-zA-Z0-9._]+$").matches(pkgInfo.packageName)) {
+                            throw SecurityException("Geçersiz eklenti paket adı: ${pkgInfo.packageName}")
+                        }
                         if (expectedPkg != null && pkgInfo.packageName != expectedPkg) {
                             throw SecurityException("Paket adı uyuşmuyor: ${pkgInfo.packageName}")
                         }
                         if (!ExtensionSignature.isTrusted(pkgInfo)) {
                             throw SecurityException("Eklenti imzası doğrulanamadı (Keiyoushi anahtarı bekleniyor)")
                         }
+                        extensionsDir.mkdirs()
                         val dest = File(extensionsDir, "${pkgInfo.packageName}.apk")
+                        if (dest.canonicalFile.parentFile != extensionsDir.canonicalFile) {
+                            throw SecurityException("Geçersiz hedef yolu: ${pkgInfo.packageName}")
+                        }
                         val wasInstalled = dest.exists() ||
                             _installed.value.any { it.meta.pkgName == pkgInfo.packageName }
-                        if (dest.exists()) dest.delete()
-                        tmp.copyTo(dest, overwrite = true)
-                        dest.setReadOnly()
+                        val staged = File(extensionsDir, "${pkgInfo.packageName}.apk.staging")
+                        if (staged.exists()) staged.delete()
+                        tmp.copyTo(staged, overwrite = true)
+                        staged.setReadOnly()
 
                         val loaded = try {
-                            ExtensionLoader(context).load(dest)
+                            ExtensionLoader(context).load(staged)
                         } catch (t: Throwable) {
-                            reload()
+                            runCatching { staged.delete() }
                             throw IllegalStateException(
                                 "Başlatılamadı — ${t.javaClass.simpleName}: ${t.message ?: "bilinmeyen hata"}",
                                 t,
                             )
                         }
+                        if (dest.exists()) dest.delete()
+                        if (!staged.renameTo(dest)) {
+                            staged.copyTo(dest, overwrite = true)
+                            runCatching { staged.delete() }
+                        }
+                        dest.setReadOnly()
 
                         val allSourceIds = loaded.sources.map { it.id }.toSet()
                         val resolved = if (enableAllSources) {

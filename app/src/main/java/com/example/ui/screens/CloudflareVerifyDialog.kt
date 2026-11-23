@@ -1,7 +1,11 @@
 package com.example.ui.screens
 
+import android.annotation.SuppressLint
+import android.os.Handler
+import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -43,6 +47,7 @@ import com.example.ui.theme.AppSpacing
 import com.example.viewmodel.MangaViewModel
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
+@SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun CloudflareVerifyDialog(
     challenge: MangaViewModel.CfChallenge,
@@ -63,10 +68,16 @@ fun CloudflareVerifyDialog(
     val initialClearance = remember(cookieTarget) {
         WebViewCookieJar.cfClearanceFor(cookieTarget)
     }
-    var manualError by remember { mutableStateOf<String?>(null) }
+    var manualError by remember(challenge.host, challenge.url, challenge.method) {
+        mutableStateOf<String?>(null)
+    }
+    val verifiedOnce = remember(challenge.host, challenge.url, challenge.method) {
+        java.util.concurrent.atomic.AtomicBoolean(false)
+    }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
 
     Dialog(
-        onDismissRequest = { },
+        onDismissRequest = onCancel,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Surface(
@@ -112,11 +123,14 @@ fun CloudflareVerifyDialog(
                                 WebView(ctx).apply {
                                     settings.javaScriptEnabled = true
                                     settings.domStorageEnabled = true
+                                    settings.allowFileAccess = false
+                                    settings.allowContentAccess = false
+                                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                                     settings.loadsImagesAutomatically = true
                                     settings.useWideViewPort = true
                                     settings.loadWithOverviewMode = true
                                     settings.cacheMode = WebSettings.LOAD_DEFAULT
-                                    settings.setSupportMultipleWindows(true)
+                                    settings.setSupportMultipleWindows(false)
                                     settings.setSupportZoom(true)
                                     settings.builtInZoomControls = true
                                     settings.displayZoomControls = false
@@ -126,44 +140,74 @@ fun CloudflareVerifyDialog(
                                     WebViewCookieJar.clearCfClearance(cookieTarget)
                                     webChromeClient = WebChromeClient()
                                     webViewClient = object : WebViewClient() {
-                                        private var verified = false
                                         private var checks = 0
+                                        private var pollingScheduled = false
+
+                                        override fun shouldOverrideUrlLoading(
+                                            view: WebView?,
+                                            request: WebResourceRequest?
+                                        ): Boolean {
+                                            val scheme = request?.url?.scheme?.lowercase()
+                                            return scheme != "http" && scheme != "https"
+                                        }
 
                                         private fun checkVerified() {
-                                            if (released.get() || verified) return
+                                            if (released.get() || verifiedOnce.get()) return
                                             CookieManager.getInstance().flush()
                                             val clearance = WebViewCookieJar.cfClearanceFor(cookieTarget)
                                             if (clearance != null && clearance != initialClearance) {
-                                                verified = true
-                                                onVerified()
+                                                if (verifiedOnce.compareAndSet(false, true)) {
+                                                    onVerified()
+                                                }
                                             }
                                         }
 
-                                        private fun scheduleCheck(view: WebView) {
-                                            view.postDelayed({
-                                                if (!released.get() && !verified) {
+                                        private fun scheduleCheck() {
+                                            if (pollingScheduled || released.get() || verifiedOnce.get()) return
+                                            pollingScheduled = true
+                                            val tick = object : Runnable {
+                                                override fun run() {
+                                                    if (released.get() || verifiedOnce.get()) {
+                                                        pollingScheduled = false
+                                                        return
+                                                    }
                                                     checkVerified()
-                                                    if (!verified && checks < 24) {
+                                                    if (!verifiedOnce.get() && checks < 24) {
                                                         checks++
-                                                        scheduleCheck(view)
+                                                        mainHandler.postDelayed(this, 1000)
+                                                    } else {
+                                                        pollingScheduled = false
                                                     }
                                                 }
-                                            }, 1000)
+                                            }
+                                            mainHandler.postDelayed(tick, 1000)
                                         }
 
                                         override fun onPageFinished(view: WebView, url: String?) {
                                             if (released.get()) return
+                                            checks = 0
                                             checkVerified()
-                                            scheduleCheck(view)
+                                            scheduleCheck()
                                         }
                                     }
-                                    loadUrl(targetUrl, challenge.headers)
+                                    if (targetUrl.startsWith("https://", ignoreCase = true) ||
+                                        targetUrl.startsWith("http://", ignoreCase = true)
+                                    ) {
+                                        loadUrl(targetUrl, challenge.headers)
+                                    }
                                 }
                             },
                             onRelease = { webView ->
                                 released.set(true)
-                                webView.stopLoading()
-                                webView.destroy()
+                                mainHandler.removeCallbacksAndMessages(null)
+                                runCatching {
+                                    webView.stopLoading()
+                                    webView.webChromeClient = null
+                                    webView.webViewClient = WebViewClient()
+                                    webView.loadUrl("about:blank")
+                                    webView.removeAllViews()
+                                    webView.destroy()
+                                }
                             }
                         )
                     }
@@ -193,7 +237,9 @@ fun CloudflareVerifyDialog(
                             val clearance = WebViewCookieJar.cfClearanceFor(cookieTarget)
                             if (clearance != null && clearance != initialClearance) {
                                 manualError = null
-                                onVerified()
+                                if (verifiedOnce.compareAndSet(false, true)) {
+                                    onVerified()
+                                }
                             } else {
                                 manualError = "Doğrulama henüz algılanmadı. Sayfadaki kontrolü tamamlayıp birkaç saniye bekleyin."
                             }

@@ -108,17 +108,16 @@ abstract class MangaDatabase : RoomDatabase() {
 
         fun getDatabase(context: Context): MangaDatabase {
             return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
+                INSTANCE ?: Room.databaseBuilder(
                     context.applicationContext,
                     MangaDatabase::class.java,
                     "manga_tr_database"
                 )
-                // Deliberately omit destructive fallback: schema changes must ship
-                // an explicit Migration so manga and reading progress are preserved.
-                .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
-                .build()
-                INSTANCE = instance
-                instance
+                    // Deliberately omit destructive fallback: schema changes must ship
+                    // an explicit Migration so manga and reading progress are preserved.
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }

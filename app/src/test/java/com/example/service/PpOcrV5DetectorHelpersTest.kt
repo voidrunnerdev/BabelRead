@@ -8,14 +8,18 @@ import org.junit.Test
 class PpOcrV5DetectorHelpersTest {
 
     @Test
-    fun `scaled size keeps stride and resize long ratio`() {
-        val large = PpOcrV5DetPreprocess.scaledSize(800, 600, 960)
-        assertEquals(960, large[0])
-        assertEquals(736, large[1])
+    fun `scaled size keeps stride and avoids upscaling`() {
+        val medium = PpOcrV5DetPreprocess.scaledSize(800, 600, 960)
+        assertEquals(800, medium[0])
+        assertEquals(608, medium[1])
 
         val small = PpOcrV5DetPreprocess.scaledSize(160, 80, 960)
-        assertEquals(960, small[0])
-        assertEquals(480, small[1])
+        assertEquals(160, small[0])
+        assertEquals(96, small[1])
+
+        val large = PpOcrV5DetPreprocess.scaledSize(1920, 1080, 960)
+        assertEquals(960, large[0])
+        assertEquals(544, large[1])
     }
 
     @Test

@@ -417,7 +417,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         } catch (t: Throwable) {
                             GlobalSearchGroup(source.name, emptyList(), t.detailedMessage())
                         }
-                        _globalSearchGroups.value = _globalSearchGroups.value + group
+                        _globalSearchGroups.update { it + group }
                     }
                 }
             }
@@ -877,6 +877,19 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             uploadDate = "Bugün",
             language = "en"
         )
+        readerGeneration.incrementAndGet()
+        translationSequenceJob?.cancel()
+        translationSequenceJob = null
+        detectionPrefetchJob?.cancel()
+        detectionPrefetchJob = null
+        translationJobs.values.forEach { it.cancel() }
+        translationJobs.clear()
+        inProgressPages.clear()
+        _isTranslationLoading.value = false
+        prefetchJobMap.values.forEach { it.cancel() }
+        prefetchJobMap.clear()
+        activePageJobs.values.forEach { it.cancel() }
+        activePageJobs.clear()
         quickReadPayload = QuickReadPayload(manga = manga, chapter = chapter, pages = pages)
         _readerManga.value = manga
         _readerChapters.value = listOf(chapter)
@@ -890,8 +903,6 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _detectedBubblesMap.value = emptyMap()
         _maskedPagesMap.value = emptyMap()
         _translationActive.value = false
-        detectionPrefetchJob?.cancel()
-        detectionPrefetchJob = null
         translationPipelineCursor = 0
         evictReaderBitmapCaches()
         viewModelScope.launch {
@@ -1461,6 +1472,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     _readerPages.value = quick.pages
                     _currentPageIndex.value = 0
                     _readerLoading.value = false
+                    if (_translationActive.value || preferences.autoTranslate.first()) {
+                        toggleLiveTranslation(true)
+                    }
                     return@launch
                 }
                 val dbChapter = chapterDao.getChapterById(chapterId)
@@ -1624,7 +1638,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val DETECTION_PREFETCH_AHEAD = 6
-        const val TRANSLATION_CACHE_TTL_MS = 24L * 60L * 60L * 1000L
+        const val DEFAULT_TRANSLATION_CACHE_TTL_DAYS = 30
     }
 
     @Volatile private var translationPipelineCursor = 0
@@ -1638,12 +1652,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         if (ppOcrPrewarmJob?.isActive == true) return
         ppOcrPrewarmJob = viewModelScope.launch(Dispatchers.IO + viewModelExceptionHandler) {
             try {
-                if (preferences.ocrEngine.first().equals("PP-OCRv5", ignoreCase = true)) {
-                    val ready = translationService.prewarmOcrEngine("PP-OCRv5")
+                val activeOcr = preferences.ocrEngine.first()
+                if (activeOcr.equals("PP-OCRv5", ignoreCase = true) || activeOcr.equals("PP-OCRv5 EN", ignoreCase = true)) {
+                    val ready = translationService.prewarmOcrEngine(activeOcr)
                     if (ready) {
-                        Log.d("TR", "PP-OCRv5 prewarm tamamlandı")
+                        Log.d("TR", "$activeOcr prewarm tamamlandı")
                     } else {
-                        Log.w("TR", "PP-OCRv5 prewarm tamamlanamadı")
+                        Log.w("TR", "$activeOcr prewarm tamamlanamadı")
                     }
                 }
             } catch (e: CancellationException) {
@@ -1784,7 +1799,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private val activePageJobs = mutableMapOf<String, Deferred<Bitmap?>>()
+    private val activePageJobs = java.util.concurrent.ConcurrentHashMap<String, Deferred<Bitmap?>>()
     private val pageJobsMutex = Mutex()
 
     private fun pageCacheKey(chapterId: String, index: Int, quality: String, fullRes: Boolean): String {
@@ -1943,7 +1958,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             throw e
         } catch (e: CloudflareChallengeException) {
             beginCloudflareVerification(e) {
-                _readerPageRetryTick.value += 1
+                _readerPageRetryTick.update { it + 1 }
             }
             null
         } catch (e: Exception) {
@@ -1978,6 +1993,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         sequence?.cancel()
         translationJobs.values.toList().forEach { it.cancel() }
         translationJobs.clear()
+        inProgressPages.clear()
         _isTranslationLoading.value = false
     }
 
@@ -2022,52 +2038,138 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _isTranslationLoading.value = false
     }
 
+    private suspend fun resetActiveChapterTranslationState(
+        clearDetections: Boolean = false,
+        restartIfActive: Boolean = true
+    ) {
+        val currentIdx = _currentPageIndex.value
+        val sequence = translationSequenceJob
+        translationSequenceJob = null
+        sequence?.cancelAndJoin()
+        val oldJobs = translationJobs.values.toList()
+        translationJobs.clear()
+        oldJobs.forEach { it.cancelAndJoin() }
+        inProgressPages.clear()
+        translationPipelineCursor = 0
+        _translatedPagesMap.value = emptyMap()
+        _maskedPagesMap.value = emptyMap()
+        if (clearDetections) {
+            detectionPrefetchJob?.cancel()
+            detectionPrefetchJob = null
+            _detectedBubblesMap.value = emptyMap()
+        }
+        _isTranslationLoading.value = false
+
+        if (restartIfActive && _translationActive.value && _activeChapter.value != null) {
+            startSequentialTranslation(currentIdx)
+        }
+    }
+
     fun setTranslationEngine(engine: String) {
         viewModelScope.launch {
             if (preferences.translationEngine.first() == engine) return@launch
-
             preferences.setTranslationEngine(engine)
+            resetActiveChapterTranslationState()
+        }
+    }
 
-            val currentIdx = _currentPageIndex.value
-            val progressKey = "${readerGeneration.get()}:$currentIdx"
-            translationJobs[progressKey]?.let { currentJob ->
-                currentJob.cancelAndJoin()
+    data class GeminiModelsUiState(
+        val models: List<com.example.service.GeminiModelInfo> = emptyList(),
+        val isLoading: Boolean = false,
+        val error: String? = null,
+        val loadedAtMs: Long = 0L,
+        val apiKeyFingerprint: String = ""
+    )
+
+    private val _geminiModelsState = MutableStateFlow(GeminiModelsUiState())
+    val geminiModelsState = _geminiModelsState.asStateFlow()
+
+    fun refreshGeminiModels(force: Boolean = false, apiKeyOverride: String? = null) {
+        viewModelScope.launch {
+            val current = _geminiModelsState.value
+            if (current.isLoading) return@launch
+            val apiKey = apiKeyOverride?.trim()?.takeIf { it.isNotEmpty() }
+                ?: preferences.geminiApiKey.first().trim()
+            if (apiKey.isEmpty()) {
+                _geminiModelsState.value = GeminiModelsUiState(
+                    models = emptyList(),
+                    isLoading = false,
+                    error = "Modelleri listelemek için önce Gemini API anahtarını girin."
+                )
+                return@launch
             }
-
-            _translatedPagesMap.update { it - currentIdx }
-            if (_translationActive.value && _activeChapter.value != null) {
-                translatePageIfNeeded(currentIdx, forceReload = true)
+            val fingerprint = sha1Hex(apiKey).take(16)
+            val now = System.currentTimeMillis()
+            val sameKeyAndFresh = current.apiKeyFingerprint == fingerprint &&
+                current.models.isNotEmpty() &&
+                now - current.loadedAtMs < 5 * 60_000L
+            if (!force && sameKeyAndFresh) {
+                return@launch
+            }
+            _geminiModelsState.value = current.copy(
+                models = if (current.apiKeyFingerprint == fingerprint) current.models else emptyList(),
+                isLoading = true,
+                error = null,
+                apiKeyFingerprint = fingerprint
+            )
+            val result = translationService.fetchAvailableGeminiModels(apiKey)
+            result.onSuccess { list ->
+                _geminiModelsState.value = GeminiModelsUiState(
+                    models = list,
+                    isLoading = false,
+                    error = if (list.isEmpty()) "Uygun çeviri modeli bulunamadı." else null,
+                    loadedAtMs = System.currentTimeMillis(),
+                    apiKeyFingerprint = fingerprint
+                )
+            }.onFailure { err ->
+                _geminiModelsState.value = _geminiModelsState.value.copy(
+                    isLoading = false,
+                    error = err.localizedMessage ?: err.message ?: "Modeller yüklenemedi."
+                )
             }
         }
     }
+
+    fun setGeminiModel(model: String) {
+        val trimmed = model.trim().removePrefix("models/").trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            if (preferences.geminiModel.first() == trimmed) return@launch
+            preferences.setGeminiModel(trimmed)
+            if (preferences.translationEngine.first().equals("Gemini", ignoreCase = true)) {
+                resetActiveChapterTranslationState()
+            }
+        }
+    }
+
+    fun setYoloAiEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            if (preferences.yoloAiEnabled.first() == enabled) return@launch
+            preferences.setYoloAiEnabled(enabled)
+            resetActiveChapterTranslationState(clearDetections = true)
+        }
+    }
+
+    fun setTranslationCacheTtlDays(days: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            preferences.setTranslationCacheTtlDays(days)
+            if (days > 0) {
+                purgeExpiredTranslationCache()
+            }
+        }
+    }
+
+    fun isPpOcrEnglishModelInstalled(): Boolean =
+        translationService.isPpOcrEnglishModelInstalled()
 
     fun setOcrEngine(engine: String) {
         viewModelScope.launch {
             if (preferences.ocrEngine.first() == engine) return@launch
             preferences.setOcrEngine(engine)
-            if (engine.equals("PP-OCRv5", ignoreCase = true)) {
+            if (engine.equals("PP-OCRv5", ignoreCase = true) || engine.equals("PP-OCRv5 EN", ignoreCase = true)) {
                 prewarmPpOcrIfNeeded()
             }
-
-            val currentIdx = _currentPageIndex.value
-            val sequence = translationSequenceJob
-            translationSequenceJob = null
-            sequence?.cancelAndJoin()
-            val oldJobs = translationJobs.values.toList()
-            translationJobs.clear()
-            oldJobs.forEach { it.cancelAndJoin() }
-            inProgressPages.clear()
-            translationPipelineCursor = 0
-            _translatedPagesMap.value = emptyMap()
-            _maskedPagesMap.value = emptyMap()
-            _isTranslationLoading.value = false
-
-            if (_translationActive.value && _activeChapter.value != null) {
-                if (currentIdx in 0 until _readerPages.value.size) {
-                    translatePageIfNeeded(currentIdx, forceReload = true)
-                }
-                startSequentialTranslation()
-            }
+            resetActiveChapterTranslationState()
         }
     }
 
@@ -2077,7 +2179,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             val previous = preferences.translationTargetLang.first()
             preferences.setTranslationTargetLang(resolved)
             preferences.addRecentTranslationLang(resolved)
-            if (previous != resolved) invalidateCurrentPageTranslation()
+            if (previous != resolved) resetActiveChapterTranslationState()
         }
     }
 
@@ -2093,17 +2195,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             if (resolved != TranslationLanguages.AUTO) {
                 preferences.addRecentTranslationLang(resolved)
             }
-            if (previous != resolved) invalidateCurrentPageTranslation()
-        }
-    }
-
-    private suspend fun invalidateCurrentPageTranslation() {
-        val currentIdx = _currentPageIndex.value
-        val progressKey = "${readerGeneration.get()}:$currentIdx"
-        translationJobs[progressKey]?.cancelAndJoin()
-        _translatedPagesMap.update { it - currentIdx }
-        if (_translationActive.value && _activeChapter.value != null) {
-            translatePageIfNeeded(currentIdx, forceReload = true)
+            if (previous != resolved) resetActiveChapterTranslationState()
         }
     }
 
@@ -2125,11 +2217,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         translationCacheDao.statsBySource()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    private fun isCacheableSource(chapterId: String, sourceName: String): Boolean {
-        if (chapterId.startsWith("webquick_") || chapterId.startsWith("webch_")) return false
-        if (sourceName.startsWith("Web: ")) return false
-        return true
-    }
+    private fun isCacheableSource(chapterId: String, sourceName: String): Boolean =
+        chapterId.isNotBlank() && sourceName.isNotBlank()
 
     fun clearTranslationCache(sourceName: String?) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -2141,10 +2230,31 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 if (sourceName == null) translationCacheDao.deleteAll()
                 else translationCacheDao.deleteBySource(sourceName)
+                val affectsActive = sourceName == null || _readerManga.value?.sourceName == sourceName
+                if (affectsActive) {
+                    withContext(Dispatchers.Main) {
+                        resetActiveChapterTranslationState(restartIfActive = true)
+                    }
+                }
                 Log.d("TR", "Çeviri önbelleği temizlendi: ${sourceName ?: "TÜMÜ"} (${paths.size} sayfa)")
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
                 Log.w("TR", "Çeviri önbelleği temizlenemedi: ${t.message}")
+            }
+        }
+    }
+
+    private suspend fun clearTranslationCacheForChapters(chapterIds: Collection<String>) {
+        if (chapterIds.isEmpty()) return
+        withContext(NonCancellable + Dispatchers.IO) {
+            for (chapterId in chapterIds.distinct()) {
+                if (chapterId.isBlank()) continue
+                val paths = runCatching { translationCacheDao.pathsByChapterPrefix(chapterId) }
+                    .getOrDefault(emptyList())
+                for (path in paths) {
+                    runCatching { File(path).delete() }
+                }
+                runCatching { translationCacheDao.deleteByChapterPrefix(chapterId) }
             }
         }
     }
@@ -2165,13 +2275,27 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Çeviri önbelleği dil bazlı ayrılır: aynı sayfa farklı hedef dillerde ayrı saklanır. */
+    /** Çeviri önbelleği dil, OCR motoru, çeviri motoru/modeli ve balon algılama ayarına göre ayrılır. */
     private suspend fun translationCacheId(chapterId: String): Pair<String, String> {
         val target = preferences.translationTargetLang.first()
         val ocrEngine = preferences.ocrEngine.first()
+        val translationEngine = preferences.translationEngine.first()
+        val engineKey = if (translationEngine.equals("Gemini", ignoreCase = true)) {
+            val geminiModel = preferences.geminiModel.first().trim().ifEmpty { "default" }
+            "Gemini:$geminiModel"
+        } else {
+            translationEngine
+        }
+        val yoloSuffix = if (preferences.yoloAiEnabled.first()) "" else "|nodet"
         val sourceDisplay = resolveSourceDisplayForCache()
         val sourceCode = TranslationLanguages.codeForDisplayName(sourceDisplay) ?: "en"
-        return "$chapterId|$sourceCode>$target|$ocrEngine" to target
+        return "$chapterId|$sourceCode>$target|$ocrEngine|$engineKey$yoloSuffix" to target
+    }
+
+    private suspend fun activeTranslationCacheTtlMs(): Long? {
+        val days = preferences.translationCacheTtlDays.first()
+        if (days <= 0) return null
+        return days.toLong() * 24L * 60L * 60L * 1000L
     }
 
     private suspend fun loadCachedTranslation(pageIdx: Int, generation: Long): Boolean {
@@ -2183,37 +2307,42 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         val row = withContext(Dispatchers.IO) {
             translationCacheDao.getCachedPage(cacheId, pageIdx)
         } ?: return false
-        if (System.currentTimeMillis() - row.createdAt > TRANSLATION_CACHE_TTL_MS) {
-            // Bir günden eski çeviri önbelleği geçersiz: kaydı ve görseli temizle, yeniden çevrilsin
-            withContext(Dispatchers.IO) {
+        val ttlMs = activeTranslationCacheTtlMs()
+        if (ttlMs != null && System.currentTimeMillis() - row.createdAt > ttlMs) {
+            withContext(NonCancellable + Dispatchers.IO) {
                 runCatching { File(row.maskedPath).delete() }
                 runCatching { translationCacheDao.deletePage(cacheId, pageIdx) }
             }
             return false
         }
-        if (row.pageUrl != pageUrl) return false
+        if (!TranslationCacheUrlMatcher.matches(row.pageUrl, pageUrl)) return false
         val file = File(row.maskedPath)
         if (!file.exists()) {
-            withContext(Dispatchers.IO) {
+            withContext(NonCancellable + Dispatchers.IO) {
                 translationCacheDao.deletePage(cacheId, pageIdx)
             }
             return false
         }
         val cachedBlocks = withContext(Dispatchers.IO) {
-            runCatching { TranslationCacheCodec.deserializeBlocks(row.blocksJson) }
-                .getOrDefault(emptyList())
-        }
-        if (cachedBlocks.isEmpty()) return false
+            runCatching {
+                org.json.JSONArray(row.blocksJson)
+                TranslationCacheCodec.deserializeBlocks(row.blocksJson)
+            }.getOrNull()
+        } ?: return false
         val loadedBitmap = withContext(Dispatchers.IO) {
             runCatching { BitmapFactory.decodeFile(row.maskedPath) }.getOrNull()
         }
         if (loadedBitmap == null) {
-            withContext(Dispatchers.IO) {
+            withContext(NonCancellable + Dispatchers.IO) {
+                runCatching { file.delete() }
                 translationCacheDao.deletePage(cacheId, pageIdx)
             }
             return false
         }
-        if (readerGeneration.get() != generation) return false
+        if (readerGeneration.get() != generation) {
+            if (!loadedBitmap.isRecycled) loadedBitmap.recycle()
+            return false
+        }
 
         // Sonradan yapılan düzeltmeleri önbellekteki metinlere de uygula.
         val blocks = cachedBlocks.map { block ->
@@ -2230,28 +2359,50 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             if (readerGeneration.get() != generation) current else current + (pageIdx to blocks)
         }
         storeMaskedPage(pageIdx, loadedBitmap, generation)
+        // LRU / kayan TTL: yakın zamanda okunan sayfalar bütçe budamasında korunur.
+        withContext(NonCancellable + Dispatchers.IO) {
+            runCatching { translationCacheDao.touchPage(cacheId, pageIdx, System.currentTimeMillis()) }
+        }
         Log.d("TR", "Sayfa $pageIdx önbellekten yüklendi ($cacheId)")
         return true
     }
 
-    private suspend fun persistTranslatedPage(pageIdx: Int, blocks: List<TextBlockObj>, masked: Bitmap) {
-        val chapterId = _activeChapter.value?.id ?: return
-        val sourceName = _readerManga.value?.sourceName ?: return
+    private suspend fun persistTranslatedPage(
+        pageIdx: Int,
+        blocks: List<TextBlockObj>,
+        masked: Bitmap,
+        chapterId: String? = _activeChapter.value?.id,
+        sourceName: String? = _readerManga.value?.sourceName,
+        pageUrl: String? = _readerPages.value.getOrNull(pageIdx)
+    ) {
+        if (chapterId.isNullOrBlank() || sourceName.isNullOrBlank() || pageUrl.isNullOrBlank()) return
         if (!isCacheableSource(chapterId, sourceName)) return
-        val pageUrl = _readerPages.value.getOrNull(pageIdx) ?: return
         val (cacheId, _) = translationCacheId(chapterId)
-        withContext(Dispatchers.IO) {
+        withContext(NonCancellable + Dispatchers.IO) {
+            if (masked.isRecycled) return@withContext
+            val dir = File(context.filesDir, "translation_cache").apply { mkdirs() }
+            val file = File(dir, sha1Hex(cacheId).take(16) + "_" + pageIdx + ".webp")
+            val tmpFile = File(dir, sha1Hex(cacheId).take(16) + "_" + pageIdx + ".webp.tmp")
             try {
-                val dir = File(context.filesDir, "translation_cache").apply { mkdirs() }
-                val file = File(dir, sha1Hex(cacheId).take(16) + "_" + pageIdx + ".webp")
-                FileOutputStream(file).use { out ->
+                val compressed = FileOutputStream(tmpFile).use { out ->
                     masked.compress(translationCacheFormat(), 80, out)
+                }
+                if (!compressed || tmpFile.length() <= 0L) {
+                    tmpFile.delete()
+                    return@withContext
+                }
+                if (file.exists() && !file.delete()) {
+                    tmpFile.copyTo(file, overwrite = true)
+                    tmpFile.delete()
+                } else if (!tmpFile.renameTo(file)) {
+                    tmpFile.copyTo(file, overwrite = true)
+                    tmpFile.delete()
                 }
                 translationCacheDao.put(
                     TranslatedPageCacheEntity(
                         chapterId = cacheId,
                         pageIndex = pageIdx,
-                        pageUrl = pageUrl,
+                        pageUrl = TranslationCacheUrlMatcher.sanitizeForStorage(pageUrl),
                         sourceName = sourceName,
                         blocksJson = TranslationCacheCodec.serializeBlocks(blocks),
                         maskedPath = file.absolutePath,
@@ -2261,6 +2412,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 pruneTranslationCache()
             } catch (t: Throwable) {
+                runCatching { tmpFile.delete() }
                 if (t is CancellationException) throw t
                 Log.w("TR", "Çeviri önbelleği yazılamadı: ${t.message}")
             }
@@ -2284,20 +2436,21 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         Log.d("TR", "Çeviri önbelleği budandı, kalan: ${total / 1048576} MB")
     }
 
-    /** Bir günden eski tüm çeviri önbelleği kayıtlarını ve görsellerini siler. */
+    /** Süresi dolan çeviri önbelleği kayıtlarını ve görsellerini siler (0 = süresiz). */
     private suspend fun purgeExpiredTranslationCache() {
-        val cutoff = System.currentTimeMillis() - TRANSLATION_CACHE_TTL_MS
+        val ttlMs = activeTranslationCacheTtlMs() ?: return
+        val cutoff = System.currentTimeMillis() - ttlMs
         val expired = withContext(Dispatchers.IO) {
             runCatching { translationCacheDao.expired(cutoff) }.getOrDefault(emptyList())
         }
         if (expired.isEmpty()) return
-        withContext(Dispatchers.IO) {
+        withContext(NonCancellable + Dispatchers.IO) {
             for (row in expired) {
                 runCatching { File(row.maskedPath).delete() }
             }
             runCatching { translationCacheDao.deleteExpired(cutoff) }
         }
-        Log.d("TR", "Çeviri önbelleğinden ${expired.size} eski sayfa silindi (24 saat sınırı)")
+        Log.d("TR", "Çeviri önbelleğinden ${expired.size} eski sayfa silindi")
     }
 
     private fun translationCacheFormat(): Bitmap.CompressFormat =
@@ -2313,8 +2466,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 var processed = 0
                 var converted = 0
+                val failedKeys = HashSet<Pair<String, Int>>()
                 while (processed < maxPerLaunch) {
                     val batch = translationCacheDao.cachedPagesBySuffix(".jpg", 60)
+                        .filter { (it.chapterId to it.pageIndex) !in failedKeys }
                     if (batch.isEmpty()) break
                     for (row in batch) {
                         if (processed >= maxPerLaunch) break
@@ -2330,7 +2485,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             translationCacheDao.deletePage(row.chapterId, row.pageIndex)
                             continue
                         }
-                        val tmp = File(file.parentFile, file.name + ".webp.tmp")
+                        val webpFile = File(file.parentFile, file.nameWithoutExtension + ".webp")
+                        val tmp = File(file.parentFile, file.nameWithoutExtension + ".webp.tmp")
                         val ok = runCatching {
                             FileOutputStream(tmp).use { out ->
                                 bitmap.compress(translationCacheFormat(), 80, out)
@@ -2338,10 +2494,19 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             tmp.length() > 0
                         }.getOrDefault(false)
                         bitmap.recycle()
-                        if (ok && tmp.renameTo(file)) {
-                            translationCacheDao.updateByteSize(row.chapterId, row.pageIndex, file.length())
+                        if (ok && (!webpFile.exists() || webpFile.delete()) && tmp.renameTo(webpFile)) {
+                            translationCacheDao.updateMaskedPathAndSize(
+                                row.chapterId,
+                                row.pageIndex,
+                                webpFile.absolutePath,
+                                webpFile.length()
+                            )
+                            if (file.absolutePath != webpFile.absolutePath) {
+                                runCatching { file.delete() }
+                            }
                             converted++
                         } else {
+                            failedKeys.add(row.chapterId to row.pageIndex)
                             runCatching { tmp.delete() }
                         }
                     }
@@ -2359,14 +2524,16 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private fun storeMaskedPage(pageIdx: Int, bitmap: Bitmap, generation: Long) {
         _maskedPagesMap.update { current ->
             if (readerGeneration.get() != generation) current else {
+                val anchorIdx = _currentPageIndex.value
                 val next = linkedMapOf<Int, Bitmap>()
                 var retainedBytes = 0L
                 val candidates = (current + (pageIdx to bitmap)).entries
-                    .sortedBy { kotlin.math.abs(it.key - pageIdx) }
+                    .sortedBy { kotlin.math.abs(it.key - anchorIdx) }
                 for ((index, candidate) in candidates) {
-                    if (kotlin.math.abs(index - pageIdx) > 2) continue
+                    if (candidate.isRecycled) continue
+                    if (kotlin.math.abs(index - anchorIdx) > 2 && index != pageIdx) continue
                     val bytes = candidate.allocationByteCount.toLong()
-                    if (index == pageIdx || retainedBytes + bytes <= maskedPageBudgetBytes) {
+                    if (index == anchorIdx || index == pageIdx || retainedBytes + bytes <= maskedPageBudgetBytes) {
                         next[index] = candidate
                         retainedBytes += bytes
                     }
@@ -2475,7 +2642,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         Log.d("TR", "translatePageIfNeeded çağrıldı: sayfa=$pageIdx, forceReload=$forceReload")
         val generation = readerGeneration.get()
         val progressKey = "$generation:$pageIdx"
-        if (!forceReload && _translatedPagesMap.value.containsKey(pageIdx)) {
+        val cachedBlocksInRam = _translatedPagesMap.value[pageIdx]
+        val hasCompleteRamEntry = cachedBlocksInRam != null &&
+            (cachedBlocksInRam.isEmpty() || _maskedPagesMap.value.containsKey(pageIdx))
+        if (!forceReload && hasCompleteRamEntry) {
             Log.d("TR", "Sayfa $pageIdx zaten çevrili, işlem atlandı")
             return
         }
@@ -2483,6 +2653,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             Log.d("TR", "Sayfa $pageIdx şu an zaten işleniyor (inProgressPages).")
             return
         }
+        val snapshotChapterId = _activeChapter.value?.id
+        val snapshotSourceName = _readerManga.value?.sourceName
+        val snapshotPageUrl = _readerPages.value.getOrNull(pageIdx)
         val translationJob = viewModelScope.launch(
             Dispatchers.Default + viewModelExceptionHandler,
             start = CoroutineStart.LAZY
@@ -2516,15 +2689,23 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 // karşılığı yoktur. PP-OCRv5 bu sayfaları Japonca varsayarak
                 // dikey metin segmentasyonunu çalıştırır; gerçek dil OCR
                 // sonrasında detectRealLanguage ile düzeltilir.
+                val isPpOcrEn = ocrEngine.equals("PP-OCRv5 EN", ignoreCase = true)
+                val isPpOcrAny = ocrEngine.equals("PP-OCRv5", ignoreCase = true) || isPpOcrEn
                 val localUnknownOrigin = originLang.equals("Yerel", ignoreCase = true) ||
                     originLang.equals("Bilinmiyor", ignoreCase = true)
                 val ppOriginLang = when {
+                    isPpOcrEn && (originCode == "en" || localUnknownOrigin) -> "İngilizce"
+                    isPpOcrEn -> null
                     originCode == "en" || originCode == "ja" -> originLang
                     localUnknownOrigin -> "Japonca"
                     else -> null
                 }
-                if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
-                    if (originCode == "zh" || originCode == "ko") {
+                if (isPpOcrAny) {
+                    if (isPpOcrEn && ppOriginLang == null) {
+                        emitTranslationNotice("PP-OCRv5 EN yalnızca İngilizce kaynakları destekler.")
+                        return@launch
+                    }
+                    if (!isPpOcrEn && (originCode == "zh" || originCode == "ko")) {
                         Log.d("TR", "PP-OCRv5: $originLang kaynağı sessizce atlandı (sayfa=$pageIdx)")
                         return@launch
                     }
@@ -2569,7 +2750,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     // (text_free) yazılar şimdilik çevrilmez ve maskelenmez.
                     val regionMode = yoloEnabled && bubbleDetector.isAiModelReady()
                     val bubbleOcrRegions = if (regionMode) {
-                        if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
+                        if (isPpOcrAny) {
                             buildPpOcrV5Regions(yoloBubbles, bitmap.width, bitmap.height)
                         } else {
                             buildBubbleOcrRegions(yoloBubbles, bitmap.width, bitmap.height)
@@ -2577,9 +2758,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     } else {
                         emptyList()
                     }
-                    if (ocrEngine.equals("PP-OCRv5", ignoreCase = true) && !regionMode) {
-                        Log.w("TR", "PP-OCRv5 requires RT-DETR regions; page=$pageIdx skipped")
-                        emitTranslationNotice("PP-OCRv5 için RT-DETR açık olmalı; tüm sayfa OCR'ı desteklenmiyor.")
+                    if (isPpOcrAny && !regionMode) {
+                        Log.w("TR", "$ocrEngine requires RT-DETR regions; page=$pageIdx skipped")
+                        emitTranslationNotice("$ocrEngine için RT-DETR açık olmalı; tüm sayfa OCR'ı desteklenmiyor.")
+                        return@launch
+                    }
+                    if (isPpOcrEn && !translationService.isOcrEngineAvailable(ocrEngine)) {
+                        emitTranslationNotice("en_PP-OCRv5_mobile_rec.onnx bulunamadı. Dosyayı assets/models/ klasörüne ekleyin.")
                         return@launch
                     }
 
@@ -2631,6 +2816,14 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         _translatedPagesMap.update { current ->
                             if (readerGeneration.get() == generation) current + (pageIdx to emptyList()) else current
                         }
+                        persistTranslatedPage(
+                            pageIdx = pageIdx,
+                            blocks = emptyList(),
+                            masked = bitmap,
+                            chapterId = snapshotChapterId,
+                            sourceName = snapshotSourceName,
+                            pageUrl = snapshotPageUrl
+                        )
                         return@launch
                     }
 
@@ -3194,15 +3387,35 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
                     // Metinleri çevir
                     if (mergedCandidates.isNotEmpty()) {
+                        val pageWidthPx = bitmap.width.coerceAtLeast(1)
+                        val dpPerPx = 380f / pageWidthPx.toFloat()
                         val candidateRequests = mergedCandidates.map { cand ->
                             val r = cand.textRect
                             val id = "$pageIdx:${r.left},${r.top},${r.right},${r.bottom}:${cand.text.hashCode()}"
-                            TranslationRequest(id, cand.text)
+                            if (cand.isBubble) {
+                                val box = cand.bubbleBounds.takeUnless { it.isEmpty } ?: cand.targetBox
+                                if (box.width() >= 24 && box.height() >= 24) {
+                                    val wDp = box.width() * dpPerPx
+                                    val hDp = box.height() * dpPerPx
+                                    val maxChars = ((0.62f * wDp * hDp) / 71f).toInt().coerceIn(18, 180)
+                                    val aspect = box.width().toFloat() / box.height().toFloat()
+                                    val shape = when {
+                                        aspect < 0.72f -> "narrow"
+                                        aspect > 1.45f -> "wide"
+                                        else -> "balanced"
+                                    }
+                                    TranslationRequest(id, cand.text, maxCharsHint = maxChars, shapeHint = shape)
+                                } else {
+                                    TranslationRequest(id, cand.text)
+                                }
+                            } else {
+                                TranslationRequest(id, cand.text)
+                            }
                         }
                         val detectedLang = if (forcedSourceCode != null) {
                             originLang
                         } else {
-                            val ocrDefaultLang = if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
+                            val ocrDefaultLang = if (isPpOcrAny) {
                                 ppOriginLang ?: originLang
                             } else {
                                 originLang
@@ -3313,7 +3526,14 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     if (translationCanBeCached) {
                         // Kalıcı önbellek: uygulama yeniden açıldığında beklemeden gösterilir.
                         // Kısmi sonuçlar kalıcı cache'e yazılmaz; sonraki açılışta sayfa yeniden denenir.
-                        persistTranslatedPage(pageIdx, finalBlocks, maskedBitmap)
+                        persistTranslatedPage(
+                            pageIdx = pageIdx,
+                            blocks = finalBlocks,
+                            masked = maskedBitmap,
+                            chapterId = snapshotChapterId,
+                            sourceName = snapshotSourceName,
+                            pageUrl = snapshotPageUrl
+                        )
                     }
                     if (translationCanBeCached) {
                         Log.d("TR", "Sayfa $pageIdx çeviri akışıyla tamamlandı.")
@@ -3366,10 +3586,20 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 targetLang = targetLangCode
             )
             correctionDao.insertCorrection(entity)
-            val currentIdx = _currentPageIndex.value
-            _translatedPagesMap.update { it - currentIdx }
-            _maskedPagesMap.update { it - currentIdx }
-            translatePageIfNeeded(currentIdx)
+            val normalizedTarget = entity.originalText
+            _translatedPagesMap.update { current ->
+                current.mapValues { (_, blocks) ->
+                    blocks.map { block ->
+                        if (block.originalText.isNotBlank() &&
+                            translationService.normalizeForCache(block.originalText) == normalizedTarget
+                        ) {
+                            block.copy(translatedText = turkishText)
+                        } else {
+                            block
+                        }
+                    }
+                }
+            }
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -4111,6 +4341,36 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun repairMissingLinkedCovers() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                val linkedMangas = mangaDao.getAllMangas().filter { it.linkedFolderId != null }
+                for (manga in linkedMangas) {
+                    if (linkedPageResolver.isCoverFileUsable(manga.coverUrl)) continue
+                    val repairedUrl = when {
+                        linkedPageResolver.hasCachedCover(manga.id) ->
+                            linkedPageResolver.cachedCoverUrl(manga.id)
+                        else -> linkedPageResolver.migrateLegacyCoverIfPresent(manga.id) ?: run {
+                            val firstChapter = chapterDao.getChaptersByMangaIdSync(manga.id)
+                                .minByOrNull { it.chapterNumber }
+                            val firstLocator = firstChapter?.linkedPageLocator
+                                ?.takeIf { it.isNotBlank() }
+                                ?.let { PagePathCodec.decode(it).firstOrNull() }
+                            if (firstLocator != null) {
+                                linkedPageResolver.cacheCoverThumbnail(manga.id, firstLocator)
+                            } else {
+                                null
+                            }
+                        }
+                    }
+                    if (!repairedUrl.isNullOrBlank() && repairedUrl != manga.coverUrl) {
+                        mangaDao.updateManga(manga.copy(coverUrl = repairedUrl))
+                    }
+                }
+            }
+        }
+    }
+
     fun deleteMangaCompletely(manga: MangaEntity, onFinished: (Boolean, String) -> Unit = { _, _ -> }) {
         viewModelScope.launch(Dispatchers.IO) {
             data class StagedFile(val original: File, val staged: File)
@@ -4191,6 +4451,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 synchronized(downloadStateLock) {
                     chapterIdsToCancel.forEach(cancelledDownloadIds::remove)
                 }
+                clearTranslationCacheForChapters(chapterIdsToCancel)
                 if (isLinked) linkedPageResolver.deleteCachedCover(manga.id)
 
                 val undeletedPaths = stagedFiles.filterNot { entry ->
@@ -4280,13 +4541,15 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getYoloModelInfo(): Map<String, String> = bubbleDetector.yoloDetector.getModelInfo()
 
+    private val webSourceResolverInstance: (String) -> MangaSource? = { sourceName ->
+        webSiteStore.siteBySourceName(sourceName)?.let { site ->
+            WebSiteSource(site, context)
+        }
+    }
+
     init {
         context.registerComponentCallbacks(pageMemoryCallbacks)
-        MangaSourceRegistry.webSourceResolver = { sourceName ->
-            webSiteStore.siteBySourceName(sourceName)?.let { site ->
-                WebSiteSource(site, context)
-            }
-        }
+        MangaSourceRegistry.webSourceResolver = webSourceResolverInstance
 
         viewModelScope.launch {
             preferences.pageQuality.distinctUntilChanged().collect { quality ->
@@ -4307,6 +4570,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         refreshLinkedSources()
+        repairMissingLinkedCovers()
 
         viewModelScope.launch {
             preferences.pinnedSources.collect { pinned ->
@@ -4393,6 +4657,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        if (MangaSourceRegistry.webSourceResolver === webSourceResolverInstance) {
+            MangaSourceRegistry.webSourceResolver = null
+        }
+        activeDownloadCalls.keys.toList().forEach(::cancelDownloadCalls)
+        activeDownloadCalls.clear()
         viewModelScope.coroutineContext.cancelChildren()
         context.unregisterComponentCallbacks(pageMemoryCallbacks)
         prefetchJobMap.values.forEach { it.cancel() }
@@ -4403,6 +4672,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         activePageJobs.clear()
         inProgressPages.clear()
         _isTranslationLoading.value = false
+        _maskedPagesMap.value = emptyMap()
         evictReaderBitmapCaches()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             runCatching { bubbleDetector.yoloDetector.closeSession() }

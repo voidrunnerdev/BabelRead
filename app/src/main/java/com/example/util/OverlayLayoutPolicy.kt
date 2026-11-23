@@ -46,8 +46,10 @@ object OverlayLayoutPolicy {
         minimum: SubtitleFit
     ): SubtitleFitChoice {
         if (original.fitsInside) return SubtitleFitChoice.ORIGINAL
-        if (hyphenated.fitsInside && hyphenated.fontSizeSp >= READABLE_SUBTITLE_SP) {
-            return SubtitleFitChoice.HYPHENATED
+        if (hyphenated.fitsInside && hyphenated.fontSizeSp >= READABLE_MIN_SP) {
+            if (!minimum.fitsInside || hyphenated.fontSizeSp >= minimum.fontSizeSp) {
+                return SubtitleFitChoice.HYPHENATED
+            }
         }
         if (minimum.fitsInside) return SubtitleFitChoice.MINIMUM
         return SubtitleFitChoice.FALLBACK

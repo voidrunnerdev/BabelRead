@@ -134,8 +134,16 @@ class LinkedFolderScanner(
         onProgress: (String) -> Unit
     ): LinkedScanResult {
         val rootChildren = listChildren(root)
-        val directories = naturalByName(rootChildren.filter { it.isDirectory })
-        val rootArchives = naturalByName(rootChildren.filter { it.isFile && isArchive(it.name) })
+        val directories = naturalByName(
+            rootChildren.filter { it.isDirectory && !isHiddenEntry(it.name) }
+        )
+        // Mihon local/ rule: subfolders are mangas; loose images in root are never treated as mangas.
+        // Loose root archives are only scanned when no manga subfolders exist.
+        val rootArchives = if (directories.isEmpty()) {
+            naturalByName(rootChildren.filter { it.isFile && isArchive(it.name) })
+        } else {
+            emptyList()
+        }
         if (directories.isEmpty() && rootArchives.isEmpty()) {
             return fail(folder, "Klasör kitaplığında manga bulunamadı.")
         }
@@ -149,15 +157,50 @@ class LinkedFolderScanner(
             val folderName = directory.name?.trim().orEmpty().ifBlank { "Manga" }
             onProgress("Klasör kitaplığı: $index/$total - $folderName")
             val children = listChildren(directory)
-            val chapters = buildChapters(children, folderName, onProgress)
-            if (chapters.isNotEmpty()) {
-                scannedMangas += ScannedManga(
-                    relativePath = "folder:$folderName",
-                    title = LinkedNaming.cleanTitle(folderName),
-                    chapters = chapters,
-                    coverLocator = findCoverLocator(children)
-                        ?: chapters.first().locators.firstOrNull()
-                )
+
+            // Support Mihon downloads/ 3-level structure (downloads / Source / Manga / Chapters):
+            // If this directory has no direct non-cover images or archives, and its subdirectories
+            // themselves contain chapter subfolders or archives, descend one level so each actual
+            // series becomes its own manga instead of collapsing the whole source into one manga.
+            val directNonCoverImages = children.any { it.isFile && isImage(it.name) && !isCoverImage(it.name) }
+            val directArchives = children.any { it.isFile && isArchive(it.name) }
+            val subDirs = naturalByName(children.filter { it.isDirectory && !isHiddenEntry(it.name) })
+            val looksLikeMihonSourceDir = !directNonCoverImages && !directArchives && subDirs.isNotEmpty() &&
+                subDirs.none { isVolumeOrChapterFolderName(it.name) } &&
+                subDirs.any { sub ->
+                    val subChildren = listChildren(sub)
+                    subChildren.any { it.isFile && isArchive(it.name) } ||
+                        subChildren.any { it.isDirectory && !isHiddenEntry(it.name) }
+                }
+
+            if (looksLikeMihonSourceDir) {
+                subDirs.forEach { mangaDir ->
+                    val mangaName = mangaDir.name?.trim().orEmpty().ifBlank { "Manga" }
+                    onProgress("Mihon kaynağı ($folderName): $mangaName")
+                    val mangaChildren = listChildren(mangaDir)
+                    val relPath = "source:$folderName/folder:$mangaName"
+                    val chapters = buildChapters(mangaChildren, relPath, onProgress)
+                    if (chapters.isNotEmpty()) {
+                        scannedMangas += ScannedManga(
+                            relativePath = relPath,
+                            title = LinkedNaming.cleanTitle(mangaName),
+                            chapters = chapters,
+                            coverLocator = findCoverLocator(mangaChildren)
+                                ?: chapters.first().locators.firstOrNull()
+                        )
+                    }
+                }
+            } else {
+                val chapters = buildChapters(children, folderName, onProgress)
+                if (chapters.isNotEmpty()) {
+                    scannedMangas += ScannedManga(
+                        relativePath = "folder:$folderName",
+                        title = LinkedNaming.cleanTitle(folderName),
+                        chapters = chapters,
+                        coverLocator = findCoverLocator(children)
+                            ?: chapters.first().locators.firstOrNull()
+                    )
+                }
             }
         }
 
@@ -254,8 +297,7 @@ class LinkedFolderScanner(
         val pageCount = scanned.chapters.sumOf { it.locators.size }
         val coverUrl = when {
             scanned.coverLocator == null -> previous?.coverUrl.orEmpty()
-            resolver.hasCachedCover(mangaId) ->
-                previous?.coverUrl?.takeIf { it.isNotBlank() } ?: resolver.cachedCoverUrl(mangaId)
+            resolver.hasCachedCover(mangaId) -> resolver.cachedCoverUrl(mangaId)
             else -> resolver.cacheCoverThumbnail(mangaId, scanned.coverLocator)
                 ?: previous?.coverUrl.orEmpty()
         }
@@ -336,19 +378,12 @@ class LinkedFolderScanner(
             )
         }
 
-        val directImages = naturalByName(children.filter { it.isFile && isImage(it.name) })
-        if (directImages.isNotEmpty()) {
-            addChapter(
-                "@root-images",
-                "Bölüm 1",
-                directImages.map { LinkedPageLocator.document(it.uri.toString()) }
-            )
-        }
-
-        naturalByName(children.filter { it.isDirectory }).forEach { directory ->
+        naturalByName(children.filter { it.isDirectory && !isHiddenEntry(it.name) }).forEach { directory ->
             val folderName = directory.name?.trim().orEmpty().ifBlank { "Bölüm" }
             val folderChildren = listChildren(directory)
-            val images = naturalByName(folderChildren.filter { it.isFile && isImage(it.name) })
+            val allImages = naturalByName(folderChildren.filter { it.isFile && isImage(it.name) })
+            val nonCoverImages = allImages.filterNot { isCoverImage(it.name) }
+            val images = if (nonCoverImages.isNotEmpty()) nonCoverImages else allImages
             if (images.isNotEmpty()) {
                 onProgress("Bölüm taranıyor: $folderName")
                 addChapter(
@@ -380,6 +415,20 @@ class LinkedFolderScanner(
                     archiveLocators(archive)
                 )
             }
+        }
+
+        // Mihon local rule: cover.jpg/png/webp is strictly a cover image, never a chapter.
+        // Only group direct loose images into "Bölüm 1" when no other chapters exist or there are
+        // multiple real page images (prevents a stray thumbnail from creating a fake 1-page chapter).
+        val directImages = naturalByName(
+            children.filter { it.isFile && isImage(it.name) && !isCoverImage(it.name) }
+        )
+        if (directImages.isNotEmpty() && (chapters.isEmpty() || directImages.size >= 2)) {
+            addChapter(
+                "@root-images",
+                "Bölüm 1",
+                directImages.map { LinkedPageLocator.document(it.uri.toString()) }
+            )
         }
 
         val prefix = mangaRelativePath.takeIf { it.isNotBlank() }?.let { "$it/" }.orEmpty()
@@ -430,6 +479,34 @@ class LinkedFolderScanner(
 
     private fun isImage(name: String?): Boolean =
         name != null && LocalMangaImporter.isImageFileName(name)
+
+    private fun isCoverImage(name: String?): Boolean = isCoverImageName(name)
+
+    private fun isHiddenEntry(name: String?): Boolean = isHiddenEntryName(name)
+
+    companion object {
+        internal fun isCoverImageName(name: String?): Boolean {
+            val trimmed = name?.trim() ?: return false
+            if (!LocalMangaImporter.isImageFileName(trimmed)) return false
+            val base = trimmed.substringBeforeLast(".")
+            return base.equals("cover", ignoreCase = true)
+        }
+
+        internal fun isHiddenEntryName(name: String?): Boolean {
+            val trimmed = name?.trim() ?: return true
+            return trimmed.isEmpty() || trimmed.startsWith(".")
+        }
+
+        private val VOLUME_OR_CHAPTER_REGEX = Regex(
+            "^(vol\.?|volume|cilt|ch\.?|chapter|bölüm|bolum|part|book|season|ep\.?|episode|v|c)\s*\d+.*$",
+            RegexOption.IGNORE_CASE
+        )
+
+        internal fun isVolumeOrChapterFolderName(name: String?): Boolean {
+            val trimmed = name?.trim() ?: return false
+            return VOLUME_OR_CHAPTER_REGEX.matches(trimmed)
+        }
+    }
 
     private fun isArchive(name: String?): Boolean {
         val lower = name?.trim()?.lowercase() ?: return false

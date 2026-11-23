@@ -61,11 +61,12 @@ class BubbleLayoutGeometryTest {
     }
 
     @Test
-    fun `partially outside anchor is rejected instead of clipped`() {
+    fun `partially outside anchor unions with bubble via cover text region`() {
         val bubble = Rect(0, 0, 100, 100)
         val anchor = Rect(90, 90, 150, 150)
 
-        assertNull(BubbleLayoutGeometry.centeredLayoutBox(anchor, bubble))
+        val result = BubbleLayoutGeometry.centeredLayoutBox(anchor, bubble)
+        assertEquals(Rect(23, 23, 128, 128), result)
     }
 
     @Test

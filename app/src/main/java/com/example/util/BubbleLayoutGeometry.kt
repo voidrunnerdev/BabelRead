@@ -61,12 +61,16 @@ object BubbleLayoutGeometry {
      */
     fun centeredLayoutBox(anchor: Rect, bubble: Rect): Rect? {
         if (anchor.isEmpty || bubble.isEmpty) return null
-        if (!bubble.contains(anchor)) {
-            // A false, mismatched, or edge-crossing detector must not move or
-            // clip unrelated OCR text.
+        val effectiveBubble = if (bubble.contains(anchor)) {
+            bubble
+        } else if (Rect.intersects(bubble, anchor)) {
+            // BallonsTranslator _cover_text_region: merge protruding OCR anchor with bubble
+            // bounds so text region slightly crossing detected edges is safely included.
+            Rect(bubble).apply { union(anchor) }
+        } else {
             return null
         }
-        val oval = safeOval(bubble) ?: return null
+        val oval = safeOval(effectiveBubble) ?: return null
 
         val growsWidth = oval.width() >= anchor.width() * MIN_GROWTH_RATIO
         val growsHeight = oval.height() >= anchor.height() * MIN_GROWTH_RATIO
@@ -74,7 +78,7 @@ object BubbleLayoutGeometry {
 
         val layoutWidth = if (growsWidth) oval.width() else anchor.width()
         val layoutHeight = if (growsHeight) oval.height() else anchor.height()
-        return centeredInside(bubble, layoutWidth, layoutHeight)
+        return centeredInside(effectiveBubble, layoutWidth, layoutHeight)
     }
 
     /**

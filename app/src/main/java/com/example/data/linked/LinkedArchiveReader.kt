@@ -21,6 +21,7 @@ internal class LinkedArchiveReader private constructor(
     private val mmapSize: Long
 ) : Closeable {
     private val closed = AtomicBoolean(false)
+    private val lock = Any()
 
     companion object {
         private const val MAX_ENTRY_SIZE = 64L * 1024 * 1024
@@ -54,14 +55,15 @@ internal class LinkedArchiveReader private constructor(
                 }
                 return LinkedArchiveReader(archive, mmapAddress, mmapSize)
             } catch (t: Throwable) {
-                if (mmapAddress != 0L) runCatching { Os.munmap(mmapAddress, mmapSize) }
                 if (archive != 0L) runCatching { Archive.readFree(archive) }
+                if (mmapAddress != 0L) runCatching { Os.munmap(mmapAddress, mmapSize) }
                 throw t
             }
         }
     }
 
-    fun entries(): List<LinkedArchiveEntry> {
+    fun entries(): List<LinkedArchiveEntry> = synchronized(lock) {
+        if (closed.get()) return@synchronized emptyList()
         val result = ArrayList<LinkedArchiveEntry>()
         while (true) {
             val entry = Archive.readNextHeader(archive)
@@ -69,24 +71,26 @@ internal class LinkedArchiveReader private constructor(
             val name = ArchiveEntry.pathnameUtf8(entry)
                 ?: ArchiveEntry.pathname(entry)?.decodeToString()
                 ?: continue
-            val isFile = ArchiveEntry.filetype(entry) == ArchiveEntry.AE_IFREG ||
-                !name.endsWith("/")
+            val fileType = ArchiveEntry.filetype(entry)
+            val isFile = fileType == ArchiveEntry.AE_IFREG ||
+                (fileType == 0 && !name.endsWith("/"))
             result += LinkedArchiveEntry(name, isFile)
         }
-        return result
+        result
     }
 
-    fun readEntryBytes(entryName: String): ByteArray? {
+    fun readEntryBytes(entryName: String): ByteArray? = synchronized(lock) {
+        if (closed.get()) return@synchronized null
         while (true) {
             val entry = Archive.readNextHeader(archive)
-            if (entry == 0L) return null
+            if (entry == 0L) return@synchronized null
             val name = ArchiveEntry.pathnameUtf8(entry)
                 ?: ArchiveEntry.pathname(entry)?.decodeToString()
                 ?: continue
             if (name != entryName) continue
 
             val entrySize = ArchiveEntry.size(entry)
-            if (entrySize > MAX_ENTRY_SIZE) return null
+            if (entrySize > MAX_ENTRY_SIZE) return@synchronized null
             val initialCapacity = entrySize
                 .takeIf { it in 1L..Int.MAX_VALUE.toLong() }
                 ?.toInt()
@@ -94,22 +98,23 @@ internal class LinkedArchiveReader private constructor(
                 ?: 8192
             val output = ByteArrayOutputStream(initialCapacity)
             val buffer = ByteBuffer.allocateDirect(64 * 1024)
+            val chunk = ByteArray(64 * 1024)
             while (true) {
                 buffer.clear()
                 Archive.readData(archive, buffer)
                 buffer.flip()
-                if (!buffer.hasRemaining()) break
-                val chunk = ByteArray(buffer.remaining())
-                buffer.get(chunk)
-                output.write(chunk)
-                if (output.size().toLong() > MAX_ENTRY_SIZE) return null
+                val remaining = buffer.remaining()
+                if (remaining <= 0) break
+                buffer.get(chunk, 0, remaining)
+                output.write(chunk, 0, remaining)
+                if (output.size().toLong() > MAX_ENTRY_SIZE) return@synchronized null
             }
-            return output.toByteArray()
+            return@synchronized output.toByteArray()
         }
     }
 
-    override fun close() {
-        if (!closed.compareAndSet(false, true)) return
+    override fun close() = synchronized(lock) {
+        if (!closed.compareAndSet(false, true)) return@synchronized
         runCatching { Archive.readFree(archive) }
         if (mmapAddress != 0L) runCatching { Os.munmap(mmapAddress, mmapSize) }
     }

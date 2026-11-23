@@ -72,6 +72,9 @@ interface TranslationCacheDao {
     @Query("UPDATE translated_page_cache SET byteSize = :size WHERE chapterId = :chapterId AND pageIndex = :pageIndex")
     suspend fun updateByteSize(chapterId: String, pageIndex: Int, size: Long)
 
+    @Query("UPDATE translated_page_cache SET maskedPath = :maskedPath, byteSize = :size WHERE chapterId = :chapterId AND pageIndex = :pageIndex")
+    suspend fun updateMaskedPathAndSize(chapterId: String, pageIndex: Int, maskedPath: String, size: Long)
+
     @Query("DELETE FROM translated_page_cache WHERE chapterId = :chapterId AND pageIndex = :pageIndex")
     suspend fun deletePage(chapterId: String, pageIndex: Int)
 
@@ -80,6 +83,73 @@ interface TranslationCacheDao {
 
     @Query("DELETE FROM translated_page_cache WHERE createdAt < :cutoff")
     suspend fun deleteExpired(cutoff: Long): Int
+
+    @Query("UPDATE translated_page_cache SET createdAt = :accessedAt WHERE chapterId = :chapterId AND pageIndex = :pageIndex")
+    suspend fun touchPage(chapterId: String, pageIndex: Int, accessedAt: Long)
+
+    @Query("SELECT maskedPath FROM translated_page_cache WHERE substr(chapterId, 1, length(:chapterIdPrefix) + 1) = :chapterIdPrefix || '|'")
+    suspend fun pathsByChapterPrefix(chapterIdPrefix: String): List<String>
+
+    @Query("DELETE FROM translated_page_cache WHERE substr(chapterId, 1, length(:chapterIdPrefix) + 1) = :chapterIdPrefix || '|'")
+    suspend fun deleteByChapterPrefix(chapterIdPrefix: String)
+}
+
+object TranslationCacheUrlMatcher {
+
+    private val genericPageStemRegex = Regex(
+        "^(page|p|img|image|ch|chapter|scan)?[_-]?\\d{1,5}$",
+        RegexOption.IGNORE_CASE
+    )
+
+    /**
+     * Compares cached and current page URLs while tolerating rotating CDN query tokens
+     * (e.g. `?token=...`, `?expires=...`) and transient mirror hosts on remote HTTP(S) URLs.
+     * Generic filenames (`01.jpg`, `page_05.webp`) require the full URL path to match so
+     * re-uploaded chapters under a different directory do not collide with stale cache entries.
+     */
+    fun matches(cachedUrl: String, currentUrl: String): Boolean {
+        if (cachedUrl == currentUrl) return true
+        val normA = stripQueryAndFragment(cachedUrl)
+        val normB = stripQueryAndFragment(currentUrl)
+        if (normA == normB) return true
+        if (isRemoteHttp(normA) && isRemoteHttp(normB)) {
+            val pathA = extractPath(normA)
+            val pathB = extractPath(normB)
+            if (pathA.isNotBlank() && pathA == pathB) return true
+            val fileA = pathA.substringAfterLast('/')
+            val fileB = pathB.substringAfterLast('/')
+            if (fileA.isNotBlank() && fileA == fileB && !isGenericPageFileName(fileA)) {
+                return true
+            }
+        }
+        return false
+    }
+
+    internal fun isGenericPageFileName(fileName: String): Boolean {
+        val stem = fileName.substringBeforeLast('.', fileName).trim()
+        return stem.isEmpty() || genericPageStemRegex.matches(stem)
+    }
+
+    private fun extractPath(urlWithoutQuery: String): String {
+        val afterScheme = urlWithoutQuery.substringAfter("://", "")
+        val slashIdx = afterScheme.indexOf('/')
+        return if (slashIdx >= 0) afterScheme.substring(slashIdx) else ""
+    }
+
+    /**
+     * Strips query strings and fragments from remote HTTP(S) URLs before persisting to SQLite
+     * so signed CDN tokens are not stored in plaintext or synced via cloud backup.
+     */
+    fun sanitizeForStorage(url: String): String =
+        if (isRemoteHttp(url)) stripQueryAndFragment(url) else url
+
+    private fun stripQueryAndFragment(url: String): String {
+        val noHash = url.substringBefore('#')
+        return noHash.substringBefore('?')
+    }
+
+    private fun isRemoteHttp(url: String): Boolean =
+        url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)
 }
 
 object TranslationCacheCodec {

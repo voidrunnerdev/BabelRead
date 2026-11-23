@@ -61,10 +61,18 @@ class OverlayLayoutPolicyTest {
             )
         )
         assertEquals(
-            OverlayLayoutPolicy.SubtitleFitChoice.FALLBACK,
+            OverlayLayoutPolicy.SubtitleFitChoice.HYPHENATED,
             OverlayLayoutPolicy.chooseSubtitleFit(
                 original = OverlayLayoutPolicy.SubtitleFit(fitsInside = false, fontSizeSp = 10f),
                 hyphenated = OverlayLayoutPolicy.SubtitleFit(fitsInside = true, fontSizeSp = 7f),
+                minimum = OverlayLayoutPolicy.SubtitleFit(fitsInside = false, fontSizeSp = 6f)
+            )
+        )
+        assertEquals(
+            OverlayLayoutPolicy.SubtitleFitChoice.FALLBACK,
+            OverlayLayoutPolicy.chooseSubtitleFit(
+                original = OverlayLayoutPolicy.SubtitleFit(fitsInside = false, fontSizeSp = 10f),
+                hyphenated = OverlayLayoutPolicy.SubtitleFit(fitsInside = true, fontSizeSp = 5.5f),
                 minimum = OverlayLayoutPolicy.SubtitleFit(fitsInside = false, fontSizeSp = 6f)
             )
         )

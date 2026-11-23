@@ -50,6 +50,7 @@ class PpOcrV5Detector(context: Context) {
 
     private val appContext = context.applicationContext
     private val sessionMutex = Mutex()
+    private val sessionLock = Any()
 
     @Volatile
     private var ortEnv: OrtEnvironment? = null
@@ -59,6 +60,9 @@ class PpOcrV5Detector(context: Context) {
 
     @Volatile
     private var initFailed = false
+
+    @Volatile
+    private var isClosed = false
 
     fun isReady(): Boolean = session != null || ensureInitialized()
 
@@ -142,6 +146,7 @@ class PpOcrV5Detector(context: Context) {
                     DetectedLine(Rect(left, top, right, bottom), box.score)
                 }
             } catch (t: Throwable) {
+                if (t is kotlinx.coroutines.CancellationException) throw t
                 Log.w(TAG, "PP-OCRv5 detector inference failed: ${t.message}")
                 emptyList()
             }
@@ -152,55 +157,69 @@ class PpOcrV5Detector(context: Context) {
         width: Int,
         height: Int
     ): DetectionMap = sessionMutex.withLock {
-        val session = session ?: return@withLock DetectionMap(emptyList(), width, height)
-        val env = ortEnv ?: OrtEnvironment.getEnvironment().also { ortEnv = it }
+        synchronized(sessionLock) {
+            if (isClosed) return@synchronized DetectionMap(emptyList(), width, height)
+            val activeSession = session ?: return@synchronized DetectionMap(emptyList(), width, height)
+            val env = ortEnv ?: OrtEnvironment.getEnvironment().also { ortEnv = it }
 
-        OnnxTensor.createTensor(
-            env,
-            tensor,
-            longArrayOf(1, 3, height.toLong(), width.toLong())
-        ).use { input ->
-            session.run(mapOf(session.inputNames.first() to input)).use { result ->
-                val output = result.get(0) as? OnnxTensor
-                    ?: return@withLock DetectionMap(emptyList(), width, height)
-                val shape = output.info.shape
-                if (shape.size != 4 || shape[1] != 1L) {
-                    return@withLock DetectionMap(emptyList(), width, height)
-                }
-                val mapHeight = shape[2].toInt()
-                val mapWidth = shape[3].toInt()
-                if (mapHeight <= 0 || mapWidth <= 0) {
-                    return@withLock DetectionMap(emptyList(), width, height)
-                }
+            OnnxTensor.createTensor(
+                env,
+                tensor,
+                longArrayOf(1, 3, height.toLong(), width.toLong())
+            ).use { input ->
+                activeSession.run(mapOf(activeSession.inputNames.first() to input)).use { result ->
+                    val output = result.get(0) as? OnnxTensor
+                        ?: return@synchronized DetectionMap(emptyList(), width, height)
+                    val shape = output.info.shape
+                    if (shape.size != 4 || shape[1] != 1L) {
+                        return@synchronized DetectionMap(emptyList(), width, height)
+                    }
+                    val mapHeight = shape[2].toInt()
+                    val mapWidth = shape[3].toInt()
+                    if (mapHeight <= 0 || mapWidth <= 0) {
+                        return@synchronized DetectionMap(emptyList(), width, height)
+                    }
 
-                val raw = output.floatBuffer
-                raw.rewind()
-                val values = FloatArray(mapWidth * mapHeight)
-                val available = min(raw.remaining(), values.size)
-                raw.get(values, 0, available)
-                DetectionMap(
-                    PpOcrV5DetPostProcess.detectBoxes(
-                        values,
+                    val raw = output.floatBuffer
+                    raw.rewind()
+                    val values = FloatArray(mapWidth * mapHeight)
+                    val available = min(raw.remaining(), values.size)
+                    raw.get(values, 0, available)
+                    DetectionMap(
+                        PpOcrV5DetPostProcess.detectBoxes(
+                            values,
+                            mapWidth,
+                            mapHeight,
+                            threshold = DET_THRESHOLD,
+                            boxThreshold = BOX_THRESHOLD,
+                            unclipRatio = UNCLIP_RATIO,
+                            minSize = MIN_BOX_SIZE,
+                            maxCandidates = MAX_CANDIDATES,
+                            nmsThreshold = NMS_THRESHOLD
+                        ),
                         mapWidth,
-                        mapHeight,
-                        threshold = DET_THRESHOLD,
-                        boxThreshold = BOX_THRESHOLD,
-                        unclipRatio = UNCLIP_RATIO,
-                        minSize = MIN_BOX_SIZE,
-                        maxCandidates = MAX_CANDIDATES,
-                        nmsThreshold = NMS_THRESHOLD
-                    ),
-                    mapWidth,
-                    mapHeight
-                )
+                        mapHeight
+                    )
+                }
             }
         }
     }
 
+    fun close() {
+        synchronized(sessionLock) {
+            isClosed = true
+            val old = session
+            session = null
+            runCatching { old?.close() }
+        }
+    }
+
     private fun ensureInitialized(): Boolean {
+        if (isClosed) return false
         if (session != null) return true
         if (initFailed) return false
-        synchronized(this) {
+        synchronized(sessionLock) {
+            if (isClosed) return false
             if (session != null) return true
             if (initFailed) return false
             try {
@@ -269,7 +288,7 @@ internal object PpOcrV5DetPreprocess {
         if (width <= 0 || height <= 0 || limitSide <= 0) {
             return intArrayOf(STRIDE, STRIDE)
         }
-        val ratio = limitSide.toFloat() / max(width, height)
+        val ratio = min(1f, limitSide.toFloat() / max(width, height))
         val resizedWidth = ((width * ratio) / STRIDE).roundToInt() * STRIDE
         val resizedHeight = ((height * ratio) / STRIDE).roundToInt() * STRIDE
         return intArrayOf(

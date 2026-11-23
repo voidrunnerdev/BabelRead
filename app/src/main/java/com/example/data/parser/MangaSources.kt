@@ -184,6 +184,8 @@ object NetworkManager {
                 java.io.ByteArrayInputStream(bytes)
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: CloudflareChallengeException) {
+                throw e
             } catch (e: Exception) {
                 null
             }

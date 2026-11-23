@@ -67,7 +67,7 @@ class TextLineSegmenter {
         } catch (_: Throwable) {
             return singleLine(pageRect, originLanguage, forceVertical, forceHorizontal)
         } finally {
-            crop.recycle()
+            if (crop !== bitmap && !crop.isRecycled) crop.recycle()
         }
 
         val gray = IntArray(pixels.size) { index ->
@@ -123,10 +123,12 @@ class TextLineSegmenter {
         val bounded = coalesceLines(filtered)
         val result = bounded.map { line ->
             val rect = Rect(line.rect)
-            if (!rect.intersect(0, 0, bitmap.width, bitmap.height)) {
+            val clamped = if (rect.intersect(0, 0, bitmap.width, bitmap.height)) {
+                rect
+            } else {
                 Rect(pageRect)
             }
-            SegmentedTextLine(rect, line.vertical)
+            SegmentedTextLine(clamped, line.vertical)
         }.filter { !it.rect.isEmpty }
 
         return result.ifEmpty {

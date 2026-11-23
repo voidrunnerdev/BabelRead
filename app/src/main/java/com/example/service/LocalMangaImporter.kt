@@ -19,6 +19,8 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.UUID
@@ -73,8 +75,53 @@ class LocalMangaImporter(
     private val mangaDao: MangaDao,
     private val chapterDao: ChapterDao
 ) {
+    internal class BoundedOutputStream(
+        private val delegate: OutputStream,
+        private val maxBytes: Long
+    ) : OutputStream() {
+        var bytesWritten: Long = 0L
+            private set
+
+        override fun write(b: Int) {
+            if (bytesWritten + 1L > maxBytes) {
+                throw IOException("Arşiv güvenlik sınırını aşıyor (en fazla ${MAX_ARCHIVE_UNCOMPRESSED_BYTES / (1024 * 1024)} MB).")
+            }
+            delegate.write(b)
+            bytesWritten += 1L
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            if (len <= 0) return
+            if (bytesWritten + len.toLong() > maxBytes) {
+                throw IOException("Arşiv güvenlik sınırını aşıyor (en fazla ${MAX_ARCHIVE_UNCOMPRESSED_BYTES / (1024 * 1024)} MB).")
+            }
+            delegate.write(b, off, len)
+            bytesWritten += len.toLong()
+        }
+
+        override fun flush() = delegate.flush()
+        override fun close() = delegate.close()
+    }
+
     companion object {
         private const val TAG = "LocalMangaImporter"
+        internal const val MAX_ARCHIVE_ENTRIES = 4000
+        internal const val MAX_ARCHIVE_UNCOMPRESSED_BYTES = 1_500_000_000L
+
+        internal fun copyBounded(input: InputStream, output: OutputStream, maxBytes: Long): Long {
+            val buffer = ByteArray(16 * 1024)
+            var total = 0L
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                total += read.toLong()
+                if (total > maxBytes) {
+                    throw IOException("Arşiv güvenlik sınırını aşıyor (en fazla ${MAX_ARCHIVE_UNCOMPRESSED_BYTES / (1024 * 1024)} MB).")
+                }
+                output.write(buffer, 0, read)
+            }
+            return total
+        }
 
         fun isImageFileName(name: String): Boolean {
             val lower = name.lowercase().trim()
@@ -457,12 +504,24 @@ class LocalMangaImporter(
                     .filter { !it.isDirectory && isImageFileName(it.name) }
                     .sortedWith { a, b -> NaturalOrderComparator.compare(a.name, b.name) }
                     .toList()
+                if (entries.size > MAX_ARCHIVE_ENTRIES) {
+                    throw IOException("Arşiv güvenlik sınırını aşıyor (en fazla $MAX_ARCHIVE_ENTRIES sayfa).")
+                }
                 var counter = 1
+                var totalExtractedBytes = 0L
                 entries.forEach { entry ->
+                    val declaredSize = entry.size
+                    if (declaredSize > 0 && totalExtractedBytes + declaredSize > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+                        throw IOException("Arşiv güvenlik sınırını aşıyor (en fazla ${MAX_ARCHIVE_UNCOMPRESSED_BYTES / (1024 * 1024)} MB).")
+                    }
                     val (chapterKey, destFile) = archiveEntryDestination(entry.name, baseDir, counter)
                     archive.getInputStream(entry).use { inStream ->
                         FileOutputStream(destFile).use { outStream ->
-                            inStream.copyTo(outStream)
+                            totalExtractedBytes += copyBounded(
+                                input = inStream,
+                                output = outStream,
+                                maxBytes = MAX_ARCHIVE_UNCOMPRESSED_BYTES - totalExtractedBytes
+                            )
                         }
                     }
                     chapterPagesMap.getOrPut(chapterKey) { mutableListOf() }.add(destFile)
@@ -473,15 +532,25 @@ class LocalMangaImporter(
             ZipInputStream(zipFileOnDisk.inputStream().buffered()).use { zis ->
                 var entry = zis.nextEntry
                 var counter = 1
-                val buf = ByteArray(8192)
+                var entryCount = 0
+                var totalExtractedBytes = 0L
                 while (entry != null) {
                     if (!entry.isDirectory && isImageFileName(entry.name)) {
+                        entryCount++
+                        if (entryCount > MAX_ARCHIVE_ENTRIES) {
+                            throw IOException("Arşiv güvenlik sınırını aşıyor (en fazla $MAX_ARCHIVE_ENTRIES sayfa).")
+                        }
+                        val declaredSize = entry.size
+                        if (declaredSize > 0 && totalExtractedBytes + declaredSize > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+                            throw IOException("Arşiv güvenlik sınırını aşıyor (en fazla ${MAX_ARCHIVE_UNCOMPRESSED_BYTES / (1024 * 1024)} MB).")
+                        }
                         val (chapterKey, destFile) = archiveEntryDestination(entry.name, baseDir, counter)
                         FileOutputStream(destFile).use { fos ->
-                            var len: Int
-                            while (zis.read(buf).also { len = it } > 0) {
-                                fos.write(buf, 0, len)
-                            }
+                            totalExtractedBytes += copyBounded(
+                                input = zis,
+                                output = fos,
+                                maxBytes = MAX_ARCHIVE_UNCOMPRESSED_BYTES - totalExtractedBytes
+                            )
                         }
                         chapterPagesMap.getOrPut(chapterKey) { mutableListOf() }.add(destFile)
                         counter++
@@ -503,11 +572,24 @@ class LocalMangaImporter(
             val headers = archive.fileHeaders
                 .filter { !it.isDirectory && isImageFileName(it.fileName) }
                 .sortedWith { a, b -> NaturalOrderComparator.compare(a.fileName, b.fileName) }
+            if (headers.size > MAX_ARCHIVE_ENTRIES) {
+                throw IOException("Arşiv güvenlik sınırını aşıyor (en fazla $MAX_ARCHIVE_ENTRIES sayfa).")
+            }
             var counter = 1
+            var totalExtractedBytes = 0L
             headers.forEach { header ->
+                val declaredSize = header.fullUnpackSize
+                if (declaredSize > 0 && totalExtractedBytes + declaredSize > MAX_ARCHIVE_UNCOMPRESSED_BYTES) {
+                    throw IOException("Arşiv güvenlik sınırını aşıyor (en fazla ${MAX_ARCHIVE_UNCOMPRESSED_BYTES / (1024 * 1024)} MB).")
+                }
                 val (chapterKey, destFile) = archiveEntryDestination(header.fileName, baseDir, counter)
                 FileOutputStream(destFile).use { fos ->
-                    archive.extractFile(header, fos)
+                    val bounded = BoundedOutputStream(
+                        delegate = fos,
+                        maxBytes = MAX_ARCHIVE_UNCOMPRESSED_BYTES - totalExtractedBytes
+                    )
+                    archive.extractFile(header, bounded)
+                    totalExtractedBytes += bounded.bytesWritten
                 }
                 chapterPagesMap.getOrPut(chapterKey) { mutableListOf() }.add(destFile)
                 counter++
@@ -534,14 +616,14 @@ class LocalMangaImporter(
                     var bitmap: Bitmap? = null
                     try {
                         val maxDim = 2048
-                        val maxPageDim = maxOf(page.width, page.height)
+                        val maxPageDim = maxOf(page.width, page.height).coerceAtLeast(1)
                         val scale = if (maxPageDim * 2 > maxDim) {
-                            (maxDim.toFloat() / maxPageDim.toFloat()).coerceAtLeast(1.0f)
+                            (maxDim.toFloat() / maxPageDim.toFloat()).coerceAtMost(2.0f)
                         } else {
                             2.0f
                         }
-                        val width = (page.width * scale).toInt().coerceAtLeast(1)
-                        val height = (page.height * scale).toInt().coerceAtLeast(1)
+                        val width = (page.width * scale).toInt().coerceIn(1, maxDim)
+                        val height = (page.height * scale).toInt().coerceIn(1, maxDim)
                         bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                         bitmap.eraseColor(Color.WHITE)
                         page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
@@ -552,22 +634,27 @@ class LocalMangaImporter(
                         }
                         pageList.add(pageFile)
                     } catch (oom: OutOfMemoryError) {
+                        var lowBmp: Bitmap? = null
                         try {
                             bitmap?.recycle()
-                            val lowScale = 1.0f
-                            val lowW = page.width
-                            val lowH = page.height
-                            val lowBmp = Bitmap.createBitmap(lowW, lowH, Bitmap.Config.RGB_565)
+                            bitmap = null
+                            val lowMaxDim = 1024
+                            val lowPageDim = maxOf(page.width, page.height).coerceAtLeast(1)
+                            val lowScale = (lowMaxDim.toFloat() / lowPageDim.toFloat()).coerceAtMost(1.0f)
+                            val lowW = (page.width * lowScale).toInt().coerceIn(1, lowMaxDim)
+                            val lowH = (page.height * lowScale).toInt().coerceIn(1, lowMaxDim)
+                            lowBmp = Bitmap.createBitmap(lowW, lowH, Bitmap.Config.ARGB_8888)
                             lowBmp.eraseColor(Color.WHITE)
                             page.render(lowBmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                             val pageFile = File(chapterDir, "p_${String.format("%04d", i + 1)}.jpg")
                             FileOutputStream(pageFile).use { fos ->
                                 lowBmp.compress(Bitmap.CompressFormat.JPEG, 85, fos)
                             }
-                            lowBmp.recycle()
                             pageList.add(pageFile)
                         } catch (_: Throwable) {
                             // Skip page if device has critically low RAM
+                        } finally {
+                            if (lowBmp != null && !lowBmp.isRecycled) lowBmp.recycle()
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "Error rendering PDF page $i", e)

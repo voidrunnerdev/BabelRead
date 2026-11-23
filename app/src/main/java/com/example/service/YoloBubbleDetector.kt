@@ -573,6 +573,10 @@ class YoloBubbleDetector(context: Context) {
                 Pair(false, importError)
             }
         } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) {
+                if (tempFile.exists()) tempFile.delete()
+                throw e
+            }
             val msg = e.localizedMessage ?: e.message ?: e.toString()
             Log.e(TAG, "Model yükleme hatası: $msg", e)
             lastInitializationError = msg
@@ -587,6 +591,7 @@ class YoloBubbleDetector(context: Context) {
                 ?: return@withContext Pair(false, "Seçilen dosya açılamadı.")
             inputStream.use { importModelFile(it) }
         } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
             val msg = e.localizedMessage ?: e.message ?: e.toString()
             lastInitializationError = msg
             Pair(false, msg)
@@ -597,6 +602,8 @@ class YoloBubbleDetector(context: Context) {
         synchronized(sessionLock) {
             verifiedBundledClassMap = false
             dynamicClassNames = emptyMap()
+            cachedFloatArray = null
+            cachedPixelArray = null
             try {
                 val oldSession = ortSession
                 ortSession = null
@@ -742,25 +749,28 @@ class YoloBubbleDetector(context: Context) {
                 if (tile == null) {
                     lastInferenceError = "Dikey görüntü tile'ı oluşturulamadı (y=$y)."
                 } else {
-                    val tileDets = runOnnxInference(tile, confidenceThreshold)
-                    for (det in tileDets) {
-                        val normL = det.box.left
-                        val normR = det.box.right
-                        val normT = (det.box.top * h + y) / origH.toFloat()
-                        val normB = (det.box.bottom * h + y) / origH.toFloat()
-                        allDetections.add(
-                            TileDetection(
-                                detection = det.copy(box = RectF(normL, normT, normR, normB)),
-                                tileRow = tileRow,
-                                tileColumn = 0,
-                                touchesTop = det.box.top <= 0.015f,
-                                touchesBottom = det.box.bottom >= 0.985f,
-                                touchesLeft = false,
-                                touchesRight = false
+                    try {
+                        val tileDets = runOnnxInference(tile, confidenceThreshold)
+                        for (det in tileDets) {
+                            val normL = det.box.left
+                            val normR = det.box.right
+                            val normT = (det.box.top * h + y) / origH.toFloat()
+                            val normB = (det.box.bottom * h + y) / origH.toFloat()
+                            allDetections.add(
+                                TileDetection(
+                                    detection = det.copy(box = RectF(normL, normT, normR, normB)),
+                                    tileRow = tileRow,
+                                    tileColumn = 0,
+                                    touchesTop = det.box.top <= 0.015f,
+                                    touchesBottom = det.box.bottom >= 0.985f,
+                                    touchesLeft = false,
+                                    touchesRight = false
+                                )
                             )
-                        )
+                        }
+                    } finally {
+                        if (tile !== bitmap && !tile.isRecycled) tile.recycle()
                     }
-                    if (tile !== bitmap && !tile.isRecycled) tile.recycle()
                 }
                 tileRow++
                 if (y + h >= origH) break
@@ -920,7 +930,7 @@ class YoloBubbleDetector(context: Context) {
                 val logitsOpt = logitsName?.let { results.get(it) }
                 val labelsOpt = labelsName?.let { results.get(it) }
 
-                val boxesTensor = boxesOpt.get() as? OnnxTensor
+                val boxesTensor = boxesOpt.takeIf { it.isPresent }?.get() as? OnnxTensor
                 val scoresTensor = scoresOpt?.takeIf { it.isPresent }?.get() as? OnnxTensor
                 val logitsTensor = logitsOpt?.takeIf { it.isPresent }?.get() as? OnnxTensor
                 val labelsTensor = labelsOpt?.takeIf { it.isPresent }?.get() as? OnnxTensor
@@ -987,17 +997,20 @@ class YoloBubbleDetector(context: Context) {
                                     (1.0 / (1.0 + kotlin.math.exp(-maxForegroundLogit.toDouble()))).toFloat()
                                 } else 0f
                             } else {
-                                for (classIndex in 0 until usableClassCount) {
-                                    maxAllLogit = max(
-                                        maxAllLogit,
-                                        logitsData[detection * logitsPerDetection + classIndex]
-                                    )
+                                for (classIndex in 0 until logitsPerDetection) {
+                                    val logit = logitsData[detection * logitsPerDetection + classIndex]
+                                    if (logit.isFinite()) {
+                                        maxAllLogit = max(maxAllLogit, logit)
+                                    }
                                 }
                                 var denominator = 0.0
-                                for (classIndex in 0 until usableClassCount) {
-                                    denominator += kotlin.math.exp(
-                                        (logitsData[detection * logitsPerDetection + classIndex] - maxAllLogit).toDouble()
-                                    )
+                                if (maxAllLogit.isFinite()) {
+                                    for (classIndex in 0 until logitsPerDetection) {
+                                        val logit = logitsData[detection * logitsPerDetection + classIndex]
+                                        if (logit.isFinite()) {
+                                            denominator += kotlin.math.exp((logit - maxAllLogit).toDouble())
+                                        }
+                                    }
                                 }
                                 sData[detection] = if (denominator > 0.0 && maxForegroundLogit.isFinite()) {
                                     (kotlin.math.exp((maxForegroundLogit - maxAllLogit).toDouble()) / denominator).toFloat()

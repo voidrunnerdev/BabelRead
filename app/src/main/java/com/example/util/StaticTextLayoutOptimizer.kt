@@ -65,7 +65,7 @@ object StaticTextLayoutOptimizer {
         text: String,
         // Bounds are in dp; density converts them to the px used by StaticLayout.
         bounds: RectF,
-        minSp: Float = 5.0f,
+        minSp: Float = 8.0f,
         maxSp: Float = 14.0f,
         density: Float,
         spToPx: (Float) -> Float,
@@ -73,7 +73,8 @@ object StaticTextLayoutOptimizer {
         isOvalBubble: Boolean = true,
         measureTypeface: Typeface? = null,
         allowBrokenWords: Boolean = false,
-        textDirection: TextLayoutLocale.Direction = TextLayoutLocale.Direction.LTR
+        textDirection: TextLayoutLocale.Direction = TextLayoutLocale.Direction.LTR,
+        textScaleX: Float = 1.0f
     ): OptimizedLayoutResult {
         require(minSp.isFinite() && maxSp.isFinite() && minSp > 0f && maxSp >= minSp) {
             "Font size range must be finite, positive, and ordered"
@@ -88,29 +89,33 @@ object StaticTextLayoutOptimizer {
             .split('\n')
             .joinToString("\n") { line -> WHITESPACE_REGEX.replace(line, " ").trim() }
             .trim()
-        val widthDp = bounds.width().coerceAtLeast(1f)
-        val heightDp = bounds.height().coerceAtLeast(1f)
-        val targetWidthPx = widthDp * density
-        val targetHeightPx = heightDp * density
-        if (cleanText.isEmpty()) {
+        val finiteBounds = bounds.left.isFinite() && bounds.top.isFinite() &&
+            bounds.right.isFinite() && bounds.bottom.isFinite() && density.isFinite() && density > 0f
+        if (!finiteBounds || cleanText.isEmpty()) {
             return OptimizedLayoutResult(
                 fontSizeSp = maxSp,
                 lineSpacingMultiplier = BASE_LINE_SPACING,
-                letterSpacing = BASE_LETTER_SPACING,
+                letterSpacing = if (textDirection == TextLayoutLocale.Direction.RTL) 0f else BASE_LETTER_SPACING,
                 lineCount = 0,
                 totalHeightPx = 0f,
                 maxLineWidthPx = 0f,
-                fitsInside = true,
+                fitsInside = cleanText.isEmpty(),
                 requiredWidthDp = 0f,
                 staticLayout = null
             )
         }
+        val widthDp = bounds.width().coerceAtLeast(1f)
+        val heightDp = bounds.height().coerceAtLeast(1f)
+        val targetWidthPx = widthDp * density
+        val targetHeightPx = heightDp * density
 
+        val safeScaleX = if (textScaleX.isFinite()) textScaleX.coerceIn(0.75f, 1.0f) else 1.0f
         val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
             typeface = measureTypeface ?: Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             letterSpacing = BASE_LETTER_SPACING
             textLocale = layoutLocale
+            this.textScaleX = safeScaleX
         }
 
         // Binary search a large fitting font size. This is approximately monotonic;
@@ -134,7 +139,13 @@ object StaticTextLayoutOptimizer {
             // remain no harder to fit when the search crosses this threshold.
             val isNearMinimum = candidateSp <= minSp + TIGHT_SP_THRESHOLD
             val candidateLineSpacing = if (isNearMinimum) TIGHT_LINE_SPACING else BASE_LINE_SPACING
-            val candidateLetterSpacing = if (isNearMinimum) TIGHT_LETTER_SPACING else BASE_LETTER_SPACING
+            val candidateLetterSpacing = if (textDirection == TextLayoutLocale.Direction.RTL) {
+                0f
+            } else if (isNearMinimum) {
+                TIGHT_LETTER_SPACING
+            } else {
+                BASE_LETTER_SPACING
+            }
 
             // StaticLayout may keep the supplied paint for later drawing. Give every
             // candidate its own instance so later measurements cannot alter an earlier layout.
@@ -174,11 +185,36 @@ object StaticTextLayoutOptimizer {
             // With allowBrokenWords, a mid-word break (hyphenated or emergency) is
             // tolerated only when the broken piece still fills most of the line; that
             // rejects ugly single-glyph fragments while letting long words split.
+            val isTurkishLocale = layoutLocale.language.equals("tr", ignoreCase = true)
             var hasIllegalLineBreak = false
             for (line in 0 until (layout.lineCount - 1).coerceAtLeast(0)) {
                 val lineEnd = layout.getLineEnd(line)
-                if (lineEnd < cleanText.length && !lineBreakIterator.isBoundary(lineEnd)) {
-                    if (!allowBrokenWords || layout.getLineWidth(line) < targetWidthPx * 0.55f {
+                val endsWithSoftHyphen = lineEnd > 0 && cleanText.getOrNull(lineEnd - 1) == TurkishSyllabifier.SOFT_HYPHEN
+                if (lineEnd < cleanText.length && !endsWithSoftHyphen && !lineBreakIterator.isBoundary(lineEnd)) {
+                    // Reject unhyphenated mid-word character chops (e.g. "SUNU / Z?" or "Ta / nrım!")
+                    // whenever the broken word itself has Turkish soft hyphens, or when fewer than 2
+                    // letters remain on either side of the emergency break.
+                    var wordHasSoftHyphen = false
+                    var lettersBefore = 0
+                    var bi = lineEnd - 1
+                    while (bi >= 0 && !cleanText[bi].isWhitespace()) {
+                        if (cleanText[bi] == TurkishSyllabifier.SOFT_HYPHEN) wordHasSoftHyphen = true
+                        else if (cleanText[bi].isLetter() && lettersBefore < 2) lettersBefore++
+                        bi--
+                    }
+                    var lettersAfter = 0
+                    var ai = lineEnd
+                    while (ai < cleanText.length && !cleanText[ai].isWhitespace()) {
+                        if (cleanText[ai] == TurkishSyllabifier.SOFT_HYPHEN) wordHasSoftHyphen = true
+                        else if (cleanText[ai].isLetter() && lettersAfter < 2) lettersAfter++
+                        ai++
+                    }
+                    if (!allowBrokenWords ||
+                        (isTurkishLocale && wordHasSoftHyphen) ||
+                        lettersBefore < 2 ||
+                        lettersAfter < 2 ||
+                        layout.getLineWidth(line) < targetWidthPx * 0.55f
+                    ) {
                         hasIllegalLineBreak = true
                         break
                     }
@@ -263,7 +299,7 @@ object StaticTextLayoutOptimizer {
                 .setBreakStrategy(StaticLayout.BREAK_STRATEGY_BALANCED)
                 .setHyphenationFrequency(
                     if (hyphenation) {
-                        StaticLayout.HYPHENATION_FREQUENCY_NORMAL
+                        StaticLayout.HYPHENATION_FREQUENCY_FULL
                     } else {
                         StaticLayout.HYPHENATION_FREQUENCY_NONE
                     }

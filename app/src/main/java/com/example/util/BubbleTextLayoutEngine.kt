@@ -1,6 +1,7 @@
 package com.example.util
 
 import android.graphics.Paint
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.text.TextPaint
@@ -17,7 +18,8 @@ object BubbleTextLayoutEngine {
         bubbleBounds: RectF,
         horizontalPaddingDp: Float,
         verticalPaddingDp: Float,
-        density: Float
+        density: Float,
+        contourProfile: ContourScanlineProfile? = null
     ): BubbleLineEnvelope? {
         if (!density.isFinite() || density <= 0f) return null
         if (bubbleBounds.width() <= 0f || bubbleBounds.height() <= 0f) return null
@@ -38,7 +40,8 @@ object BubbleTextLayoutEngine {
             bubbleHeightPx = bubbleHeightPx,
             horizontalPaddingPx = horizontalPaddingDp * density,
             verticalPaddingPx = verticalPaddingDp * density,
-            safeInsetPx = inset
+            safeInsetPx = inset,
+            contourProfile = contourProfile
         )
     }
 
@@ -53,22 +56,29 @@ object BubbleTextLayoutEngine {
         spToPx: (Float) -> Float,
         layoutLocale: Locale,
         targetLanguage: String?,
-        measureTypeface: Typeface?
+        measureTypeface: Typeface?,
+        allowBrokenWords: Boolean = false,
+        textScaleX: Float = 1.0f,
+        contourProfile: ContourScanlineProfile? = null
     ): StaticTextLayoutOptimizer.OptimizedLayoutResult? {
         if (!BubbleTextScriptPolicy.isSafe(targetLanguage, text)) return null
         val envelope = envelopeForBubble(
             bubbleBounds = bubbleBounds,
             horizontalPaddingDp = horizontalPaddingDp,
             verticalPaddingDp = verticalPaddingDp,
-            density = density
+            density = density,
+            contourProfile = contourProfile
         ) ?: return null
 
+        val safeScaleX = if (textScaleX.isFinite()) textScaleX.coerceIn(0.75f, 1.0f) else 1.0f
         val basePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
             typeface = measureTypeface ?: Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
             textLocale = layoutLocale
             letterSpacing = LETTER_SPACING
+            this.textScaleX = safeScaleX
         }
         val measurementPaint = TextPaint(basePaint)
+        val tmpBounds = Rect()
         val measurer = BubbleTextMeasurer(
             measureWidth = { line, textSizePx ->
                 measurementPaint.textSize = textSizePx
@@ -78,6 +88,11 @@ object BubbleTextLayoutEngine {
                 measurementPaint.textSize = textSizePx
                 val fontMetrics = measurementPaint.fontMetrics
                 TextLineMetrics(fontMetrics.ascent, fontMetrics.descent)
+            },
+            visualBoundsForLine = { line, textSizePx ->
+                measurementPaint.textSize = textSizePx
+                measurementPaint.getTextBounds(line, 0, line.length, tmpBounds)
+                tmpBounds.top.toFloat() to tmpBounds.bottom.toFloat()
             }
         )
 
@@ -89,7 +104,8 @@ object BubbleTextLayoutEngine {
             maxSp = maxSp,
             spToPx = spToPx,
             measurer = measurer,
-            density = density
+            density = density,
+            allowBrokenWords = allowBrokenWords
         )
         val layout = fit.layout ?: return null
         if (!fit.fitsInside || layout.lines.isEmpty()) return null
@@ -98,6 +114,7 @@ object BubbleTextLayoutEngine {
             textSize = fit.fontSizePx
             textLocale = layoutLocale
             letterSpacing = LETTER_SPACING
+            this.textScaleX = safeScaleX
         }
         return StaticTextLayoutOptimizer.OptimizedLayoutResult(
             fontSizeSp = fit.fontSizeSp,

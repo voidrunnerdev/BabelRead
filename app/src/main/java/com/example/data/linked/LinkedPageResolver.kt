@@ -55,7 +55,7 @@ class LinkedPageResolver(private val context: Context) {
                 bitmap
             }
             thumbnail = outputBitmap
-            val dir = File(context.cacheDir, COVER_DIR).apply { mkdirs() }
+            val dir = File(context.filesDir, COVER_DIR).apply { mkdirs() }
             val file = File(dir, "$mangaId.jpg")
             val temp = File(dir, "$mangaId.jpg.tmp")
             try {
@@ -86,11 +86,37 @@ class LinkedPageResolver(private val context: Context) {
 
     fun cachedCoverUrl(mangaId: String): String = "file://${coverFile(mangaId).absolutePath}"
 
-    fun deleteCachedCover(mangaId: String) {
-        runCatching { coverFile(mangaId).delete() }
+    fun isCoverFileUsable(coverUrl: String): Boolean {
+        if (!coverUrl.startsWith("file://")) return false
+        val file = File(coverUrl.removePrefix("file://"))
+        if (!file.isFile || file.length() <= 0L) return false
+        val persistentRoot = runCatching { File(context.filesDir, COVER_DIR).canonicalPath }.getOrNull()
+            ?: return false
+        val canonical = runCatching { file.canonicalPath }.getOrNull() ?: return false
+        val rootWithSep = if (persistentRoot.endsWith(File.separator)) persistentRoot else persistentRoot + File.separator
+        return canonical.startsWith(rootWithSep)
     }
 
-    private fun coverFile(mangaId: String): File = File(File(context.cacheDir, COVER_DIR), "$mangaId.jpg")
+    fun migrateLegacyCoverIfPresent(mangaId: String): String? {
+        val legacy = legacyCoverFile(mangaId)
+        if (!legacy.isFile || legacy.length() <= 0L) return null
+        val target = coverFile(mangaId)
+        target.parentFile?.mkdirs()
+        return runCatching {
+            legacy.copyTo(target, overwrite = true)
+            runCatching { legacy.delete() }
+            "file://${target.absolutePath}"
+        }.getOrNull()
+    }
+
+    fun deleteCachedCover(mangaId: String) {
+        runCatching { coverFile(mangaId).delete() }
+        runCatching { legacyCoverFile(mangaId).delete() }
+    }
+
+    private fun coverFile(mangaId: String): File = File(File(context.filesDir, COVER_DIR), "$mangaId.jpg")
+
+    private fun legacyCoverFile(mangaId: String): File = File(File(context.cacheDir, COVER_DIR), "$mangaId.jpg")
 
     private fun decodeDocument(
         uriString: String,

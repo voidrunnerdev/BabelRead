@@ -120,15 +120,15 @@ fun LanguagePickerDialog(
                 )
                 Spacer(modifier = Modifier.height(AppSpacing.sm))
 
-                val normalizedQuery = query.trim().lowercase()
+                val normalizedQuery = query.trim().lowercase(java.util.Locale.ROOT)
                 val filtered = remember(options, normalizedQuery) {
                     if (normalizedQuery.isEmpty()) {
                         options
                     } else {
                         options.filter { option ->
-                            option.title.lowercase().contains(normalizedQuery) ||
-                                option.code.lowercase().contains(normalizedQuery) ||
-                                option.nativeName.orEmpty().lowercase().contains(normalizedQuery)
+                            option.title.lowercase(java.util.Locale.ROOT).contains(normalizedQuery) ||
+                                option.code.lowercase(java.util.Locale.ROOT).contains(normalizedQuery) ||
+                                option.nativeName.orEmpty().lowercase(java.util.Locale.ROOT).contains(normalizedQuery)
                         }
                     }
                 }

@@ -73,7 +73,7 @@ private val unsafeWebViewHeaders = setOf(
 object CloudflareDetector {
     fun looksLikeChallengeHtml(body: String): Boolean {
         if (body.isBlank()) return false
-        val lower = body.lowercase()
+        val lower = body.lowercase(java.util.Locale.ROOT)
         return lower.contains("just a moment") ||
             lower.contains("cf-chl") ||
             lower.contains("__cf_chl") ||
@@ -146,16 +146,19 @@ object WebViewCookieJar : CookieJar {
             val manager = CookieManager.getInstance()
             val now = System.currentTimeMillis()
             for (cookie in cookies) {
-                if (cookie.expiresAt <= now) continue
                 val attributes = buildString {
                     append("; Path=").append(cookie.path.ifBlank { "/" })
                     if (!cookie.hostOnly && cookie.domain.isNotBlank()) {
                         append("; Domain=").append(cookie.domain)
                     }
+                    if (cookie.expiresAt <= now) {
+                        append("; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT")
+                    }
                     if (cookie.secure) append("; Secure")
                     if (cookie.httpOnly) append("; HttpOnly")
                 }
-                manager.setCookie(url.toString(), "${cookie.name}=${cookie.value}$attributes")
+                val value = if (cookie.expiresAt <= now) "" else cookie.value
+                manager.setCookie(url.toString(), "${cookie.name}=$value$attributes")
             }
             manager.flush()
         }

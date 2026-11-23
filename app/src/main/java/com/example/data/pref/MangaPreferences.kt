@@ -113,7 +113,7 @@ class MangaPreferences(private val context: Context) {
         val BRIGHTNESS_LOCK = booleanPreferencesKey("brightness_lock")
         val KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
         val TRANSLATION_ENGINE = stringPreferencesKey("translation_engine") // "Otomatik", "Gemini", "DeepL", "ML Kit", "Google", "MyMemory"
-        val OCR_ENGINE = stringPreferencesKey("ocr_engine") // "ML Kit", "PP-OCRv5"
+        val OCR_ENGINE = stringPreferencesKey("ocr_engine") // "ML Kit", "PP-OCRv5", "PP-OCRv5 EN"
         val TRANSLATION_TARGET_LANG = stringPreferencesKey("translation_target_lang")
         val TRANSLATION_SOURCE_LANG = stringPreferencesKey("translation_source_lang")
         val RECENT_TRANSLATION_LANGS = stringPreferencesKey("recent_translation_langs")
@@ -126,6 +126,7 @@ class MangaPreferences(private val context: Context) {
         val TURKISH_CHAR_CONVERT = booleanPreferencesKey("turkish_char_convert")
         val DOWNLOAD_LOCATION = stringPreferencesKey("download_location") // "Dahili", "Harici"
         val CACHE_SIZE_LIMIT = intPreferencesKey("cache_size_limit") // in MB
+        val TRANSLATION_CACHE_TTL_DAYS = intPreferencesKey("translation_cache_ttl_days") // 7, 30, 0 (süresiz)
         val NOTIFICATION_NEW_CHAPTER = booleanPreferencesKey("notification_new_chapter")
         val UPDATE_CHECK_INTERVAL = intPreferencesKey("update_check_interval") // 6, 12, 24 saat
         val YOLO_AI_ENABLED = booleanPreferencesKey("yolo_ai_enabled")
@@ -151,6 +152,7 @@ class MangaPreferences(private val context: Context) {
     val keepScreenOn: Flow<Boolean> = context.dataStore.data.map { it[KEEP_SCREEN_ON] ?: true }
     val translationEngine: Flow<String> = context.dataStore.data.map { it[TRANSLATION_ENGINE] ?: "Otomatik" }
     val ocrEngine: Flow<String> = context.dataStore.data.map { it[OCR_ENGINE] ?: "ML Kit" }
+    val translationCacheTtlDays: Flow<Int> = context.dataStore.data.map { it[TRANSLATION_CACHE_TTL_DAYS] ?: 30 }
     val translationTargetLang: Flow<String> = context.dataStore.data.map {
         it[TRANSLATION_TARGET_LANG] ?: TranslationLanguages.defaultTargetCode()
     }
@@ -230,6 +232,10 @@ class MangaPreferences(private val context: Context) {
 
     suspend fun setOcrEngine(value: String) {
         context.dataStore.edit { it[OCR_ENGINE] = value }
+    }
+
+    suspend fun setTranslationCacheTtlDays(days: Int) {
+        context.dataStore.edit { it[TRANSLATION_CACHE_TTL_DAYS] = days }
     }
 
     suspend fun setTranslationBubbleStyle(value: String) {

@@ -29,18 +29,65 @@ import kotlin.math.ceil
  * line is then run through the PP-OCRv5 CTC recognizer and mapped back to the
  * original page coordinates.
  */
-class PpOcrV5Engine(context: Context) {
+class PpOcrV5Engine(
+    context: Context,
+    private val variant: Variant = Variant.MULTILINGUAL
+) {
+    enum class Variant(
+        val modelAssets: List<String>,
+        val dictAsset: String,
+        val cacheFileName: String,
+        val expectedBytes: Long?,
+        val englishOnly: Boolean
+    ) {
+        MULTILINGUAL(
+            modelAssets = listOf("models/ppocrv5_rec.onnx"),
+            dictAsset = "models/ppocrv5_dict.txt",
+            cacheFileName = "ppocrv5_rec_v1.onnx",
+            expectedBytes = 16_534_782L,
+            englishOnly = false
+        ),
+        ENGLISH_ONLY(
+            modelAssets = listOf("models/en_PP-OCRv5_mobile_rec.onnx", "models/en_ppocrv5_rec.onnx"),
+            dictAsset = "models/en_ppocrv5_dict.txt",
+            cacheFileName = "en_ppocrv5_rec_v1.onnx",
+            expectedBytes = null,
+            englishOnly = true
+        )
+    }
+
     companion object {
         private const val TAG = "BabelRead_PpOcr"
-        private const val MODEL_ASSET = "models/ppocrv5_rec.onnx"
-        private const val DICT_ASSET = "models/ppocrv5_dict.txt"
-        private const val MODEL_FILE = "ppocrv5_rec_v1.onnx"
-        private const val MODEL_BYTES = 16_534_782L
+        private const val MIN_GENERIC_MODEL_BYTES = 100_000L
         private const val REC_HEIGHT = 48
         private const val MIN_REC_WIDTH = 320
         private const val MAX_REC_WIDTH = 3200
         private const val MIN_LINE_CONFIDENCE = 0.65f
         private const val MIN_CJK_LINE_CONFIDENCE = 0.45f
+
+        /**
+         * Lightweight existence check for Settings UI without initializing ONNX Runtime
+         * or extracting the model from assets.
+         */
+        fun hasModelAsset(context: Context, variant: Variant): Boolean {
+            val app = context.applicationContext
+            val cached = File(app.filesDir, variant.cacheFileName)
+            val expected = variant.expectedBytes
+            val cacheValid = cached.exists() && if (expected != null) {
+                cached.length() == expected
+            } else {
+                cached.length() >= MIN_GENERIC_MODEL_BYTES
+            }
+            if (cacheValid) return true
+
+            return variant.modelAssets.any { assetPath ->
+                try {
+                    app.assets.open(assetPath).use { true }
+                } catch (_: Throwable) {
+                    false
+                }
+            }
+        }
     }
 
     private data class LineResult(
@@ -58,6 +105,7 @@ class PpOcrV5Engine(context: Context) {
     private val lineSegmenter = TextLineSegmenter()
     private val detector = PpOcrV5Detector(appContext)
     private val sessionMutex = Mutex()
+    private val sessionLock = Any()
 
     @Volatile
     private var ortEnv: OrtEnvironment? = null
@@ -70,6 +118,9 @@ class PpOcrV5Engine(context: Context) {
 
     @Volatile
     private var initFailed = false
+
+    @Volatile
+    private var isClosed = false
 
     fun isReady(): Boolean = (session != null && dictionary != null) || ensureInitialized()
 
@@ -135,7 +186,7 @@ class PpOcrV5Engine(context: Context) {
         }
 
         val primary = recognize(primaryLanguage)
-        if (primary.lineCount > 0 && primary.results.size >= primary.lineCount) {
+        if (variant.englishOnly || (primary.lineCount > 0 && primary.results.size >= primary.lineCount)) {
             return@withContext primary.results
         }
 
@@ -214,7 +265,7 @@ class PpOcrV5Engine(context: Context) {
     private fun acceptsLine(line: LineResult, language: String): Boolean {
         if (line.text.isBlank()) return false
         if (line.confidence >= MIN_LINE_CONFIDENCE) return true
-        if (!isJapanese(language)) return false
+        if (!isCjkLanguage(language)) return false
         val hasCjk = line.text.any { ch ->
             ch.code in 0x3040..0x9FAF || ch.code in 0xAC00..0xD7AF
         }
@@ -225,16 +276,29 @@ class PpOcrV5Engine(context: Context) {
         language.equals("Japonca", ignoreCase = true) ||
             language.equals("Japanese", ignoreCase = true)
 
-    private fun normalizeLanguage(originLanguage: String): String? = when {
-        originLanguage.equals("İngilizce", ignoreCase = true) ||
-            originLanguage.equals("English", ignoreCase = true) -> "İngilizce"
-        originLanguage.equals("Japonca", ignoreCase = true) ||
-            originLanguage.equals("Japanese", ignoreCase = true) -> "Japonca"
-        originLanguage.equals("Yerel", ignoreCase = true) ||
-            originLanguage.equals("Bilinmiyor", ignoreCase = true) ||
-            originLanguage.equals("Otomatik", ignoreCase = true) ||
-            originLanguage.equals("Auto", ignoreCase = true) -> "Japonca"
-        else -> null
+    private fun isCjkLanguage(language: String): Boolean =
+        isJapanese(language) ||
+            language.equals("Korece", ignoreCase = true) ||
+            language.equals("Korean", ignoreCase = true) ||
+            language.equals("Çince", ignoreCase = true) ||
+            language.equals("Chinese", ignoreCase = true)
+
+    private fun normalizeLanguage(originLanguage: String): String? {
+        val norm = originLanguage.trim().lowercase(java.util.Locale.ROOT).replace('ı', 'i').replace("i\u0307", "i")
+        if (variant.englishOnly) {
+            return when (norm) {
+                "ingilizce", "english", "en", "yerel", "bilinmiyor", "otomatik", "auto" -> "İngilizce"
+                else -> null
+            }
+        }
+        return when (norm) {
+            "ingilizce", "english", "en" -> "İngilizce"
+            "japonca", "japanese", "ja" -> "Japonca"
+            "korece", "korean", "ko" -> "Korece"
+            "çince", "cince", "chinese", "zh" -> "Çince"
+            "yerel", "bilinmiyor", "otomatik", "auto" -> "Japonca"
+            else -> null
+        }
     }
 
     private suspend fun recognizeLine(
@@ -242,6 +306,7 @@ class PpOcrV5Engine(context: Context) {
         rect: Rect,
         vertical: Boolean
     ): LineResult? = sessionMutex.withLock {
+        if (bitmap.isRecycled) return@withLock null
         val safeRect = Rect(rect)
         if (!safeRect.intersect(0, 0, bitmap.width, bitmap.height)) return@withLock null
         if (safeRect.width() < 4 || safeRect.height() < 4) return@withLock null
@@ -265,11 +330,12 @@ class PpOcrV5Engine(context: Context) {
         try {
             runRecognition(oriented)
         } catch (t: Throwable) {
+            if (t is kotlinx.coroutines.CancellationException) throw t
             Log.w(TAG, "PP-OCRv5 line recognition failed: ${t.message}")
             null
         } finally {
-            if (oriented !== crop && !crop.isRecycled) crop.recycle()
-            if (!oriented.isRecycled) oriented.recycle()
+            if (oriented !== crop && crop !== bitmap && !crop.isRecycled) crop.recycle()
+            if (oriented !== bitmap && !oriented.isRecycled) oriented.recycle()
         }
     }
 
@@ -310,22 +376,26 @@ class PpOcrV5Engine(context: Context) {
             }
             buffer.position(0)
 
-            val env = ortEnv ?: OrtEnvironment.getEnvironment().also { ortEnv = it }
-            val shape = longArrayOf(1, 3, REC_HEIGHT.toLong(), targetWidth.toLong())
-            OnnxTensor.createTensor(env, buffer, shape).use { input ->
-                session.run(mapOf(session.inputNames.first() to input)).use { result ->
-                    val output = result.get(0) as? OnnxTensor ?: return null
-                    val outputShape = output.info.shape
-                    if (outputShape.size != 3) return null
-                    val timesteps = outputShape[1].toInt()
-                    val classCount = outputShape[2].toInt()
-                    if (timesteps <= 0 || classCount < dictionary.size + 1) return null
-                    val values = output.floatBuffer
-                    return decodeCtc(values, timesteps, classCount, dictionary)
+            synchronized(sessionLock) {
+                if (isClosed) return null
+                val activeSession = this.session ?: return null
+                val env = ortEnv ?: OrtEnvironment.getEnvironment().also { ortEnv = it }
+                val shape = longArrayOf(1, 3, REC_HEIGHT.toLong(), targetWidth.toLong())
+                OnnxTensor.createTensor(env, buffer, shape).use { input ->
+                    activeSession.run(mapOf(activeSession.inputNames.first() to input)).use { result ->
+                        val output = result.get(0) as? OnnxTensor ?: return null
+                        val outputShape = output.info.shape
+                        if (outputShape.size != 3) return null
+                        val timesteps = outputShape[1].toInt()
+                        val classCount = outputShape[2].toInt()
+                        if (timesteps <= 0 || classCount < dictionary.size + 1) return null
+                        val values = output.floatBuffer
+                        return decodeCtc(values, timesteps, classCount, dictionary)
+                    }
                 }
             }
         } finally {
-            if (!scaled.isRecycled) scaled.recycle()
+            if (scaled !== bitmap && !scaled.isRecycled) scaled.recycle()
         }
     }
 
@@ -373,10 +443,22 @@ class PpOcrV5Engine(context: Context) {
         return LineResult(text, confidence)
     }
 
+    fun close() {
+        synchronized(sessionLock) {
+            isClosed = true
+            val old = session
+            session = null
+            runCatching { old?.close() }
+        }
+        runCatching { detector.close() }
+    }
+
     private fun ensureInitialized(): Boolean {
+        if (isClosed) return false
         if (session != null && dictionary != null) return true
         if (initFailed) return false
-        synchronized(this) {
+        synchronized(sessionLock) {
+            if (isClosed) return false
             if (session != null && dictionary != null) return true
             if (initFailed) return false
             try {
@@ -409,21 +491,47 @@ class PpOcrV5Engine(context: Context) {
     }
 
     private fun readDictionary(): List<String> {
-        return appContext.assets.open(DICT_ASSET).bufferedReader(Charsets.UTF_8).use { reader ->
+        return appContext.assets.open(variant.dictAsset).bufferedReader(Charsets.UTF_8).use { reader ->
             reader.readLines().map { it.trimEnd('\r', '\n') }
         }
     }
 
-    private fun ensureModelFile(): File? {
-        val target = File(appContext.filesDir, MODEL_FILE)
-        if (target.exists() && target.length() == MODEL_BYTES) return target
+    private fun isModelSizeValid(size: Long): Boolean {
+        val expected = variant.expectedBytes
+        return if (expected != null) size == expected else size >= MIN_GENERIC_MODEL_BYTES
+    }
 
-        val temporary = File(appContext.filesDir, "$MODEL_FILE.tmp")
+    private fun resolveAssetLength(assetPath: String): Long? = try {
+        appContext.assets.openFd(assetPath).use { it.length }
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun ensureModelFile(): File? {
+        val target = File(appContext.filesDir, variant.cacheFileName)
+        val matchedAsset = variant.modelAssets.firstOrNull { path ->
+            try {
+                appContext.assets.open(path).close()
+                true
+            } catch (_: Exception) {
+                false
+            }
+        }
+        val expectedSize = variant.expectedBytes ?: matchedAsset?.let { resolveAssetLength(it) }
+        if (target.exists() && isModelSizeValid(target.length()) &&
+            (expectedSize == null || target.length() == expectedSize)
+        ) {
+            return target
+        }
+
+        val temporary = File(appContext.filesDir, "${variant.cacheFileName}.tmp")
         return try {
-            appContext.assets.open(MODEL_ASSET).use { input ->
+            val sourceAsset = matchedAsset ?: return null
+            appContext.assets.open(sourceAsset).use { input ->
                 FileOutputStream(temporary).use { output -> input.copyTo(output) }
             }
-            if (temporary.length() != MODEL_BYTES) {
+            val copied = true
+            if (!copied || !isModelSizeValid(temporary.length())) {
                 temporary.delete()
                 return null
             }
@@ -434,10 +542,10 @@ class PpOcrV5Engine(context: Context) {
                 temporary.copyTo(target, overwrite = true)
                 temporary.delete()
             }
-            if (target.length() == MODEL_BYTES) target else null
+            if (isModelSizeValid(target.length())) target else null
         } catch (t: Throwable) {
             temporary.delete()
-            Log.e(TAG, "PP-OCRv5 model copy failed: ${t.message}", t)
+            Log.e(TAG, "PP-OCRv5 (${variant.name}) model copy failed: ${t.message}", t)
             null
         }
     }

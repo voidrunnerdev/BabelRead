@@ -736,10 +736,10 @@ private fun WebSourcePanel(
     onOpenBrowser: () -> Unit,
     onScanUrl: (String?) -> Unit
 ) {
-    var query by remember { mutableStateOf("") }
-    var selectedCategory by remember { mutableStateOf<String?>(null) }
-    var showUrlDialog by remember { mutableStateOf(false) }
-    var listUrl by remember { mutableStateOf("") }
+    var query by remember(site.id) { mutableStateOf("") }
+    var selectedCategory by remember(site.id) { mutableStateOf<String?>(null) }
+    var showUrlDialog by remember(site.id) { mutableStateOf(false) }
+    var listUrl by remember(site.id) { mutableStateOf("") }
 
     SurfaceCard(
         modifier = Modifier

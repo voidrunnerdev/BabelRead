@@ -7,7 +7,8 @@ object BubbleTextEnvelopeGeometry {
         bubbleHeightPx: Float,
         horizontalPaddingPx: Float,
         verticalPaddingPx: Float,
-        safeInsetPx: Float
+        safeInsetPx: Float,
+        contourProfile: ContourScanlineProfile? = null
     ): BubbleLineEnvelope? {
         if (!bubbleWidthPx.isFinite() || !bubbleHeightPx.isFinite()) return null
         if (!horizontalPaddingPx.isFinite() || !verticalPaddingPx.isFinite()) return null
@@ -22,10 +23,19 @@ object BubbleTextEnvelopeGeometry {
         val inset = safeInsetPx.coerceAtLeast(0f)
         if (inset * 2f >= widthPx || inset * 2f >= heightPx) return null
 
+        val validContour = contourProfile?.takeIf { it.isUsable }
         return BubbleLineEnvelope(
             bounds = EnvelopeBounds(0f, 0f, widthPx, heightPx),
             horizontalInsetPx = inset,
-            verticalInsetPx = inset
+            verticalInsetPx = inset,
+            shape = EnvelopeShape(
+                kind = if (validContour != null) {
+                    EnvelopeShapeKind.CONTOUR_SCANLINE
+                } else {
+                    EnvelopeShapeKind.ELLIPSE
+                }
+            ),
+            contourProfile = validContour
         )
     }
 }

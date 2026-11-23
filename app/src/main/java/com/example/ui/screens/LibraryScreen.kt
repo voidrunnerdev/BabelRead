@@ -83,46 +83,31 @@ fun LibraryScreen(
     var importArchivesAsSingle by remember { mutableStateOf(false) }
     var combinedArchiveTitle by remember { mutableStateOf("") }
 
-    val archivePickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: android.net.Uri? ->
-        uri?.let {
-            viewModel.importLocalArchive(it) { success, msg ->
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar(msg)
-                }
-            }
-        }
-    }
+    var pendingLinkFolderUri by remember { mutableStateOf<android.net.Uri?>(null) }
+    var linkFolderAsLibrary by remember { mutableStateOf(true) }
 
-    val folderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri: android.net.Uri? ->
-        uri?.let {
-            viewModel.importLocalFolder(it) { success, msg ->
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar(msg)
-                }
-            }
-        }
-    }
+    var pendingImageUris by remember { mutableStateOf<List<android.net.Uri>>(emptyList()) }
+    var pendingImageTitle by remember { mutableStateOf("") }
 
     val multipleImagesPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<android.net.Uri> ->
         if (uris.isNotEmpty()) {
-            viewModel.importLocalImages(uris) { success, msg ->
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar(msg)
-                }
-            }
+            pendingImageUris = uris
+            pendingImageTitle = ""
         }
     }
 
     val multipleArchivesPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<android.net.Uri> ->
-        if (uris.isNotEmpty()) {
+        if (uris.size == 1) {
+            viewModel.importLocalArchive(uris.first()) { _, msg ->
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(msg)
+                }
+            }
+        } else if (uris.size > 1) {
             pendingArchiveUris = uris
             importArchivesAsSingle = false
             combinedArchiveTitle = ""
@@ -130,39 +115,12 @@ fun LibraryScreen(
         }
     }
 
-    val bulkFolderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri: android.net.Uri? ->
-        uri?.let {
-            viewModel.importLocalFolderBulk(it) { success, msg ->
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar(msg)
-                }
-            }
-        }
-    }
-
-    val linkedFolderPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri: android.net.Uri? ->
-        uri?.let {
-            viewModel.linkLocalFolderSingle(it) { _, msg ->
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar(msg)
-                }
-            }
-        }
-    }
-
     val linkedLibraryPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
     ) { uri: android.net.Uri? ->
         uri?.let {
-            viewModel.linkLocalFolderLibrary(it) { _, msg ->
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar(msg)
-                }
-            }
+            pendingLinkFolderUri = it
+            linkFolderAsLibrary = true
         }
     }
 
@@ -457,31 +415,17 @@ fun LibraryScreen(
                 )
                 Spacer(modifier = Modifier.height(AppSpacing.xs))
                 Text(
-                    text = "Telefonunuzdaki arşivleri, manga klasörlerini, toplu kütüphane klasörlerini veya galerinizdeki sayfaları içe aktarın.",
+                    text = "Arşiv/PDF ekleyin, Mihon veya yerel kütüphane klasörünüzü kopyalamadan bağlayın ya da galeriden sayfa seçin.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(AppSpacing.xl))
 
                 ImportOption(
-                    title = "Arşiv / Çizgi Roman Dosyası",
-                    description = ".cbz, .zip, .cbr, .rar veya .pdf formatındaki tek dosya mangalar",
+                    title = "Arşiv / PDF Ekle",
+                    description = ".cbz, .zip, .cbr (RAR4) veya .pdf — tek dosya doğrudan eklenir, çoklu seçimde birleştirilebilir",
                     icon = Icons.Default.FolderZip,
                     tint = MaterialTheme.colorScheme.primary,
-                    onClick = {
-                        showImportSheet = false
-                        archivePickerLauncher.launch(arrayOf("*/*"))
-                    },
-                    modifier = Modifier.testTag("import_archive_option")
-                )
-
-                Spacer(modifier = Modifier.height(AppSpacing.sm))
-
-                ImportOption(
-                    title = "Çoklu Arşiv / PDF",
-                    description = "Birden fazla dosyayı ayrı manga veya tek manganın bölümleri olarak ekleyin",
-                    icon = Icons.Default.FileCopy,
-                    tint = MaterialTheme.colorScheme.secondary,
                     onClick = {
                         showImportSheet = false
                         multipleArchivesPickerLauncher.launch(arrayOf("*/*"))
@@ -492,52 +436,10 @@ fun LibraryScreen(
                 Spacer(modifier = Modifier.height(AppSpacing.sm))
 
                 ImportOption(
-                    title = "Manga Klasörü (Klasörden İçe Aktar)",
-                    description = "Resimlerin veya alt bölümlerin bulunduğu klasörü doğrudan seçin",
-                    icon = Icons.Default.FolderOpen,
-                    tint = MaterialTheme.colorScheme.tertiary,
-                    onClick = {
-                        showImportSheet = false
-                        folderPickerLauncher.launch(null)
-                    },
-                    modifier = Modifier.testTag("import_folder_option")
-                )
-
-                Spacer(modifier = Modifier.height(AppSpacing.sm))
-
-                ImportOption(
-                    title = "Kütüphane Klasörü (CBZ)",
-                    description = "Yalnızca CBZ dosyaları içe aktarılır; her doğrudan alt klasör ayrı manga olur",
+                    title = "Kütüphane Klasörü Bağla (Mihon Tarzı)",
+                    description = "Mihon local/downloads veya manga klasörünüzü kopyalamadan bağlayın. Not: Android kısıtı nedeniyle İndirilenler kökü yerine alt klasör seçin.",
                     icon = Icons.Default.LibraryBooks,
-                    tint = MaterialTheme.colorScheme.primary,
-                    onClick = {
-                        showImportSheet = false
-                        bulkFolderPickerLauncher.launch(null)
-                    },
-                    modifier = Modifier.testTag("import_bulk_folder_option")
-                )
-
-                Spacer(modifier = Modifier.height(AppSpacing.sm))
-
-                ImportOption(
-                    title = "Klasör Bağla (kopyalamadan)",
-                    description = "Tek manga olarak bağlayın; doğrudan resimler Bölüm 1, alt klasörler ve CBZ/ZIP dosyaları bölüm olur",
-                    icon = Icons.Default.Link,
                     tint = MaterialTheme.colorScheme.tertiary,
-                    onClick = {
-                        showImportSheet = false
-                        linkedFolderPickerLauncher.launch(null)
-                    },
-                    modifier = Modifier.testTag("link_folder_option")
-                )
-
-                Spacer(modifier = Modifier.height(AppSpacing.sm))
-
-                ImportOption(
-                    title = "Klasör Kitaplığı Bağla",
-                    description = "Kök klasördeki her alt klasör bir manga olur; sayfalar uygulamaya kopyalanmadan okunur",
-                    icon = Icons.Default.LibraryBooks,
-                    tint = MaterialTheme.colorScheme.secondary,
                     onClick = {
                         showImportSheet = false
                         linkedLibraryPickerLauncher.launch(null)
@@ -548,8 +450,8 @@ fun LibraryScreen(
                 Spacer(modifier = Modifier.height(AppSpacing.sm))
 
                 ImportOption(
-                    title = "Resim Dosyaları (Çoklu Seçim)",
-                    description = "Galeriden veya dosyalardan manga sayfalarını topluca seçin",
+                    title = "Galeriden Resim Seç",
+                    description = "Galeriden veya dosyalardan manga sayfalarını topluca seçip isim vererek ekleyin",
                     icon = Icons.Default.PhotoLibrary,
                     tint = MaterialTheme.colorScheme.secondary,
                     onClick = {
@@ -682,6 +584,151 @@ fun LibraryScreen(
             dismissButton = {
                 TextButton(
                     onClick = { showArchiveImportDialog = false },
+                    modifier = Modifier.heightIn(min = AppSizes.minTouchTarget)
+                ) {
+                    Text("İptal", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = MaterialTheme.shapes.extraLarge
+        )
+    }
+
+    pendingLinkFolderUri?.let { folderUri ->
+        AlertDialog(
+            onDismissRequest = { pendingLinkFolderUri = null },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.LibraryBooks,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary
+                )
+            },
+            title = {
+                Text(
+                    text = "Klasör Bağlama Biçimi",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                ) {
+                    ArchiveModeOption(
+                        selected = linkFolderAsLibrary,
+                        title = "Kütüphane Klasörü (Mihon Tarzı)",
+                        description = "Her alt klasör ayrı manga olur; Mihon local/downloads yapısı ve cover.jpg otomatik tanınır",
+                        onClick = { linkFolderAsLibrary = true },
+                        modifier = Modifier.testTag("link_mode_library")
+                    )
+                    ArchiveModeOption(
+                        selected = !linkFolderAsLibrary,
+                        title = "Tek Manga Klasörü",
+                        description = "Seçilen klasör tek manga olur; içindeki alt klasörler ve CBZ/ZIP dosyaları bölüm olur",
+                        onClick = { linkFolderAsLibrary = false },
+                        modifier = Modifier.testTag("link_mode_single")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val targetUri = folderUri
+                        val asLibrary = linkFolderAsLibrary
+                        pendingLinkFolderUri = null
+                        if (asLibrary) {
+                            viewModel.linkLocalFolderLibrary(targetUri) { _, msg ->
+                                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+                            }
+                        } else {
+                            viewModel.linkLocalFolderSingle(targetUri) { _, msg ->
+                                coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .heightIn(min = AppSizes.minTouchTarget)
+                        .testTag("confirm_link_folder")
+                ) {
+                    Text("Bağla", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { pendingLinkFolderUri = null },
+                    modifier = Modifier.heightIn(min = AppSizes.minTouchTarget)
+                ) {
+                    Text("İptal", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = MaterialTheme.shapes.extraLarge
+        )
+    }
+
+    if (pendingImageUris.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { pendingImageUris = emptyList() },
+            icon = {
+                Icon(
+                    imageVector = Icons.Default.PhotoLibrary,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.secondary
+                )
+            },
+            title = {
+                Text(
+                    text = "Resimlerden Manga Oluştur",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                ) {
+                    Text(
+                        text = "Seçilen sayfa sayısı: ${pendingImageUris.size}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedTextField(
+                        value = pendingImageTitle,
+                        onValueChange = { pendingImageTitle = it },
+                        label = { Text("Manga Adı (isteğe bağlı)") },
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("import_images_title")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val uris = pendingImageUris
+                        val title = pendingImageTitle.trim().ifBlank { null }
+                        pendingImageUris = emptyList()
+                        pendingImageTitle = ""
+                        viewModel.importLocalImages(uris, title = title) { _, msg ->
+                            coroutineScope.launch { snackbarHostState.showSnackbar(msg) }
+                        }
+                    },
+                    modifier = Modifier
+                        .heightIn(min = AppSizes.minTouchTarget)
+                        .testTag("confirm_images_import")
+                ) {
+                    Text("İçe Aktar", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { pendingImageUris = emptyList() },
                     modifier = Modifier.heightIn(min = AppSizes.minTouchTarget)
                 ) {
                     Text("İptal", color = MaterialTheme.colorScheme.onSurfaceVariant)

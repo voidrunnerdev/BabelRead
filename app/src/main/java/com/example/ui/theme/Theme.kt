@@ -1,6 +1,8 @@
 package com.example.ui.theme
 
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.os.Build
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -57,7 +59,7 @@ fun MyApplicationTheme(
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
-            val window = (view.context as Activity).window
+            val window = view.context.findActivity()?.window ?: return@SideEffect
             window.statusBarColor = Color.Transparent.toArgb()
             window.navigationBarColor = colorScheme.surface.toArgb()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -76,4 +78,10 @@ fun MyApplicationTheme(
         shapes = AppShapes,
         content = content
     )
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> (baseContext ?: return null).findActivity()
+    else -> null
 }

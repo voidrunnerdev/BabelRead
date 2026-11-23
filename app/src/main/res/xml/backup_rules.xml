@@ -3,6 +3,12 @@
     <exclude domain="file" path="downloads/" />
     <exclude domain="file" path="local_imports/" />
     <exclude domain="file" path="models/" />
+    <exclude domain="file" path="extensions/" />
+    <exclude domain="file" path="translation_cache/" />
+    <exclude domain="file" path="linked_covers/" />
+    <exclude domain="file" path="ppocrv5_det_v1.onnx" />
+    <exclude domain="file" path="ppocrv5_rec_v1.onnx" />
+    <exclude domain="file" path="en_ppocrv5_rec_v1.onnx" />
     <exclude domain="file" path="datastore/manga_settings.preferences_pb" />
     <exclude domain="external" path="downloads/" />
     <exclude domain="external" path="local_imports/" />

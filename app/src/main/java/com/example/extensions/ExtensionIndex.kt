@@ -38,7 +38,7 @@ object ExtensionIndex {
         if (trimmed.isEmpty()) return null
         if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return null
         val parsed = trimmed.toHttpUrlOrNull() ?: return null
-        val host = parsed.host.lowercase()
+        val host = parsed.host.lowercase(java.util.Locale.ROOT)
         val segments = parsed.pathSegments.filter { it.isNotEmpty() }
 
         // GitHub sayfa linkleri: github.com/<owner>/<repo>[/tree/<dal>[/alt yol]]
