@@ -22,6 +22,6 @@ dependencyResolutionManagement {
   }
 }
 
-rootProject.name = "BabelRead"
+rootProject.name = "BabelRead-Dev"
 
 include(":app")
