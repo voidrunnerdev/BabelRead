@@ -2428,8 +2428,7 @@ fun ReaderPageContainer(
                                     }
                                 }
                             }
-                        } else {
-                            if (!canRenderOverlayBox(placed)) return@key
+                        } else if (canRenderOverlayBox(placed)) {
                             val isSfxOutlineStyle = !block.isBubble && bubbleStyle != "Alt Yazı (Şeffaf)"
                             val textColor = when {
                                 isSfxOutlineStyle -> if (block.isDarkBubble) Color.White else Color(0xFF111111)
