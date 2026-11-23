@@ -3066,10 +3066,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
                         )
 
+                        val allCandidateBubbles = if (balloonBoxes.isNotEmpty()) balloonBoxes else dialogueBoxes
+
                         fun selectContainingBubble(textRect: Rect): Rect? {
-                            if (textRect.isEmpty || balloonBoxes.isEmpty()) return null
+                            if (textRect.isEmpty || allCandidateBubbles.isEmpty()) return null
                             val textArea = rectArea(textRect).coerceAtLeast(1L)
-                            val scored = balloonBoxes.filter { !it.isEmpty }.map { bBox ->
+                            val scored = allCandidateBubbles.filter { !it.isEmpty }.map { bBox ->
                                 val coverage = rectOverlapArea(textRect, bBox).toFloat() / textArea
                                 val containsCenter = bBox.contains(textRect.centerX(), textRect.centerY())
                                 val score = coverage +

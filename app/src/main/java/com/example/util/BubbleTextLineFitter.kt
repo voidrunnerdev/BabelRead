@@ -235,16 +235,11 @@ object BubbleTextLineFitter {
             return Attempt(rejection = BubbleTextRejection.NO_BREAK_OPPORTUNITY)
         }
 
-        var lineCount = initialLines.size.coerceAtLeast(1)
-        val seenCounts = mutableSetOf<Int>()
-        while (lineCount <= maxLines) {
-            if (!seenCounts.add(lineCount)) {
-                return Attempt(rejection = BubbleTextRejection.UNSTABLE_LINE_COUNT)
-            }
-
+        val minLines = initialLines.size.coerceIn(1, maxLines)
+        for (lineCount in minLines..maxLines) {
             val totalHeight = lineCount * lineHeight
             if (totalHeight > envelope.contentHeight + FIT_EPSILON) {
-                return Attempt(rejection = BubbleTextRejection.TOO_MANY_LINES)
+                break
             }
             val blockTop = blockTop(envelope, totalHeight)
             val spans = List(lineCount) { index ->
@@ -255,7 +250,7 @@ object BubbleTextLineFitter {
             }
             val widths = spans.map { it.widthPx * WIDTH_SAFETY }
             if (widths.any { !it.isFinite() || it <= FIT_EPSILON }) {
-                return Attempt(rejection = BubbleTextRejection.UNUSABLE_ENVELOPE)
+                continue
             }
 
             val broken = breakLinesBalanced(
@@ -268,21 +263,13 @@ object BubbleTextLineFitter {
             )
             when (broken) {
                 BreakResult.NeedsMoreLines -> {
-                    lineCount++
+                    continue
                 }
                 BreakResult.Blocked -> {
                     return Attempt(rejection = BubbleTextRejection.NO_BREAK_OPPORTUNITY)
                 }
                 is BreakResult.Success -> {
                     if (broken.lines.isEmpty()) {
-                        return Attempt(rejection = BubbleTextRejection.NO_BREAK_OPPORTUNITY)
-                    }
-                    if (broken.lines.size != lineCount) {
-                        if (broken.lines.size < lineCount) {
-                            lineCount++
-                        } else {
-                            lineCount = broken.lines.size.coerceAtLeast(1)
-                        }
                         continue
                     }
                     val built = buildFit(
@@ -299,10 +286,8 @@ object BubbleTextLineFitter {
                         envelope = envelope,
                         density = density
                     )
-                    return if (built.fitsInside) {
-                        Attempt(result = built, rejection = null)
-                    } else {
-                        Attempt(result = null, rejection = built.rejection)
+                    if (built.fitsInside) {
+                        return Attempt(result = built, rejection = null)
                     }
                 }
             }
@@ -655,19 +640,19 @@ object BubbleTextLineFitter {
             }
         }
 
-        var bestL = -1
-        var bestCost = inf
-        for (l in 1..maxL) {
-            val cost = dp[l][n]
-            if (cost.isFinite()) {
-                // Pick the line count with the lowest DP cost (avoiding forced stretching).
-                if (cost < bestCost - 0.05f) {
-                    bestCost = cost
+        val targetLines = if (dp[maxL][n].isFinite()) {
+            maxL
+        } else {
+            var bestL = -1
+            var bestCost = inf
+            for (l in 1 until maxL) {
+                if (dp[l][n] < bestCost) {
+                    bestCost = dp[l][n]
                     bestL = l
                 }
             }
+            bestL
         }
-        val targetLines = bestL
         if (targetLines <= 0) return null
 
         val result = ArrayList<DraftLine>(targetLines)

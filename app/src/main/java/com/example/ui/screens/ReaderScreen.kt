@@ -323,11 +323,11 @@ private fun separateNearbyBoxes(
                 val newLeftRight = mid - margin
                 val newRightLeft = mid + margin
                 val minLeftWidth = max(
-                    max(28, (originalWidths[li] * 0.35f).toInt()),
+                    (originalWidths[li] * 0.75f).toInt(),
                     minWidthFromLeft(li)
                 )
                 val minRightWidth = max(
-                    max(28, (originalWidths[ri] * 0.35f).toInt()),
+                    (originalWidths[ri] * 0.75f).toInt(),
                     minWidthFromRight(ri)
                 )
                 if (newLeftRight - leftBox.left >= minLeftWidth &&
@@ -349,11 +349,11 @@ private fun separateNearbyBoxes(
                 val newTopBottom = mid - margin
                 val newBottomTop = mid + margin
                 val minTopHeight = max(
-                    max(28, (originalHeights[ti] * 0.35f).toInt()),
+                    (originalHeights[ti] * 0.75f).toInt(),
                     minHeightFromTop(ti)
                 )
                 val minBottomHeight = max(
-                    max(28, (originalHeights[bi] * 0.35f).toInt()),
+                    (originalHeights[bi] * 0.75f).toInt(),
                     minHeightFromBottom(bi)
                 )
                 if (newTopBottom - topBox.top >= minTopHeight &&
@@ -2129,7 +2129,7 @@ fun ReaderPageContainer(
                                 safeOval = if (isSubtitleMode) {
                                     null
                                 } else {
-                                    BubbleLayoutGeometry.safeTextBounds(block.bubbleBox)?.let {
+                                    reliableBackgroundBubble?.let {
                                         toBackgroundBounds(it)
                                     }
                                 }
@@ -2179,27 +2179,12 @@ fun ReaderPageContainer(
                                             return@drawBehind
                                         }
                                         if (contour != null && contour.isRectangularLike) {
-                                            val padHPx = placed.paddingHDp.toPx()
-                                            val padVPx = placed.paddingVDp.toPx()
-                                            val innerW = (size.width - padHPx * 2f).coerceAtLeast(1f)
-                                            val innerH = (size.height - padVPx * 2f).coerceAtLeast(1f)
-                                            val firstR = contour.firstValidRow
-                                            val lastR = contour.lastValidRow
-                                            val rowCountF = contour.rowCount.toFloat().coerceAtLeast(1f)
-                                            val cLeft = padHPx + (firstR..lastR).minOf { contour.rowLeftFractions[it] } * innerW
-                                            val cRight = padHPx + (firstR..lastR).maxOf { contour.rowRightFractions[it] } * innerW
-                                            val cTop = padVPx + (firstR / rowCountF) * innerH
-                                            val cBottom = padVPx + ((lastR + 1) / rowCountF) * innerH
-                                            val rW = (cRight - cLeft).coerceAtLeast(0f)
-                                            val rH = (cBottom - cTop).coerceAtLeast(0f)
-                                            if (rW > 1f && rH > 1f) {
-                                                drawRoundRect(
-                                                    color = boxBackground,
-                                                    topLeft = Offset(cLeft, cTop),
-                                                    size = Size(rW, rH),
-                                                    cornerRadius = CornerRadius(4.dp.toPx())
-                                                )
-                                            }
+                                            drawRoundRect(
+                                                color = boxBackground,
+                                                topLeft = Offset(inset, inset),
+                                                size = Size(bgWidth, bgHeight),
+                                                cornerRadius = CornerRadius(4.dp.toPx())
+                                            )
                                         } else {
                                             drawOval(
                                                 color = boxBackground,
