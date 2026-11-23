@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Manga Book Base -->
+    <path
+        android:fillColor="#00BFA5"
+        android:pathData="M30,36 C30,34 32,32 35,32 L51,35 L51,75 L35,72 C32,72 30,73 30,75 Z" />
+    <path
+        android:fillColor="#008080"
+        android:pathData="M78,36 C78,34 76,32 73,32 L57,35 L57,75 L73,72 C76,72 78,73 78,75 Z" />
+    <!-- Book Center Fold -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M52,35 L56,35 L56,75 L52,75 Z" />
+    <!-- Speech Bubble Overlay -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M52,38 C52,31.37 57.37,26 64,26 C70.63,26 76,31.37 76,38 C76,44.63 70.63,50 64,50 C62,50 60,49.5 58,48.5 L53,51 L54,46 C52.8,43.7 52,41 52,38 Z" />
+    <!-- Speech bubble inner dots -->
+    <path
+        android:fillColor="#121212"
+        android:pathData="M58,38 C58,37.2 58.7,36.5 59.5,36.5 C60.3,36.5 61,37.2 61,38 C61,38.8 60.3,39.5 59.5,39.5 C58.7,39.5 58,38.8 58,38 Z M63,38 C63,37.2 63.7,36.5 64.5,36.5 C65.3,36.5 66,37.2 66,38 C66,38.8 65.3,39.5 64.5,39.5 C63.7,39.5 63,38.8 63,38 Z M68,38 C68,37.2 68.7,36.5 69.5,36.5 C70.3,36.5 71,37.2 71,38 C71,38.8 70.3,39.5 69.5,39.5 C68.7,39.5 68,38.8 68,38 Z" />
+</vector>
