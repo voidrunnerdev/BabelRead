@@ -3000,10 +3000,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         val consolidated = mutableListOf<BubbleCandidate>()
                         for (candidate in working) {
                             val sameTargetIndex = consolidated.indexOfFirst { existing ->
-                                val bubbleMatch = sameBalloon(existing.bubbleBounds, candidate.bubbleBounds) ||
-                                    (existing.isBubble && candidate.isBubble && rectOverlapArea(existing.bubbleBounds, candidate.bubbleBounds).toFloat() /
-                                        minOf(areaOf(existing.bubbleBounds), areaOf(candidate.bubbleBounds)).coerceAtLeast(1L) >= 0.40f)
-                                if (!bubbleMatch) {
+                                if (!sameBalloon(existing.bubbleBounds, candidate.bubbleBounds)) {
                                     return@indexOfFirst false
                                 }
                                 val interW = (minOf(existing.targetBox.right, candidate.targetBox.right) -
@@ -3017,7 +3014,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     areaOf(existing.targetBox),
                                     areaOf(candidate.targetBox)
                                 ).coerceAtLeast(1L)
-                                intersection.toFloat() / minArea >= 0.35f
+                                intersection.toFloat() / minArea >= 0.55f
                             }
                             if (sameTargetIndex < 0) {
                                 consolidated.add(candidate)
