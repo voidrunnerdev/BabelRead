@@ -230,7 +230,7 @@ data class PlacedOverlayBox(
     val paddingVDp: Dp,
     val showOriginalFallback: Boolean = false,
     val fallbackSourceBounds: Rect? = null,
-    val forceTextToFitBox: Boolean = false,
+    val forceTextToFitBox: Boolean = true,
     val boldBoost: Boolean = false
 )
 
@@ -1443,12 +1443,17 @@ fun ReaderPageContainer(
                                     pageBounds = pageBounds
                                 )
                                 val bubbleW = if (!block.bubbleBox.isEmpty) block.bubbleBox.width() else 0
-                                if (layoutBox.height() > 0 && layoutBox.width().toFloat() / layoutBox.height().toFloat() < 0.50f) {
-                                    val safeBubble = BubbleLayoutGeometry.reliableBubbleBounds(block.bubbleBox, block.boundingBox, pageBounds)
+                                val safeBubble = BubbleLayoutGeometry.reliableBubbleBounds(block.bubbleBox, block.boundingBox, pageBounds)
+                                val availableBubbleWidth = when {
+                                    safeBubble != null && safeBubble.width() > 0 -> (safeBubble.width() * 0.88f).toInt()
+                                    bubbleW > 0 -> (bubbleW * 0.88f).toInt()
+                                    else -> 0
+                                }
+                                val currentAspect = if (layoutBox.height() > 0) layoutBox.width().toFloat() / layoutBox.height().toFloat() else 1f
+                                if (layoutBox.height() > 0 && (currentAspect < 0.85f || (availableBubbleWidth > layoutBox.width() * 1.15f))) {
                                     val targetW = when {
-                                        safeBubble != null && safeBubble.width() > layoutBox.width() -> safeBubble.width()
-                                        bubbleW > layoutBox.width() -> bubbleW
-                                        else -> maxOf(layoutBox.width(), (layoutBox.height() * 0.60f).toInt())
+                                        availableBubbleWidth > layoutBox.width() -> availableBubbleWidth
+                                        else -> maxOf(layoutBox.width(), (layoutBox.height() * 0.65f).toInt())
                                     }
                                     val pageW = pageOriginalWidth.toInt().coerceAtLeast(1)
                                     val shiftX = ((targetW - layoutBox.width()) / 2).coerceAtLeast(0)
@@ -2067,7 +2072,8 @@ fun ReaderPageContainer(
                                 paddingVDp = geo.padV,
                                 // P1 line widths are measured with the exact paint used
                                 // for drawing; fake-bold would invalidate that fit.
-                                boldBoost = boldBoost && opt.bubbleTextLayout == null
+                                boldBoost = boldBoost && opt.bubbleTextLayout == null,
+                                forceTextToFitBox = true
                             )
                         }
 
@@ -2094,7 +2100,7 @@ fun ReaderPageContainer(
                         if (!block.translationSucceeded || block.translatedText.isBlank()) return false
                         if (!placed.layoutResult.hasRenderableLayout) return false
                         if (placed.layoutResult.layoutWidthPx <= 0f || placed.layoutResult.layoutHeightPx <= 0f) return false
-                        return placed.layoutResult.fitsInside || placed.forceTextToFitBox
+                        return true
                     }
                     placedOverlays.forEach { placed ->
                         val block = placed.block
@@ -2102,129 +2108,47 @@ fun ReaderPageContainer(
                         if (placed.showOriginalFallback || peekHiddenStates[overlayKey] == true || !canRenderOverlayBox(placed)) {
                             return@forEach
                         }
-                        val isSubtitleMode = bubbleStyle == "Alt Yazı (Şeffaf)" || !block.isBubble
-                        val isSfxOutlineStyle = !block.isBubble && bubbleStyle != "Alt Yazı (Şeffaf)"
+                        val isSubtitleMode = bubbleStyle == "Alt Yazı (Şeffaf)"
+                        val isRectangularBox = !block.isBubble || block.bubbleBox.isEmpty ||
+                            (placed.layoutResult.bubbleTextLayout?.contourProfile?.isRectangularLike == true)
 
                         val boxBackground = when {
-                            isSfxOutlineStyle -> Color.Transparent
-                            isSubtitleMode -> Color.Black.copy(alpha = 0.75f)
+                            isSubtitleMode -> Color.Black.copy(alpha = 0.85f)
                             bubbleStyle == "Koyu Zemin" -> Color(0xFF111111).copy(alpha = userAlpha)
                             block.backgroundColor != null -> Color(block.backgroundColor).copy(alpha = userAlpha)
                             block.isDarkBubble -> Color(0xFF111111).copy(alpha = userAlpha)
                             else -> Color.White.copy(alpha = userAlpha)
                         }
 
-                        // Metin kutusu, çakışan kutuları ayrıştırmak için
-                        // küçültülmüş olsa bile zemin kaynak metin alanının
-                        // tamamını kaplar. Güvenilir bir detector bubble varsa
-                        // zemin güvenli oval içinde kalır; fallback anchor'da ise
-                        // metnin bulunduğu sayfa-kırpılmış alan kullanılır.
-                        // P1 is the exception: its ellipse background spans the
-                        // reliable bubble, covering the line envelope and the masked
-                        // OCR source without leaving the detected bubble.
-                        val usesEnvelopeBackground = !isSubtitleMode &&
-                            placed.layoutResult.bubbleTextLayout != null
-                        val boxLeft: Dp
-                        val boxTop: Dp
-                        val boxRight: Dp
-                        val boxBottom: Dp
-                        if (usesEnvelopeBackground) {
-                            boxLeft = placed.leftDp
-                            boxTop = placed.topDp
-                            boxRight = placed.leftDp + placed.widthDp
-                            boxBottom = placed.topDp + placed.heightDp
-                        } else {
-                            val pageBounds = Rect(
-                                0,
-                                0,
-                                pageOriginalWidth.toInt().coerceAtLeast(1),
-                                pageOriginalHeight.toInt().coerceAtLeast(1)
-                            )
-                            val pageClippedLayout = Rect(block.layoutBox).takeIf {
-                                it.intersect(pageBounds) && !it.isEmpty
-                            }
-                            fun toBackgroundBounds(rect: Rect): OverlayBackgroundBounds =
-                                OverlayBackgroundBounds(
-                                    left = with(density) {
-                                        (rect.left * coordinateScaleX).toDp().value
-                                    },
-                                    top = with(density) {
-                                        (rect.top * coordinateScaleY).toDp().value
-                                    },
-                                    right = with(density) {
-                                        (rect.right * coordinateScaleX).toDp().value
-                                    },
-                                    bottom = with(density) {
-                                        (rect.bottom * coordinateScaleY).toDp().value
-                                    }
-                                )
+                        // Metin ve balon kapsamı: Zemin, orijinal OCR metin alanının
+                        // (boundingBox), tespit edilen balonun (bubbleBox) ve yeni
+                        // yerleştirilen çeviri metninin (placed) tamamını örter.
+                        // Böylece hiçbir orijinal İngilizce harf dışarı taşmaz.
+                        val anchorLeftDp = with(density) { (block.boundingBox.left * coordinateScaleX).toDp() }
+                        val anchorTopDp = with(density) { (block.boundingBox.top * coordinateScaleY).toDp() }
+                        val anchorRightDp = with(density) { (block.boundingBox.right * coordinateScaleX).toDp() }
+                        val anchorBottomDp = with(density) { (block.boundingBox.bottom * coordinateScaleY).toDp() }
 
-                            val placedBounds = OverlayBackgroundBounds(
-                                left = placed.leftDp.value,
-                                top = placed.topDp.value,
-                                right = (placed.leftDp + placed.widthDp).value,
-                                bottom = (placed.topDp + placed.heightDp).value
-                            )
-                            val reliableBackgroundBubble = if (isSubtitleMode) {
-                                null
-                            } else {
-                                BubbleLayoutGeometry.reliableBubbleBounds(
-                                    bubble = block.bubbleBox,
-                                    anchor = block.boundingBox,
-                                    pageBounds = pageBounds,
-                                    requireDistinctBubble = true
-                                )
-                            }
-                            // Only a distinct detector bubble that still covers the
-                            // page-clipped layout, OCR anchor, and placed text box may
-                            // use the safe-oval background. Fallback boxes must be drawn
-                            // at their own page-clipped location instead.
-                            val safeBackground = BubbleBackgroundGeometry.safeOvalForBackground(
-                                reliableBubble = reliableBackgroundBubble?.let {
-                                    toBackgroundBounds(it)
-                                },
-                                anchor = if (isSubtitleMode) {
-                                    null
-                                } else {
-                                    toBackgroundBounds(block.boundingBox)
-                                },
-                                preparedLayout = pageClippedLayout?.let { toBackgroundBounds(it) },
-                                placed = placedBounds,
-                                safeOval = if (isSubtitleMode) {
-                                    null
-                                } else {
-                                    reliableBackgroundBubble?.let {
-                                        toBackgroundBounds(it)
-                                    }
-                                }
-                            )
-                            val sourceRect = if (isSubtitleMode) {
-                                null
-                            } else if (safeBackground != null) {
-                                // Old cache entries may still carry a layout box outside the
-                                // ellipse-safe area; clamp the background source at draw time.
-                                BubbleLayoutGeometry.clampToSafeOval(block.layoutBox, block.bubbleBox)
-                                    ?: pageClippedLayout
-                            } else {
-                                pageClippedLayout
-                            }
-                            val resolved = BubbleBackgroundGeometry.resolveSource(
-                                placed = placedBounds,
-                                source = sourceRect?.let { toBackgroundBounds(it) },
-                                safe = safeBackground
-                            )
-                            boxLeft = resolved.left.dp
-                            boxTop = resolved.top.dp
-                            boxRight = resolved.right.dp
-                            boxBottom = resolved.bottom.dp
-                        }
+                        val hasValidBubble = !block.bubbleBox.isEmpty && block.bubbleBox.width() > 0 && block.bubbleBox.height() > 0
+                        val bubbleLeftDp = if (hasValidBubble) with(density) { (block.bubbleBox.left * coordinateScaleX).toDp() } else anchorLeftDp
+                        val bubbleTopDp = if (hasValidBubble) with(density) { (block.bubbleBox.top * coordinateScaleY).toDp() } else anchorTopDp
+                        val bubbleRightDp = if (hasValidBubble) with(density) { (block.bubbleBox.right * coordinateScaleX).toDp() } else anchorRightDp
+                        val bubbleBottomDp = if (hasValidBubble) with(density) { (block.bubbleBox.bottom * coordinateScaleY).toDp() } else anchorBottomDp
+
+                        val placedLeftDp = placed.leftDp
+                        val placedTopDp = placed.topDp
+                        val placedRightDp = placed.leftDp + placed.widthDp
+                        val placedBottomDp = placed.topDp + placed.heightDp
+
+                        val marginDp = 2.dp
+                        val boxLeft = if (isSubtitleMode) placedLeftDp else (minOf(bubbleLeftDp, anchorLeftDp, placedLeftDp) - marginDp).coerceAtLeast(0.dp)
+                        val boxTop = if (isSubtitleMode) placedTopDp else (minOf(bubbleTopDp, anchorTopDp, placedTopDp) - marginDp).coerceAtLeast(0.dp)
+                        val boxRight = if (isSubtitleMode) placedRightDp else maxOf(bubbleRightDp, anchorRightDp, placedRightDp) + marginDp
+                        val boxBottom = if (isSubtitleMode) placedBottomDp else maxOf(bubbleBottomDp, anchorBottomDp, placedBottomDp) + marginDp
+
                         val boxWidth = (boxRight - boxLeft).coerceAtLeast(1.dp)
                         val boxHeight = (boxBottom - boxTop).coerceAtLeast(1.dp)
-                        val isRectangularBox = !block.isBubble || block.bubbleBox.isEmpty ||
-                            (placed.layoutResult.bubbleTextLayout?.contourProfile?.isRectangularLike == true)
-                        val cornerRadius = if (isSubtitleMode || isRectangularBox) 6.dp else {
-                            (minOf(boxWidth.value, boxHeight.value) * 0.35f).coerceIn(4f, 20f).dp
-                        }
+
                         Box(
                             modifier = Modifier
                                 .absoluteOffset(x = boxLeft, y = boxTop)
@@ -2232,37 +2156,16 @@ fun ReaderPageContainer(
                                 .height(boxHeight)
                                 .drawBehind {
                                     if (size.width <= 0f || size.height <= 0f) return@drawBehind
-                                    if (usesEnvelopeBackground) {
-                                        val contour = placed.layoutResult.bubbleTextLayout?.contourProfile
-                                        val inset = minOf(
-                                            1.dp.toPx(),
-                                            placed.paddingHDp.toPx(),
-                                            placed.paddingVDp.toPx()
-                                        )
-                                        val bgWidth = (size.width - inset * 2f).coerceAtLeast(0f)
-                                        val bgHeight = (size.height - inset * 2f).coerceAtLeast(0f)
-                                        if (bgWidth <= 0f || bgHeight <= 0f) {
-                                            return@drawBehind
-                                        }
-                                        if (isRectangularBox || (contour != null && contour.isRectangularLike)) {
-                                            drawRoundRect(
-                                                color = boxBackground,
-                                                topLeft = Offset(inset, inset),
-                                                size = Size(bgWidth, bgHeight),
-                                                cornerRadius = CornerRadius(6.dp.toPx())
-                                            )
-                                        } else {
-                                            drawOval(
-                                                color = boxBackground,
-                                                topLeft = Offset(inset, inset),
-                                                size = Size(bgWidth, bgHeight)
-                                            )
-                                        }
-                                    } else {
+                                    if (isRectangularBox || isSubtitleMode) {
                                         drawRoundRect(
                                             color = boxBackground,
                                             size = size,
-                                            cornerRadius = CornerRadius(cornerRadius.toPx())
+                                            cornerRadius = CornerRadius(6.dp.toPx())
+                                        )
+                                    } else {
+                                        drawOval(
+                                            color = boxBackground,
+                                            size = size
                                         )
                                     }
                                 }
@@ -2280,14 +2183,7 @@ fun ReaderPageContainer(
                         key("$pageIndex:${block.boundingBox}:${block.originalText}") {
                         val overlayKey = "$pageIndex:${block.boundingBox}:${block.originalText}:${placed.showOriginalFallback}"
                         val isPeekHidden = peekHiddenStates[overlayKey] ?: placed.showOriginalFallback
-                        var showFallbackTranslation by remember(
-                            block.boundingBox,
-                            block.originalText,
-                            block.translatedText
-                        ) {
-                            mutableStateOf(false)
-                        }
-                        val isSubtitleMode = bubbleStyle == "Alt Yazı (Şeffaf)" || !block.isBubble
+                        val isSubtitleMode = bubbleStyle == "Alt Yazı (Şeffaf)"
 
                         val boxWidth = placed.widthDp
                         val boxHeight = placed.heightDp
@@ -2397,16 +2293,7 @@ fun ReaderPageContainer(
                                     .width(boxWidth)
                                     .height(boxHeight)
                                     .clip(RoundedCornerShape(6.dp))
-                                    .then(
-                                        if (placed.showOriginalFallback) {
-                                            Modifier.clickable(
-                                                interactionSource = null,
-                                                indication = null
-                                            ) { showFallbackTranslation = true }
-                                        } else {
-                                            Modifier.clickable { peekHiddenStates[overlayKey] = false }
-                                        }
-                                    )
+                                    .clickable { peekHiddenStates[overlayKey] = false }
                             ) {
                                 if (cropBitmap != null) {
                                     Image(
@@ -2432,6 +2319,7 @@ fun ReaderPageContainer(
                                             .align(Alignment.TopEnd)
                                             .padding(2.dp)
                                             .background(Color(0xFF008577).copy(alpha = 0.88f), RoundedCornerShape(3.dp))
+                                            .clickable { peekHiddenStates[overlayKey] = false }
                                             .padding(horizontal = 4.dp, vertical = 1.dp)
                                     ) {
                                         Text(
@@ -2444,35 +2332,12 @@ fun ReaderPageContainer(
                                 }
                             }
                         } else if (canRenderOverlayBox(placed)) {
-                            val isSfxOutlineStyle = !block.isBubble && bubbleStyle != "Alt Yazı (Şeffaf)"
                             val textColor = when {
-                                isSfxOutlineStyle -> if (block.isDarkBubble) Color.White else Color(0xFF111111)
-                                isSubtitleMode || !block.isBubble -> Color.White
-                                bubbleStyle == "Koyu Zemin" -> Color.White
-                                block.backgroundColor != null -> {
-                                    contrastingTextColor(block.backgroundColor)
-                                }
-                                block.isDarkBubble -> Color.White
+                                isSubtitleMode || bubbleStyle == "Koyu Zemin" || block.isDarkBubble -> Color.White
+                                block.backgroundColor != null -> contrastingTextColor(block.backgroundColor)
                                 else -> Color.Black
                             }
-                            val sfxOutlineColor = if (isSfxOutlineStyle) {
-                                if (block.isDarkBubble) Color.Black else Color.White
-                            } else {
-                                null
-                            }
-
-                            val textShadowColor = when {
-                                isSfxOutlineStyle -> null
-                                block.backgroundColor != null -> {
-                                    if (textColor == Color.Black) Color.White.copy(alpha = 0.55f)
-                                    else Color.Black.copy(alpha = 0.55f)
-                                }
-                                !block.isBubble || isSubtitleMode -> {
-                                    if (block.isDarkBubble) Color.White.copy(alpha = 0.4f)
-                                    else Color.Black.copy(alpha = 0.35f)
-                                }
-                                else -> null
-                            }
+                            val textShadowColor = if (isSubtitleMode) Color.Black.copy(alpha = 0.55f) else null
 
                             Box(
                                 modifier = Modifier
@@ -2493,23 +2358,13 @@ fun ReaderPageContainer(
                                     if (staticLayout == null && bubbleLayout?.lines.isNullOrEmpty()) {
                                         return@Canvas
                                     }
-                                    // The placement pass normally routes non-fitting layouts to
-                                    // the explicit fallback UI above. Guard again at draw time
-                                    // so stale or rounded measurements can never clip text.
-                                    if (!layoutResult.fitsInside && !placed.forceTextToFitBox) return@Canvas
                                     if (size.width <= 0f || size.height <= 0f) return@Canvas
 
-                                    val layoutWidth = if (placed.forceTextToFitBox) {
-                                        maxOf(layoutResult.layoutWidthPx, layoutResult.maxLineWidthPx)
-                                    } else {
-                                        layoutResult.layoutWidthPx
-                                    }
+                                    val layoutWidth = maxOf(layoutResult.layoutWidthPx, layoutResult.maxLineWidthPx)
                                     val layoutHeight = layoutResult.layoutHeightPx
                                     if (layoutWidth <= 0f || layoutHeight <= 0f) return@Canvas
 
-                                    // Compose's Canvas and the fitted layout can differ by a
-                                    // fractional pixel after dp/px conversion. Shrink only
-                                    // when necessary, then center the complete layout.
+                                    // Balona dinamik ölçekleme: Her boyuttaki metin balona tam oturur
                                     val drawScale = minOf(
                                         1f,
                                         size.width / layoutWidth,
@@ -2518,41 +2373,16 @@ fun ReaderPageContainer(
                                     val drawnWidth = layoutWidth * drawScale
                                     val drawnHeight = layoutHeight * drawScale
                                     val nativeCanvas = drawContext.canvas.nativeCanvas
-                                    // Both layout paths own an independent TextPaint, so styling
-                                    // here cannot alter another block's layout.
                                     val textPaint = bubbleLayout?.let { layoutResult.bubbleTextPaint }
                                         ?: staticLayout?.paint
                                         ?: return@Canvas
-                                    // Çakışma nedeniyle daraltılan kutularda yazı
-                                    // kalınlaştırılarak okunabilirlik korunur.
-                                    textPaint.isFakeBoldText = placed.boldBoost || isSfxOutlineStyle
+                                    textPaint.isFakeBoldText = placed.boldBoost
                                     val saveCount = nativeCanvas.save()
                                     nativeCanvas.translate(
                                         (size.width - drawnWidth) / 2f,
                                         (size.height - drawnHeight) / 2f
                                     )
                                     nativeCanvas.scale(drawScale, drawScale)
-                                    if (sfxOutlineColor != null) {
-                                        textPaint.clearShadowLayer()
-                                        textPaint.style = android.graphics.Paint.Style.STROKE
-                                        textPaint.strokeJoin = android.graphics.Paint.Join.ROUND
-                                        textPaint.strokeCap = android.graphics.Paint.Cap.ROUND
-                                        textPaint.strokeWidth = (textPaint.textSize * 0.24f)
-                                            .coerceIn(3f * density.density, 8f * density.density)
-                                        textPaint.color = sfxOutlineColor.toArgb()
-                                        if (bubbleLayout != null) {
-                                            bubbleLayout.lines.forEach { line ->
-                                                nativeCanvas.drawText(
-                                                    line.text,
-                                                    line.leftPx,
-                                                    line.baselinePx,
-                                                    textPaint
-                                                )
-                                            }
-                                        } else {
-                                            staticLayout?.draw(nativeCanvas)
-                                        }
-                                    }
                                     textPaint.style = android.graphics.Paint.Style.FILL
                                     textPaint.color = textColor.toArgb()
                                     if (textShadowColor != null) {
@@ -2591,45 +2421,6 @@ fun ReaderPageContainer(
                                     }
                                 }
                             }
-                        } else {
-                            // Sığmayan veya çizilemeyen kutularda etkileşim güvencesi:
-                            // Kullanıcı balona dokunduğunda çeviri diyalogda gösterilir.
-                            Box(
-                                modifier = Modifier
-                                    .absoluteOffset(x = boxLeft, y = boxTop)
-                                    .width(boxWidth)
-                                    .height(boxHeight)
-                                    .clickable { showFallbackTranslation = true },
-                                contentAlignment = Alignment.TopEnd
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .padding(2.dp)
-                                        .background(Color(0xFF008577).copy(alpha = 0.88f), RoundedCornerShape(3.dp))
-                                        .padding(horizontal = 4.dp, vertical = 1.dp)
-                                ) {
-                                    Text("TR", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                        }
-                        if (showFallbackTranslation) {
-                            AlertDialog(
-                                onDismissRequest = { showFallbackTranslation = false },
-                                title = { Text("Yerleşime sığmayan çeviri") },
-                                text = {
-                                    Text(
-                                        text = block.translatedText,
-                                        modifier = Modifier
-                                            .heightIn(max = 280.dp)
-                                            .verticalScroll(rememberScrollState())
-                                    )
-                                },
-                                confirmButton = {
-                                    TextButton(onClick = { showFallbackTranslation = false }) {
-                                        Text("Kapat")
-                                    }
-                                }
-                            )
                         }
                         }
                     }
