@@ -1584,10 +1584,10 @@ class YoloBubbleDetector(context: Context) {
 
                 for (py in pyMin..pyMax) {
                     val r = py - pyMin
-                    var firstX = -1
-                    var lastX = -1
                     val baseRowIdx = py * protoW
 
+                    val runs = mutableListOf<Pair<Int, Int>>()
+                    var runStart = -1
                     for (px in pxMin..pxMax) {
                         var z = 0f
                         val pixelIdx = baseRowIdx + px
@@ -1595,21 +1595,46 @@ class YoloBubbleDetector(context: Context) {
                             z += det.maskCoeffs[k] * protoData[k * hw + pixelIdx]
                         }
                         if (z >= thresholdLogit) {
-                            if (firstX < 0) firstX = px
-                            lastX = px
+                            if (runStart < 0) runStart = px
                             sumPx += (px - pxMin)
                             sumPy += (py - pyMin)
                             validCount++
+                        } else {
+                            if (runStart >= 0) {
+                                runs.add(runStart to (px - 1))
+                                runStart = -1
+                            }
                         }
                     }
+                    if (runStart >= 0) runs.add(runStart to pxMax)
 
-                    if (firstX in 0..lastX) {
-                        rowLeftFractions[r] = (firstX - pxMin).toFloat() / subW.toFloat()
-                        rowRightFractions[r] = (lastX - pxMin + 1).toFloat() / subW.toFloat()
+                    if (runs.isNotEmpty()) {
+                        // İzole saç/parlama mikro piksellerini (ana kümeden >5px uzakta) filtrele
+                        val substantialRuns = runs.filter { (it.second - it.first + 1) >= 2 }
+                        val mainCluster = if (substantialRuns.isNotEmpty()) {
+                            val mainLeft = substantialRuns.first().first
+                            val mainRight = substantialRuns.last().second
+                            runs.filter { run ->
+                                val distToCluster = when {
+                                    run.second < mainLeft -> mainLeft - run.second
+                                    run.first > mainRight -> run.first - mainRight
+                                    else -> 0
+                                }
+                                distToCluster <= 5
+                            }
+                        } else {
+                            runs
+                        }
+                        if (mainCluster.isNotEmpty()) {
+                            val firstX = mainCluster.minOf { it.first }
+                            val lastX = mainCluster.maxOf { it.second }
+                            rowLeftFractions[r] = (firstX - pxMin).toFloat() / subW.toFloat()
+                            rowRightFractions[r] = (lastX - pxMin + 1).toFloat() / subW.toFloat()
+                        }
                     }
                 }
 
-                // Şüpheci kuralı: Koyu kanji nedeniyle oluşan delikleri komşulardan onar
+                // 1. Koyu kanji nedeniyle oluşan delikleri komşulardan onar
                 for (r in 0 until subH) {
                     if (rowLeftFractions[r] < 0f) {
                         val prevL = if (r > 0) rowLeftFractions[r - 1] else -1f
@@ -1630,10 +1655,60 @@ class YoloBubbleDetector(context: Context) {
                     }
                 }
 
+                // 2. Aykırı Diken (Outlier Spike) Filtresi: Ani sıçramaları komşuların ortalamasıyla düzelt
+                for (r in 1 until subH - 1) {
+                    val prevL = rowLeftFractions[r - 1]
+                    val currL = rowLeftFractions[r]
+                    val nextL = rowLeftFractions[r + 1]
+                    val expectedL = (prevL + nextL) * 0.5f
+                    if (kotlin.math.abs(currL - expectedL) > 0.15f) {
+                        rowLeftFractions[r] = expectedL
+                    }
+
+                    val prevR = rowRightFractions[r - 1]
+                    val currR = rowRightFractions[r]
+                    val nextR = rowRightFractions[r + 1]
+                    val expectedR = (prevR + nextR) * 0.5f
+                    if (kotlin.math.abs(currR - expectedR) > 0.15f) {
+                        rowRightFractions[r] = expectedR
+                    }
+                }
+
+                // 3. Bölgesel Kubbe ve Taban Daralma Kalkanı (Top %15 & Bottom %15)
+                val topCut = (subH * 0.15f).toInt().coerceAtLeast(1)
+                for (r in 0 until topCut) {
+                    if (r + 1 < subH) {
+                        rowLeftFractions[r] = maxOf(rowLeftFractions[r], rowLeftFractions[r + 1] - 0.04f)
+                        rowRightFractions[r] = minOf(rowRightFractions[r], rowRightFractions[r + 1] + 0.04f)
+                    }
+                }
+                val botCut = (subH * 0.85f).toInt().coerceIn(topCut, subH - 1)
+                for (r in subH - 1 downTo botCut) {
+                    if (r > 0) {
+                        rowLeftFractions[r] = maxOf(rowLeftFractions[r], rowLeftFractions[r - 1] - 0.04f)
+                        rowRightFractions[r] = minOf(rowRightFractions[r], rowRightFractions[r - 1] + 0.04f)
+                    }
+                }
+
+                // 4. 3-Noktalı Ağırlıklı Gauss Yumuşatma (0.20, 0.60, 0.20)
+                val smoothL = FloatArray(subH)
+                val smoothR = FloatArray(subH)
+                for (r in 0 until subH) {
+                    val pL = if (r > 0) rowLeftFractions[r - 1] else rowLeftFractions[r]
+                    val cL = rowLeftFractions[r]
+                    val nL = if (r < subH - 1) rowLeftFractions[r + 1] else rowLeftFractions[r]
+                    smoothL[r] = 0.20f * pL + 0.60f * cL + 0.20f * nL
+
+                    val pR = if (r > 0) rowRightFractions[r - 1] else rowRightFractions[r]
+                    val cR = rowRightFractions[r]
+                    val nR = if (r < subH - 1) rowRightFractions[r + 1] else rowRightFractions[r]
+                    smoothR[r] = 0.20f * pR + 0.60f * cR + 0.20f * nR
+                }
+
                 val optX = if (validCount > 0) ((sumPx / validCount) / subW).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
                 val optY = if (validCount > 0) ((sumPy / validCount) / subH).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
 
-                ContourScanlineProfile(rowLeftFractions, rowRightFractions, optX, optY)
+                ContourScanlineProfile(smoothL, smoothR, optX, optY)
             } else {
                 null
             }

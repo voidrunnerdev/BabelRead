@@ -600,8 +600,10 @@ object BubbleTextLineFitter {
                     val isLastLine = (j == n)
                     var lineCost = slack * slack * (if (isLastLine) 0.65f else 1.0f)
                     if (endsWithHyphen) lineCost += HYPHEN_PENALTY
-                    if (isLastLine && line > 0 && j - i == 1) {
-                        lineCost += ORPHAN_PENALTY
+                    val isSingleWord = (j - i == 1)
+                    val isShortOrphan = isSingleWord && (width < widthLimit * 0.45f)
+                    if (isShortOrphan && n >= 3) {
+                        lineCost += if (isLastLine) ORPHAN_PENALTY else 3.5f
                     }
                     // BallonsTranslator tarzı dilbilgisel ceza: satır sonunda tek başına kalan 1-2 harfli Türkçe bağlaçlar
                     if (!isLastLine && !endsWithHyphen) {
@@ -610,9 +612,13 @@ object BubbleTextLineFitter {
                             lineCost += CONJUNCTION_PENALTY
                         }
                     }
-                    // Diamond / oval silhouette shaping: penalize hourglass pinches (middle line
-                    // narrower than both neighbors) and bottom-heavy flares on 3+ line bubbles.
-                    if (maxL >= 3 && line >= 1) {
+                    // Manga diamond silhouette shaping & balance
+                    if (maxL == 2 && line == 1 && isLastLine) {
+                        val prevW = lineWidthCache[line][i]
+                        val maxW = maxOf(prevW, width).coerceAtLeast(1f)
+                        val diffRatio = kotlin.math.abs(prevW - width) / maxW
+                        lineCost += diffRatio * diffRatio * 2.0f
+                    } else if (maxL >= 3 && line >= 1) {
                         val prevW = lineWidthCache[line][i]
                         if (line >= 2) {
                             val prevPrevIdx = prevIdx[line][i]
@@ -627,6 +633,10 @@ object BubbleTextLineFitter {
                         }
                         if (isLastLine && widthLimit < widthsByLine[line - 1] * 0.98f && width > prevW * 1.12f) {
                             lineCost += TAPER_PENALTY
+                        }
+                        // Consecutive line jump penalty (e.g. 1 word tiny line adjacent to wide line)
+                        if (prevW > 0f && (width < prevW * 0.45f || width > prevW * 2.2f) && !isLastLine) {
+                            lineCost += 2.0f
                         }
                     }
                     val totalCost = baseCost + lineCost

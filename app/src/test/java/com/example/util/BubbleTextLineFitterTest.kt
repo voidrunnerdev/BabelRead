@@ -293,6 +293,25 @@ class BubbleTextLineFitterTest {
         assertFalse("Should not have double hyphen or '-", firstLine.endsWith("'-"))
     }
 
+    @Test
+    fun `dp line breaker avoids intermediate short orphan words on multi-line bubbles`() {
+        val result = fit(
+            text = "Çok çok ama bu biraz çok hızlı değil mi",
+            targetEnvelope = BubbleLineEnvelope(
+                bounds = EnvelopeBounds(0f, 0f, 160f, 240f)
+            ),
+            minSp = 10f,
+            maxSp = 12f,
+            locale = Locale("tr", "TR")
+        )
+        assertTrue(result.fitsInside)
+        val lines = result.layout!!.lines.map { it.text.trim() }
+        lines.drop(1).dropLast(1).forEach { line ->
+            val words = line.split(" ")
+            assertTrue("Intermediate line '$line' should not be a single short word", words.size > 1 || line.length >= 7)
+        }
+    }
+
     private fun testMeasurer(): BubbleTextMeasurer = BubbleTextMeasurer(
         measureWidth = { text, textSizePx -> text.length * textSizePx * 0.55f },
         metricsForSize = { textSizePx ->

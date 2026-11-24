@@ -129,24 +129,39 @@ fun buildContourPath(profile: ContourScanlineProfile, bounds: RectF): Path {
     val topY = bounds.top + startRow * stepY
     path.moveTo(topMidX, topY)
 
-    // 2. Sağ kenar (yukarıdan aşağıya organik iniş)
+    // 2. Sağ kenar (yukarıdan aşağıya pürüzsüz kuadratik Bézier eğrisi)
+    var prevX = topMidX
+    var prevY = topY
     for (r in startRow..endRow) {
-        val y = bounds.top + (r + 0.5f) * stepY
-        val x = bounds.left + profile.rowRightFractions[r] * bounds.width()
-        path.lineTo(x, y)
+        val curX = bounds.left + profile.rowRightFractions[r] * bounds.width()
+        val curY = bounds.top + (r + 0.5f) * stepY
+        val midX = (prevX + curX) * 0.5f
+        val midY = (prevY + curY) * 0.5f
+        path.quadTo(prevX, prevY, midX, midY)
+        prevX = curX
+        prevY = curY
     }
 
     // 3. Dip kubbe merkezi
     val botMidX = bounds.left + (profile.rowLeftFractions[endRow] + profile.rowRightFractions[endRow]) * 0.5f * bounds.width()
     val botY = bounds.top + (endRow + 1) * stepY
-    path.lineTo(botMidX, botY)
+    path.quadTo(prevX, prevY, botMidX, botY)
+    prevX = botMidX
+    prevY = botY
 
-    // 4. Sol kenar (aşağıdan yukarıya organik çıkış)
+    // 4. Sol kenar (aşağıdan yukarıya pürüzsüz kuadratik Bézier eğrisi)
     for (r in endRow downTo startRow) {
-        val y = bounds.top + (r + 0.5f) * stepY
-        val x = bounds.left + profile.rowLeftFractions[r] * bounds.width()
-        path.lineTo(x, y)
+        val curX = bounds.left + profile.rowLeftFractions[r] * bounds.width()
+        val curY = bounds.top + (r + 0.5f) * stepY
+        val midX = (prevX + curX) * 0.5f
+        val midY = (prevY + curY) * 0.5f
+        path.quadTo(prevX, prevY, midX, midY)
+        prevX = curX
+        prevY = curY
     }
+
+    // 5. Tepe kapanış: son sol noktadan tepe merkezine bağlanıp kapat
+    path.quadTo(prevX, prevY, topMidX, topY)
     path.close()
     return path
 }
