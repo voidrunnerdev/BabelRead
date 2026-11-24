@@ -3290,7 +3290,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                             else -> textBounds
                                         }
                                         val candidateContour = yoloBubbles.firstOrNull { yb ->
-                                            val r = yb.toPixelRect(bmpW, bmpH)
+                                            val r = yb.toPixelRect(bitmap.width, bitmap.height)
                                             r == bubbleBounds || r.contains(textBounds.centerX(), textBounds.centerY())
                                         }?.contourProfile
                                         // Size bubble text from the balloon interior. The tight
@@ -3343,7 +3343,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     else -> cluster.rect
                                 }
                                 val unmatchedContour = yoloBubbles.firstOrNull { yb ->
-                                    val r = yb.toPixelRect(bmpW, bmpH)
+                                    val r = yb.toPixelRect(bitmap.width, bitmap.height)
                                     r == refinedBox || r.contains(cluster.rect.centerX(), cluster.rect.centerY())
                                 }?.contourProfile
                                 val targetBox = (if (finalIsBubble) {
