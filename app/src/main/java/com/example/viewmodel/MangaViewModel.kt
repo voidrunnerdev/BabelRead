@@ -3334,8 +3334,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                             else -> textBounds
                                         }
                                         val candidateContour = yoloBubbles.firstOrNull { yb ->
-                                            val r = yb.toPixelRect(bitmap.width, bitmap.height)
-                                            r == bubbleBounds || r.contains(textBounds.centerX(), textBounds.centerY())
+                                            yb.toPixelRect(bitmap.width, bitmap.height) == bubbleBounds
+                                        }?.contourProfile ?: yoloBubbles.firstOrNull { yb ->
+                                            yb.toPixelRect(bitmap.width, bitmap.height).contains(textBounds.centerX(), textBounds.centerY())
                                         }?.contourProfile
                                         // Size bubble text from the balloon interior. The tight
                                         // text_bubble detection remains a fallback anchor, but
@@ -3389,8 +3390,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     else -> cluster.rect
                                 }
                                 val unmatchedContour = yoloBubbles.firstOrNull { yb ->
-                                    val r = yb.toPixelRect(bitmap.width, bitmap.height)
-                                    r == refinedBox || r.contains(cluster.rect.centerX(), cluster.rect.centerY())
+                                    yb.toPixelRect(bitmap.width, bitmap.height) == refinedBox
+                                }?.contourProfile ?: yoloBubbles.firstOrNull { yb ->
+                                    yb.toPixelRect(bitmap.width, bitmap.height).contains(cluster.rect.centerX(), cluster.rect.centerY())
                                 }?.contourProfile
                                 val isRectangularBox = !analysis.isBubble || (unmatchedContour?.isRectangularLike == true) ||
                                     (containingBubble == null && refinedBox.width() > 0 && refinedBox.height() > 0)
