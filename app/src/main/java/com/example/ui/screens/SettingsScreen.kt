@@ -572,46 +572,46 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                         SettingsSubHeader("OCR Motoru")
                         Spacer(modifier = Modifier.height(AppSpacing.sm))
                         SegmentedChoice(
-                            options = listOf("ML Kit", "PP-OCRv5", "PP-OCRv5 EN"),
-                            selected = ocrEngine,
+                            options = listOf("ML Kit", "PARSeq", "PP-OCRv5"),
+                            selected = if (ocrEngine.equals("PP-OCRv5 EN", ignoreCase = true)) "PARSeq" else ocrEngine,
                             onSelect = { engine -> viewModel.setOcrEngine(engine) }
                         )
-                        if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
+                        if (ocrEngine.equals("PARSeq", ignoreCase = true) || ocrEngine.equals("PP-OCRv5 EN", ignoreCase = true)) {
+                            val parseqInstalled = remember { viewModel.isParSeqModelInstalled() }
                             Spacer(modifier = Modifier.height(AppSpacing.sm))
                             Text(
                                 text = if (yoloAiEnabled) {
-                                    "PP-OCRv5: Japonca ve İngilizce (çok dilli); RT-DETR metin kutuları kullanılır."
+                                    "PARSeq: Manga ve çizgi romanlar için özel İngilizce OCR; stilize fontları, büyük harfleri ve konuşma balonlarını kusursuz okur."
                                 } else {
-                                    "PP-OCRv5 için RT-DETR açık olmalı; şu anda tüm sayfa OCR'ı devre dışı."
-                                },
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Warning
-                            )
-                        } else if (ocrEngine.equals("PP-OCRv5 EN", ignoreCase = true)) {
-                            val enModelInstalled = remember { viewModel.isPpOcrEnglishModelInstalled() }
-                            Spacer(modifier = Modifier.height(AppSpacing.sm))
-                            Text(
-                                text = if (yoloAiEnabled) {
-                                    "PP-OCRv5 EN: yalnızca İngilizce; RT-DETR metin kutuları kullanılır."
-                                } else {
-                                    "PP-OCRv5 EN için RT-DETR açık olmalı; şu anda tüm sayfa OCR'ı devre dışı."
+                                    "PARSeq için yapay zeka balon tespiti açık olmalı; şu anda tüm sayfa OCR'ı devre dışı."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Warning
                             )
                             Spacer(modifier = Modifier.height(AppSpacing.xs))
                             Text(
-                                text = if (enModelInstalled) {
-                                    "Model hazır (en_PP-OCRv5_mobile_rec.onnx)."
+                                text = if (parseqInstalled) {
+                                    "Model hazır (parseq_rec.onnx, 8-bit dynamic INT8)."
                                 } else {
-                                    "Model eksik: en_PP-OCRv5_mobile_rec.onnx dosyasını app/src/main/assets/models/ klasörüne ekleyin."
+                                    "Model eksik: parseq_rec.onnx dosyasını app/src/main/assets/models/ klasörüne ekleyin."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (enModelInstalled) {
+                                color = if (parseqInstalled) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
                                     MaterialTheme.colorScheme.error
                                 }
+                            )
+                        } else if (ocrEngine.equals("PP-OCRv5", ignoreCase = true)) {
+                            Spacer(modifier = Modifier.height(AppSpacing.sm))
+                            Text(
+                                text = if (yoloAiEnabled) {
+                                    "PP-OCRv5: Japonca ve çok dilli genel OCR; balon ve metin kutuları kullanılır."
+                                } else {
+                                    "PP-OCRv5 için yapay zeka balon tespiti açık olmalı; şu anda tüm sayfa OCR'ı devre dışı."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Warning
                             )
                         }
                     }

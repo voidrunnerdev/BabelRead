@@ -114,8 +114,8 @@ class TranslationService(
     private val appContext = context.applicationContext
     private val ppOcrV5EngineLazy = lazy { PpOcrV5Engine(appContext, PpOcrV5Engine.Variant.MULTILINGUAL) }
     private val ppOcrV5Engine: PpOcrV5Engine by ppOcrV5EngineLazy
-    private val ppOcrV5EnEngineLazy = lazy { PpOcrV5Engine(appContext, PpOcrV5Engine.Variant.ENGLISH_ONLY) }
-    private val ppOcrV5EnEngine: PpOcrV5Engine by ppOcrV5EnEngineLazy
+    private val parSeqEngineLazy = lazy { ParSeqEngine(appContext) }
+    private val parSeqEngine: ParSeqEngine by parSeqEngineLazy
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -420,27 +420,35 @@ class TranslationService(
         originLanguage: String,
         ocrEngine: String = "ML Kit"
     ): List<RectAndText> {
-        if (isPpOcrEngine(ocrEngine)) {
-            Log.w(TAG, "PP-OCRv5 is region-based; whole-page OCR requires RT-DETR regions")
+        if (isRegionOcrEngine(ocrEngine)) {
+            Log.w(TAG, "$ocrEngine is region-based; whole-page OCR requires RT-DETR/YOLO regions")
             return emptyList()
         }
         return performOcr(bitmap, originLanguage, applyPageMarginFilter = true)
     }
 
-    private fun isPpOcrEnglishEngine(engine: String): Boolean =
-        engine.equals("PP-OCRv5 EN", ignoreCase = true)
+    fun isParSeqEngine(engine: String): Boolean =
+        engine.equals("PARSeq", ignoreCase = true) ||
+            engine.equals("PARSeq EN", ignoreCase = true) ||
+            engine.equals("PP-OCRv5 EN", ignoreCase = true)
 
-    private fun isPpOcrEngine(engine: String): Boolean =
-        engine.equals("PP-OCRv5", ignoreCase = true) || isPpOcrEnglishEngine(engine)
+    fun isPpOcrEngine(engine: String): Boolean =
+        engine.equals("PP-OCRv5", ignoreCase = true)
 
-    private fun ppEngineFor(ocrEngine: String): PpOcrV5Engine =
-        if (isPpOcrEnglishEngine(ocrEngine)) ppOcrV5EnEngine else ppOcrV5Engine
+    fun isRegionOcrEngine(engine: String): Boolean =
+        isParSeqEngine(engine) || isPpOcrEngine(engine)
 
-    fun isOcrEngineAvailable(ocrEngine: String): Boolean =
-        if (isPpOcrEngine(ocrEngine)) ppEngineFor(ocrEngine).isReady() else true
+    fun isOcrEngineAvailable(ocrEngine: String): Boolean = when {
+        isParSeqEngine(ocrEngine) -> parSeqEngine.isReady()
+        isPpOcrEngine(ocrEngine) -> ppOcrV5Engine.isReady()
+        else -> true
+    }
+
+    fun isParSeqModelInstalled(): Boolean =
+        ParSeqEngine.hasModelAsset(appContext)
 
     fun isPpOcrEnglishModelInstalled(): Boolean =
-        PpOcrV5Engine.hasModelAsset(appContext, PpOcrV5Engine.Variant.ENGLISH_ONLY)
+        isParSeqModelInstalled()
 
     /**
      * Fetches the live catalog of Gemini models available to the user's API key
@@ -500,10 +508,10 @@ class TranslationService(
         }
 
     suspend fun prewarmOcrEngine(ocrEngine: String): Boolean {
-        return if (isPpOcrEngine(ocrEngine)) {
-            ppEngineFor(ocrEngine).prewarm()
-        } else {
-            false
+        return when {
+            isParSeqEngine(ocrEngine) -> parSeqEngine.prewarm()
+            isPpOcrEngine(ocrEngine) -> ppOcrV5Engine.prewarm()
+            else -> false
         }
     }
 
@@ -803,16 +811,37 @@ class TranslationService(
         ocrEngine: String = "ML Kit"
     ): List<RectAndText> = withContext(Dispatchers.Default) {
         if (bitmap.isRecycled || regions.isEmpty()) return@withContext emptyList()
+        if (isParSeqEngine(ocrEngine)) {
+            if (!parSeqEngine.isReady()) {
+                Log.w(TAG, "PARSeq recognizer is unavailable, falling back to ML Kit")
+                return@withContext performOcr(bitmap, originLanguage, applyPageMarginFilter = true)
+            }
+            val parseqResults = mutableListOf<RectAndText>()
+            for (region in regions) {
+                currentCoroutineContext().ensureActive()
+                if (region.isEmpty) continue
+                val marginX = max(4, (region.width() * 0.04f).toInt())
+                val marginY = max(4, (region.height() * 0.04f).toInt())
+                val expanded = Rect(
+                    (region.left - marginX).coerceAtLeast(0),
+                    (region.top - marginY).coerceAtLeast(0),
+                    (region.right + marginX).coerceAtMost(bitmap.width),
+                    (region.bottom + marginY).coerceAtMost(bitmap.height)
+                )
+                if (expanded.width() < 8 || expanded.height() < 8) continue
+                parseqResults.addAll(
+                    parSeqEngine.recognizeBlock(bitmap, expanded, originLanguage).map {
+                        RectAndText(it.rect, cleanOcrArtifacts(it.text, originLanguage))
+                    }
+                )
+            }
+            return@withContext resolveCollidingBlocks(parseqResults)
+        }
         if (isPpOcrEngine(ocrEngine)) {
-            val activePpEngine = ppEngineFor(ocrEngine)
+            val activePpEngine = ppOcrV5Engine
             if (!activePpEngine.isReady()) {
                 Log.e(TAG, "$ocrEngine recognizer is unavailable")
-                val errMsg = if (isPpOcrEnglishEngine(ocrEngine)) {
-                    "en_PP-OCRv5_mobile_rec.onnx bulunamadı. Dosyayı assets/models/ klasörüne ekleyin."
-                } else {
-                    "PP-OCRv5 recognizer could not be loaded"
-                }
-                throw IllegalStateException(errMsg)
+                throw IllegalStateException("PP-OCRv5 recognizer could not be loaded")
             }
             val ppResults = mutableListOf<RectAndText>()
             for (region in regions) {
@@ -2287,8 +2316,8 @@ class TranslationService(
                     if (ppOcrV5EngineLazy.isInitialized()) {
                         runCatching { ppOcrV5Engine.close() }
                     }
-                    if (ppOcrV5EnEngineLazy.isInitialized()) {
-                        runCatching { ppOcrV5EnEngine.close() }
+                    if (parSeqEngineLazy.isInitialized()) {
+                        runCatching { parSeqEngine.close() }
                     }
                 } finally {
                     translatorLifecycleMutex.withLock {

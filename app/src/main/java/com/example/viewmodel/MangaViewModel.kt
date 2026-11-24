@@ -1656,7 +1656,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         ppOcrPrewarmJob = viewModelScope.launch(Dispatchers.IO + viewModelExceptionHandler) {
             try {
                 val activeOcr = preferences.ocrEngine.first()
-                if (activeOcr.equals("PP-OCRv5", ignoreCase = true) || activeOcr.equals("PP-OCRv5 EN", ignoreCase = true)) {
+                if (translationService.isRegionOcrEngine(activeOcr)) {
                     val ready = translationService.prewarmOcrEngine(activeOcr)
                     if (ready) {
                         Log.d("TR", "$activeOcr prewarm tamamlandı")
@@ -2162,14 +2162,17 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun isParSeqModelInstalled(): Boolean =
+        translationService.isParSeqModelInstalled()
+
     fun isPpOcrEnglishModelInstalled(): Boolean =
-        translationService.isPpOcrEnglishModelInstalled()
+        isParSeqModelInstalled()
 
     fun setOcrEngine(engine: String) {
         viewModelScope.launch {
             if (preferences.ocrEngine.first() == engine) return@launch
             preferences.setOcrEngine(engine)
-            if (engine.equals("PP-OCRv5", ignoreCase = true) || engine.equals("PP-OCRv5 EN", ignoreCase = true)) {
+            if (translationService.isRegionOcrEngine(engine)) {
                 prewarmPpOcrIfNeeded()
             }
             resetActiveChapterTranslationState()
@@ -2715,28 +2718,28 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 // karşılığı yoktur. PP-OCRv5 bu sayfaları Japonca varsayarak
                 // dikey metin segmentasyonunu çalıştırır; gerçek dil OCR
                 // sonrasında detectRealLanguage ile düzeltilir.
-                val isPpOcrEn = ocrEngine.equals("PP-OCRv5 EN", ignoreCase = true)
-                val isPpOcrAny = ocrEngine.equals("PP-OCRv5", ignoreCase = true) || isPpOcrEn
+                val isParSeq = translationService.isParSeqEngine(ocrEngine)
+                val isPpOcrAny = translationService.isRegionOcrEngine(ocrEngine)
                 val localUnknownOrigin = originLang.equals("Yerel", ignoreCase = true) ||
                     originLang.equals("Bilinmiyor", ignoreCase = true)
                 val ppOriginLang = when {
-                    isPpOcrEn && (originCode == "en" || localUnknownOrigin) -> "İngilizce"
-                    isPpOcrEn -> null
+                    isParSeq && (originCode == "en" || localUnknownOrigin) -> "İngilizce"
+                    isParSeq -> null
                     originCode == "en" || originCode == "ja" -> originLang
                     localUnknownOrigin -> "Japonca"
                     else -> null
                 }
                 if (isPpOcrAny) {
-                    if (isPpOcrEn && ppOriginLang == null) {
-                        emitTranslationNotice("PP-OCRv5 EN yalnızca İngilizce kaynakları destekler.")
+                    if (isParSeq && ppOriginLang == null) {
+                        emitTranslationNotice("PARSeq yalnızca İngilizce kaynakları destekler.")
                         return@launch
                     }
-                    if (!isPpOcrEn && (originCode == "zh" || originCode == "ko")) {
+                    if (!isParSeq && (originCode == "zh" || originCode == "ko")) {
                         Log.d("TR", "PP-OCRv5: $originLang kaynağı sessizce atlandı (sayfa=$pageIdx)")
                         return@launch
                     }
                     if (ppOriginLang == null) {
-                        emitTranslationNotice("PP-OCRv5 yalnızca İngilizce ve Japonca kaynakları destekler.")
+                        emitTranslationNotice("$ocrEngine yalnızca İngilizce ve Japonca kaynakları destekler.")
                         return@launch
                     }
                 }
@@ -2789,8 +2792,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         emitTranslationNotice("$ocrEngine için RT-DETR açık olmalı; tüm sayfa OCR'ı desteklenmiyor.")
                         return@launch
                     }
-                    if (isPpOcrEn && !translationService.isOcrEngineAvailable(ocrEngine)) {
-                        emitTranslationNotice("en_PP-OCRv5_mobile_rec.onnx bulunamadı. Dosyayı assets/models/ klasörüne ekleyin.")
+                    if (isParSeq && !translationService.isOcrEngineAvailable(ocrEngine)) {
+                        emitTranslationNotice("parseq_rec.onnx bulunamadı. Dosyayı assets/models/ klasörüne ekleyin.")
                         return@launch
                     }
 
