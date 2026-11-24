@@ -524,8 +524,11 @@ class YoloBubbleDetector(context: Context) {
         val internalDir = File(context.filesDir, "models")
         if (!internalDir.exists() && !internalDir.mkdirs()) return@synchronized null
         val internalFile = File(internalDir, modelType.targetFileName)
-        // Eşleşen boyuttaki model dosyası varsa doğrudan kullan
-        if (internalFile.exists() && internalFile.length() == modelType.expectedBytes) return@synchronized internalFile
+        val isCustom = File(internalDir, "${modelType.targetFileName}.imported").exists()
+        // Eşleşen boyuttaki gömülü model veya kullanıcı tarafından yüklenmiş model varsa doğrudan kullan
+        if (internalFile.exists() && (internalFile.length() == modelType.expectedBytes || (isCustom && internalFile.length() > MIN_MODEL_FILE_BYTES))) {
+            return@synchronized internalFile
+        }
 
         val tempFile = File(internalDir, "${modelType.targetFileName}.tmp")
         try {
@@ -572,9 +575,10 @@ class YoloBubbleDetector(context: Context) {
     suspend fun importModelFile(inputStream: InputStream): Pair<Boolean, String?> = withContext(Dispatchers.IO) {
         val internalDir = File(context.filesDir, "models")
         if (!internalDir.exists()) internalDir.mkdirs()
-        val tempFile = File(internalDir, "${MODEL_FILENAME}.import.tmp")
-        val targetFile = File(internalDir, MODEL_FILENAME)
-        val backupFile = File(internalDir, "${MODEL_FILENAME}.backup")
+        val tempFile = File(internalDir, "${activeModelType.targetFileName}.import.tmp")
+        val targetFile = File(internalDir, activeModelType.targetFileName)
+        val backupFile = File(internalDir, "${activeModelType.targetFileName}.backup")
+        val markerFile = File(internalDir, "${activeModelType.targetFileName}.imported")
 
         try {
             synchronized(modelFileLock) {
@@ -614,6 +618,7 @@ class YoloBubbleDetector(context: Context) {
                     if (backupFile.exists()) backupFile.renameTo(targetFile)
                     return@withContext Pair(false, "Yeni model dosyası kaydedilemedi.")
                 }
+                markerFile.createNewFile()
             }
 
             invalidateModelHashCache()
@@ -627,6 +632,7 @@ class YoloBubbleDetector(context: Context) {
                 closeSession()
                 synchronized(modelFileLock) {
                     targetFile.delete()
+                    markerFile.delete()
                     if (backupFile.exists()) backupFile.renameTo(targetFile)
                 }
                 invalidateModelHashCache()
