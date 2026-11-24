@@ -197,4 +197,33 @@ class ExampleRobolectricTest {
         val path = com.example.util.buildContourPath(profile, bounds)
         assertTrue(!path.isEmpty)
     }
+
+    @Test
+    fun `test TranslationCacheCodec preserves contourProfile through serialization and deserialization`() {
+        val lefts = floatArrayOf(0.35f, 0.20f, 0.10f, 0.20f, 0.35f)
+        val rights = floatArrayOf(0.65f, 0.80f, 0.90f, 0.80f, 0.65f)
+        val originalProfile = com.example.util.ContourScanlineProfile(lefts, rights, 0.48f, 0.52f)
+        val block = com.example.service.TextBlockObj(
+            originalText = "Hello",
+            translatedText = "Merhaba",
+            boundingBox = android.graphics.Rect(10, 20, 100, 200),
+            bubbleBox = android.graphics.Rect(10, 20, 100, 200),
+            isBubble = true,
+            contourProfile = originalProfile
+        )
+
+        val json = com.example.data.db.TranslationCacheCodec.serializeBlocks(listOf(block))
+        val restoredBlocks = com.example.data.db.TranslationCacheCodec.deserializeBlocks(json)
+
+        assertEquals(1, restoredBlocks.size)
+        val restored = restoredBlocks.first()
+        org.junit.Assert.assertNotNull(restored.contourProfile)
+        val restoredProfile = restored.contourProfile!!
+        assertTrue(restoredProfile.isUsable)
+        assertEquals(5, restoredProfile.rowCount)
+        assertEquals(0.48f, restoredProfile.opticalCenterX, 0.01f)
+        assertEquals(0.52f, restoredProfile.opticalCenterY, 0.01f)
+        assertEquals(0.10f, restoredProfile.rowLeftFractions[2], 0.01f)
+        assertEquals(0.90f, restoredProfile.rowRightFractions[2], 0.01f)
+    }
 }

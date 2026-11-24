@@ -8,6 +8,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import com.example.service.TextBlockObj
+import com.example.util.ContourScanlineProfile
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
@@ -173,6 +174,20 @@ object TranslationCacheCodec {
             obj.put("ok", if (block.translationSucceeded) 1 else 0)
             obj.put("cw", block.coordinateImageWidth)
             obj.put("ch", block.coordinateImageHeight)
+            block.contourProfile?.let { cp ->
+                if (cp.isUsable) {
+                    val cpObj = JSONObject()
+                    val lfArr = JSONArray()
+                    val rfArr = JSONArray()
+                    for (v in cp.rowLeftFractions) lfArr.put(v.toDouble())
+                    for (v in cp.rowRightFractions) rfArr.put(v.toDouble())
+                    cpObj.put("lf", lfArr)
+                    cpObj.put("rf", rfArr)
+                    cpObj.put("ox", cp.opticalCenterX.toDouble())
+                    cpObj.put("oy", cp.opticalCenterY.toDouble())
+                    obj.put("cp", cpObj)
+                }
+            }
             array.put(obj)
         }
         return array.toString()
@@ -186,6 +201,18 @@ object TranslationCacheCodec {
             val rect = rectFromJson(obj.optJSONArray("r")) ?: continue
             val bubble = rectFromJson(obj.optJSONArray("bb")) ?: rect
             val layout = rectFromJson(obj.optJSONArray("lb")) ?: bubble
+            val contourProfile = obj.optJSONObject("cp")?.let { cpObj ->
+                val lfArr = cpObj.optJSONArray("lf")
+                val rfArr = cpObj.optJSONArray("rf")
+                if (lfArr != null && rfArr != null && lfArr.length() > 0 && lfArr.length() == rfArr.length()) {
+                    val len = lfArr.length()
+                    val lf = FloatArray(len) { lfArr.optDouble(it, 0.0).toFloat() }
+                    val rf = FloatArray(len) { rfArr.optDouble(it, 1.0).toFloat() }
+                    val ox = cpObj.optDouble("ox", 0.5).toFloat()
+                    val oy = cpObj.optDouble("oy", 0.5).toFloat()
+                    ContourScanlineProfile(lf, rf, ox, oy).takeIf { it.isUsable }
+                } else null
+            }
             out.add(
                 TextBlockObj(
                     originalText = obj.optString("o", ""),
@@ -202,7 +229,8 @@ object TranslationCacheCodec {
                     layoutBox = layout,
                     translationSucceeded = obj.optInt("ok", 1) == 1,
                     coordinateImageWidth = obj.optInt("cw", 0),
-                    coordinateImageHeight = obj.optInt("ch", 0)
+                    coordinateImageHeight = obj.optInt("ch", 0),
+                    contourProfile = contourProfile
                 )
             )
         }

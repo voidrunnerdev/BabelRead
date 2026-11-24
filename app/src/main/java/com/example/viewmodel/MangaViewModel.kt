@@ -2360,6 +2360,29 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _translatedPagesMap.update { current ->
             if (readerGeneration.get() != generation) current else current + (pageIdx to blocks)
         }
+        val reconstructedBubbles = blocks.filter { it.isBubble && !it.bubbleBox.isEmpty }.mapIndexed { idx, block ->
+            val bmpW = loadedBitmap.width.toFloat().coerceAtLeast(1f)
+            val bmpH = loadedBitmap.height.toFloat().coerceAtLeast(1f)
+            BubbleBox(
+                id = idx + 1,
+                bounds = RectF(
+                    block.bubbleBox.left / bmpW,
+                    block.bubbleBox.top / bmpH,
+                    block.bubbleBox.right / bmpW,
+                    block.bubbleBox.bottom / bmpH
+                ),
+                confidence = 1.0f,
+                label = "bubble",
+                originalText = block.originalText,
+                translatedText = block.translatedText,
+                contourProfile = block.contourProfile
+            )
+        }
+        if (reconstructedBubbles.isNotEmpty()) {
+            _detectedBubblesMap.update { current ->
+                if (!current.containsKey(pageIdx)) current + (pageIdx to reconstructedBubbles) else current
+            }
+        }
         storeMaskedPage(pageIdx, loadedBitmap, generation)
         // LRU / kayan TTL: yakın zamanda okunan sayfalar bütçe budamasında korunur.
         withContext(NonCancellable + Dispatchers.IO) {

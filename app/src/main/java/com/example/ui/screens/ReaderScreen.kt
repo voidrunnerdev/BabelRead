@@ -1505,8 +1505,15 @@ fun ReaderPageContainer(
                                     minOf(maxOf((baseBox.width() * 3.5f).toInt(), 260), (pageW * 0.50f).toInt())
                                 }
                                 val targetW = minOf(rawTargetW, maxWidthCap).coerceAtLeast(baseBox.width())
-                                val shiftX = ((targetW - baseBox.width()) / 2).coerceAtLeast(0)
-                                val newLeft = (baseBox.left - shiftX).coerceIn(0, (pageW - targetW).coerceAtLeast(0))
+                                val bubbleL = if (!block.bubbleBox.isEmpty) block.bubbleBox.left else 0
+                                val bubbleR = if (!block.bubbleBox.isEmpty) block.bubbleBox.right else pageW
+                                val bW = (bubbleR - bubbleL).coerceAtLeast(baseBox.width())
+                                val newLeft = if (targetW <= bW) {
+                                    (baseBox.centerX() - targetW / 2).coerceIn(bubbleL, (bubbleR - targetW).coerceAtLeast(bubbleL))
+                                } else {
+                                    val centered = (bubbleL + bubbleR - targetW) / 2
+                                    centered.coerceIn(0, (pageW - targetW).coerceAtLeast(0))
+                                }
                                 Rect(newLeft, baseBox.top, newLeft + targetW, baseBox.bottom)
                             } else {
                                 baseBox
@@ -1746,7 +1753,14 @@ fun ReaderPageContainer(
                                     }
                                 }
                             } else {
-                                val bubbleBounds = p1BubbleBounds()
+                                val bubbleBounds = if (isSub) null else {
+                                    BubbleLayoutGeometry.reliableBubbleBounds(
+                                        bubble = block.bubbleBox,
+                                        anchor = block.boundingBox,
+                                        pageBounds = pageBounds,
+                                        requireDistinctBubble = false
+                                    ) ?: if (!block.bubbleBox.isEmpty) Rect(block.bubbleBox) else null
+                                }
                                 val bubbleGeo = bubbleBounds?.let { geometryFor(it) }
                                 val contourProfile = block.contourProfile ?: if (validMasked != null && bubbleBounds != null) {
                                     contourCache.getOrPut(blockIndex) {
@@ -1846,6 +1860,23 @@ fun ReaderPageContainer(
                                 if (bubbleGeo != null && envelopeFit != null && envelopeFit.fitsInside) {
                                     geo = bubbleGeo
                                     opt = envelopeFit
+                                } else if (bubbleGeo != null) {
+                                    val fallbackEnvelope = optimizeBubbleEnvelope(
+                                        bubbleGeo,
+                                        minSp = 6.0f,
+                                        allowBrokenWords = true,
+                                        textScaleX = 0.82f,
+                                        contourProfile = contourProfile,
+                                        isRectangular = isRectangularBox
+                                    )
+                                    geo = bubbleGeo
+                                    opt = fallbackEnvelope?.takeIf { it.fitsInside } ?: optimize(
+                                        bubbleGeo,
+                                        minSp = 6.0f,
+                                        allowBrokenWords = true,
+                                        textOverride = hyphenateForFit(cleanText),
+                                        textScaleX = 0.82f
+                                    )
                                 } else {
                                     opt = optimize(
                                         geo,
@@ -1901,12 +1932,20 @@ fun ReaderPageContainer(
                                                 requiredHeightPx,
                                                 ceil(expanded.height() * 1.30f).toInt()
                                             ).coerceAtMost(maxOf(safeBubble.height(), (50f * density.density).toInt()))
-                                            val maxLeft = maxOf(safeBubble.left, (pageOriginalWidth.toInt() - nextWidth).coerceAtLeast(0))
-                                            val left = (anchorX - nextWidth / 2f).roundToInt()
-                                                .coerceIn(0, maxLeft)
-                                            val maxTop = maxOf(safeBubble.top, (pageOriginalHeight.toInt() - nextHeight).coerceAtLeast(0))
-                                            val top = (anchorY - nextHeight / 2f).roundToInt()
-                                                .coerceIn(0, maxTop)
+                                            val safeW = safeBubble.width()
+                                            val left = if (nextWidth <= safeW) {
+                                                (anchorX - nextWidth / 2f).roundToInt().coerceIn(safeBubble.left, (safeBubble.right - nextWidth).coerceAtLeast(safeBubble.left))
+                                            } else {
+                                                val centered = (safeBubble.left + safeBubble.right - nextWidth) / 2
+                                                centered.coerceIn(0, (pageOriginalWidth.toInt() - nextWidth).coerceAtLeast(0))
+                                            }
+                                            val safeH = safeBubble.height()
+                                            val top = if (nextHeight <= safeH) {
+                                                (anchorY - nextHeight / 2f).roundToInt().coerceIn(safeBubble.top, (safeBubble.bottom - nextHeight).coerceAtLeast(safeBubble.top))
+                                            } else {
+                                                val centered = (safeBubble.top + safeBubble.bottom - nextHeight) / 2
+                                                centered.coerceIn(0, (pageOriginalHeight.toInt() - nextHeight).coerceAtLeast(0))
+                                            }
                                             val next = Rect(left, top, left + nextWidth, top + nextHeight)
                                             if (next == expanded) break
                                             expanded = next
@@ -2237,16 +2276,35 @@ fun ReaderPageContainer(
                                 .height(boxHeight)
                                 .drawBehind {
                                     if (size.width <= 0f || size.height <= 0f) return@drawBehind
+                                    val isDark = block.isDarkBubble || bubbleStyle == "Koyu Zemin"
+                                    val borderColor = if (isDark) {
+                                        Color.White.copy(alpha = 0.85f)
+                                    } else {
+                                        Color.Black.copy(alpha = 0.90f)
+                                    }
+
                                     if (cachedBackgroundPath != null) {
+                                        // 1. Zemin dolgusu
                                         drawPath(
                                             path = cachedBackgroundPath,
                                             color = boxBackground
                                         )
+                                        // 2. Mürekkep sızıntısını örten zemin genişletmesi
                                         drawPath(
                                             path = cachedBackgroundPath,
                                             color = boxBackground,
                                             style = Stroke(
-                                                width = with(density) { 2.5.dp.toPx() },
+                                                width = with(density) { 2.dp.toPx() },
+                                                cap = StrokeCap.Round,
+                                                join = StrokeJoin.Round
+                                            )
+                                        )
+                                        // 3. Orijinal manga kontur çizgisi (Border)
+                                        drawPath(
+                                            path = cachedBackgroundPath,
+                                            color = borderColor,
+                                            style = Stroke(
+                                                width = with(density) { 1.5.dp.toPx() },
                                                 cap = StrokeCap.Round,
                                                 join = StrokeJoin.Round
                                             )
@@ -2257,10 +2315,23 @@ fun ReaderPageContainer(
                                             size = size,
                                             cornerRadius = CornerRadius(6.dp.toPx())
                                         )
+                                        if (!isSubtitleMode && isRectangularBox) {
+                                            drawRoundRect(
+                                                color = borderColor,
+                                                size = size,
+                                                cornerRadius = CornerRadius(6.dp.toPx()),
+                                                style = Stroke(width = with(density) { 1.5.dp.toPx() })
+                                            )
+                                        }
                                     } else {
                                         drawOval(
                                             color = boxBackground,
                                             size = size
+                                        )
+                                        drawOval(
+                                            color = borderColor,
+                                            size = size,
+                                            style = Stroke(width = with(density) { 1.5.dp.toPx() })
                                         )
                                     }
                                 }
