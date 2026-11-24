@@ -1463,38 +1463,48 @@ fun ReaderPageContainer(
                             pageOriginalHeight.toInt().coerceAtLeast(1)
                         )
                         val preparedBoxes = translatedBlocks.map { block ->
-                            if (!block.isBubble) {
-                                Rect(block.boundingBox)
-                            } else {
+                            val bubbleW = if (!block.bubbleBox.isEmpty) block.bubbleBox.width() else 0
+                            val safeBubble = BubbleLayoutGeometry.reliableBubbleBounds(block.bubbleBox, block.boundingBox, pageBounds)
+                            val availableBubbleWidth = when {
+                                safeBubble != null && safeBubble.width() > 0 -> (safeBubble.width() * 0.92f).toInt()
+                                bubbleW > 0 -> (bubbleW * 0.92f).toInt()
+                                else -> 0
+                            }
+                            val baseBox = if (block.isBubble) {
                                 // Never clip or recenter a fallback layout against the
                                 // bubble here: it can be the OCR anchor itself and would
                                 // be silently shrunk. Only page bounds may clip it.
-                                val layoutBox = BubbleLayoutGeometry.prepareBubbleTextLayoutBox(
+                                BubbleLayoutGeometry.prepareBubbleTextLayoutBox(
                                     layout = Rect(block.layoutBox),
                                     bubble = Rect(block.bubbleBox),
                                     anchor = Rect(block.boundingBox),
                                     pageBounds = pageBounds
                                 )
-                                val bubbleW = if (!block.bubbleBox.isEmpty) block.bubbleBox.width() else 0
-                                val safeBubble = BubbleLayoutGeometry.reliableBubbleBounds(block.bubbleBox, block.boundingBox, pageBounds)
-                                val availableBubbleWidth = when {
-                                    safeBubble != null && safeBubble.width() > 0 -> (safeBubble.width() * 0.88f).toInt()
-                                    bubbleW > 0 -> (bubbleW * 0.88f).toInt()
-                                    else -> 0
-                                }
-                                val currentAspect = if (layoutBox.height() > 0) layoutBox.width().toFloat() / layoutBox.height().toFloat() else 1f
-                                if (layoutBox.height() > 0 && (currentAspect < 0.85f || (availableBubbleWidth > layoutBox.width() * 1.15f))) {
-                                    val targetW = when {
-                                        availableBubbleWidth > 0 -> maxOf(layoutBox.width(), availableBubbleWidth)
-                                        else -> maxOf(layoutBox.width(), (layoutBox.height() * 0.70f).toInt())
-                                    }
-                                    val pageW = pageOriginalWidth.toInt().coerceAtLeast(1)
-                                    val shiftX = ((targetW - layoutBox.width()) / 2).coerceAtLeast(0)
-                                    val newLeft = (layoutBox.left - shiftX).coerceIn(0, (pageW - targetW).coerceAtLeast(0))
-                                    Rect(newLeft, layoutBox.top, newLeft + targetW, layoutBox.bottom)
+                            } else {
+                                if (!block.bubbleBox.isEmpty && block.bubbleBox.width() > block.boundingBox.width()) {
+                                    Rect(block.bubbleBox)
                                 } else {
-                                    layoutBox
+                                    Rect(block.boundingBox)
                                 }
+                            }
+                            val currentAspect = if (baseBox.height() > 0) baseBox.width().toFloat() / baseBox.height().toFloat() else 1f
+                            if (baseBox.height() > 0 && (currentAspect < 0.85f || (availableBubbleWidth > baseBox.width() * 1.15f))) {
+                                val rawTargetW = when {
+                                    availableBubbleWidth > 0 -> maxOf(baseBox.width(), availableBubbleWidth)
+                                    else -> maxOf(baseBox.width(), (baseBox.height() * 0.70f).toInt())
+                                }
+                                val pageW = pageOriginalWidth.toInt().coerceAtLeast(1)
+                                val maxWidthCap = if (availableBubbleWidth > 0) {
+                                    availableBubbleWidth
+                                } else {
+                                    minOf(maxOf((baseBox.width() * 3.5f).toInt(), 260), (pageW * 0.50f).toInt())
+                                }
+                                val targetW = minOf(rawTargetW, maxWidthCap).coerceAtLeast(baseBox.width())
+                                val shiftX = ((targetW - baseBox.width()) / 2).coerceAtLeast(0)
+                                val newLeft = (baseBox.left - shiftX).coerceIn(0, (pageW - targetW).coerceAtLeast(0))
+                                Rect(newLeft, baseBox.top, newLeft + targetW, baseBox.bottom)
+                            } else {
+                                baseBox
                             }
                         }
                         val boldBoostFlags = separateNearbyBoxes(
@@ -1512,6 +1522,12 @@ fun ReaderPageContainer(
                             val boldBoost = boldBoostFlags[blockIndex]
                             val cleanText = block.translatedText.trim()
                             val isSub = bubbleStyle == "Alt Yazı (Şeffaf)" || !block.isBubble
+                            val isRectangularBox = !block.isBubble || block.bubbleBox.isEmpty ||
+                                (block.contourProfile?.isRectangularLike == true) ||
+                                (targetBox.let { box ->
+                                    val aspect = if (box.height() > 0) box.width().toFloat() / box.height().toFloat() else 1f
+                                    aspect > 1.25f || (box.height() > box.width() * 1.5f && block.contourProfile == null)
+                                })
 
                             fun geometryFor(box: Rect): BoxGeometry {
                                 val rawLeftDp = with(density) { (box.left * coordinateScaleX).toDp() }
@@ -1599,7 +1615,7 @@ fun ReaderPageContainer(
                                         targetLanguage,
                                         measuredText
                                     ),
-                                    isOvalBubble = !isSub,
+                                    isOvalBubble = !isSub && !isRectangularBox,
                                     measureTypeface = typefaceOverride ?: if (isSub) condensedTypeface else comicTypeface,
                                     allowBrokenWords = allowBrokenWords,
                                     textScaleX = textScaleX
@@ -1612,7 +1628,8 @@ fun ReaderPageContainer(
                                 allowBrokenWords: Boolean = false,
                                 textScaleX: Float = 1.0f,
                                 contourProfile: ContourScanlineProfile? = null,
-                                typefaceOverride: Typeface? = null
+                                typefaceOverride: Typeface? = null,
+                                isRectangular: Boolean = false
                             ): StaticTextLayoutOptimizer.OptimizedLayoutResult? =
                                 BubbleTextLayoutEngine.optimizeLayout(
                                     text = cleanText,
@@ -1635,7 +1652,8 @@ fun ReaderPageContainer(
                                     measureTypeface = typefaceOverride ?: comicTypeface,
                                     allowBrokenWords = allowBrokenWords,
                                     textScaleX = textScaleX,
-                                    contourProfile = contourProfile
+                                    contourProfile = contourProfile,
+                                    isRectangular = isRectangular
                                 )
 
                             // Android Türkçe heceleme sözlüğü içermediği için yalnızca
@@ -1760,7 +1778,8 @@ fun ReaderPageContainer(
                                             effectiveGeo,
                                             minSp = 8.0f,
                                             allowBrokenWords = false,
-                                            contourProfile = profile
+                                            contourProfile = profile,
+                                            isRectangular = isRectangularBox
                                         )?.takeIf { it.fitsInside && it.fontSizeSp >= 8.0f }?.let { return it }
 
                                         // 2. Slight horizontal condensation (0.90x), still ZERO hyphens, down to 8.0sp.
@@ -1769,7 +1788,8 @@ fun ReaderPageContainer(
                                             minSp = 8.0f,
                                             allowBrokenWords = false,
                                             textScaleX = 0.90f,
-                                            contourProfile = profile
+                                            contourProfile = profile,
+                                            isRectangular = isRectangularBox
                                         )?.takeIf { it.fitsInside && it.fontSizeSp >= 8.0f }?.let { return it }
 
                                         // 3. Tighter condensation (0.85x), still ZERO hyphens, ensuring intact words.
@@ -1778,7 +1798,8 @@ fun ReaderPageContainer(
                                             minSp = 8.0f,
                                             allowBrokenWords = false,
                                             textScaleX = 0.85f,
-                                            contourProfile = profile
+                                            contourProfile = profile,
+                                            isRectangular = isRectangularBox
                                         )?.takeIf { it.fitsInside && it.fontSizeSp >= 8.0f }?.let { return it }
 
                                         // 4. Only when whole words cannot fit cleanly: allow Turkish syllable hyphenation (0.90x).
@@ -1787,7 +1808,8 @@ fun ReaderPageContainer(
                                             minSp = 8.0f,
                                             allowBrokenWords = true,
                                             textScaleX = 0.90f,
-                                            contourProfile = profile
+                                            contourProfile = profile,
+                                            isRectangular = isRectangularBox
                                         )?.takeIf { it.fitsInside && it.fontSizeSp >= 8.0f }?.let { return it }
 
                                         // 5. Dense extreme bubble: tighter scaleX (0.84x) with hyphenation, locked to readable 8.0sp floor.
@@ -1796,7 +1818,8 @@ fun ReaderPageContainer(
                                             minSp = 8.0f,
                                             allowBrokenWords = true,
                                             textScaleX = 0.84f,
-                                            contourProfile = profile
+                                            contourProfile = profile,
+                                            isRectangular = isRectangularBox
                                         )?.takeIf { it.fitsInside && it.fontSizeSp >= 8.0f }
                                     }
 

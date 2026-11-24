@@ -3007,6 +3007,26 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 if (!sameBalloon(existing.bubbleBounds, candidate.bubbleBounds)) {
                                     return@indexOfFirst false
                                 }
+
+                                val bubbleH = existing.bubbleBounds.height().toFloat()
+                                val bubbleW = existing.bubbleBounds.width().toFloat()
+                                val isTallTwinBubble = bubbleH > bubbleW * 1.30f
+
+                                val gapY = if (candidate.textRect.top > existing.textRect.bottom) {
+                                    candidate.textRect.top - existing.textRect.bottom
+                                } else if (existing.textRect.top > candidate.textRect.bottom) {
+                                    existing.textRect.top - candidate.textRect.bottom
+                                } else 0
+
+                                val verticalCenterDist = kotlin.math.abs(existing.textRect.centerY() - candidate.textRect.centerY())
+
+                                // DİKEY AYRIK İKİZ BALON KORUMASI:
+                                // Balon belirgin şekilde uzunsa ve iki metin arasında dikey lob ayrımı varsa
+                                // ASLA tek metin olarak birleştirilmez.
+                                if (isTallTwinBubble && (gapY > 8 || verticalCenterDist > bubbleH * 0.28f)) {
+                                    return@indexOfFirst false
+                                }
+
                                 val interW = (minOf(existing.targetBox.right, candidate.targetBox.right) -
                                     maxOf(existing.targetBox.left, candidate.targetBox.left))
                                     .coerceAtLeast(0)
@@ -3297,8 +3317,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                         // Size bubble text from the balloon interior. The tight
                                         // text_bubble detection remains a fallback anchor, but
                                         // fitting to it left longer translations needlessly tiny.
+                                        val isRectangularBox = !analysis.isBubble || (candidateContour?.isRectangularLike == true) ||
+                                            (containingBubble == null && bubbleBounds.width() > 0 && bubbleBounds.height() > 0)
                                         val targetBox = (if (finalIsBubble) {
-                                            BubbleLayoutGeometry.centeredLayoutBox(textBounds, bubbleBounds)
+                                            BubbleLayoutGeometry.centeredLayoutBox(textBounds, bubbleBounds, isRectangular = isRectangularBox)
                                         } else {
                                             null
                                         })
@@ -3347,8 +3369,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     val r = yb.toPixelRect(bitmap.width, bitmap.height)
                                     r == refinedBox || r.contains(cluster.rect.centerX(), cluster.rect.centerY())
                                 }?.contourProfile
+                                val isRectangularBox = !analysis.isBubble || (unmatchedContour?.isRectangularLike == true) ||
+                                    (containingBubble == null && refinedBox.width() > 0 && refinedBox.height() > 0)
                                 val targetBox = (if (finalIsBubble) {
-                                    BubbleLayoutGeometry.centeredLayoutBox(cluster.rect, refinedBox)
+                                    BubbleLayoutGeometry.centeredLayoutBox(cluster.rect, refinedBox, isRectangular = isRectangularBox)
                                 } else {
                                     null
                                 })

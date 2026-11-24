@@ -268,4 +268,30 @@ class BubbleLayoutGeometryTest {
 
         assertEquals(bounds, BubbleLayoutGeometry.recenterInside(oversized, bounds))
     }
+
+    @Test
+    fun `twin bubble top and bottom lobes maintain separated target boxes`() {
+        val tallBubble = Rect(0, 0, 100, 400)
+        val topAnchor = Rect(20, 30, 80, 90)
+        val botAnchor = Rect(20, 310, 80, 370)
+
+        val topTarget = BubbleLayoutGeometry.centeredLayoutBox(topAnchor, tallBubble)!!
+        val botTarget = BubbleLayoutGeometry.centeredLayoutBox(botAnchor, tallBubble)!!
+
+        assertTrue("Top target must remain in top lobe", topTarget.centerY() < tallBubble.centerY())
+        assertTrue("Bottom target must remain in bottom lobe", botTarget.centerY() > tallBubble.centerY())
+        assertTrue("Top and bottom targets must not collide", topTarget.bottom <= botTarget.top)
+    }
+
+    @Test
+    fun `rectangular box uses safeRectangle with wider available width`() {
+        val box = Rect(0, 0, 200, 300)
+        val anchor = Rect(80, 50, 120, 250)
+
+        val ovalTarget = BubbleLayoutGeometry.centeredLayoutBox(anchor, box, isRectangular = false)!!
+        val rectTarget = BubbleLayoutGeometry.centeredLayoutBox(anchor, box, isRectangular = true)!!
+
+        assertTrue("Rectangular envelope must be wider than oval envelope", rectTarget.width() > ovalTarget.width())
+        assertTrue("Rectangular envelope should utilize safe rectangle", rectTarget.width() >= 180)
+    }
 }

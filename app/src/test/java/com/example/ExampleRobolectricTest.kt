@@ -151,6 +151,10 @@ class ExampleRobolectricTest {
         assertEquals("B AKABİLECEĞİZ", cleaned7)
         assertEquals("Seviye 50", service.cleanOcrArtifacts("Seviye 50"))
         assertEquals("Sektör 1", service.cleanOcrArtifacts("Sektör 1"))
+        assertEquals("uUhm...bekle...", service.cleanOcrArtifacts("1 uUhm...bekle..."))
+        assertEquals("Merhaba", service.cleanOcrArtifacts("1. Merhaba"))
+        assertEquals("2 HAFTA ÖNCE... ALDIM", service.cleanOcrArtifacts("2 HAFTA ÖNCE... ALDIM"))
+        assertEquals("10 KİŞİ", service.cleanOcrArtifacts("10 KİŞİ"))
     }
 
     @Test

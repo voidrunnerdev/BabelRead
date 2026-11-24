@@ -43,6 +43,32 @@ object BubbleLayoutGeometry {
     }
 
     /**
+     * Dikdörtgen anlatım kutuları için %92 ene ve %96 boya yayılan güvenli iç kutu.
+     * Oval kubbe daralması uygulanmaz; metin kutunun tam genişliğinde satır kırabilir.
+     */
+    fun safeRectangle(bubble: Rect): Rect? {
+        if (bubble.isEmpty) return null
+        val minSide = minOf(bubble.width(), bubble.height()).coerceAtLeast(0)
+        val margin = (minSide * EDGE_MARGIN_RATIO).toInt().coerceAtMost(minSide / 4).coerceAtLeast(0)
+        val safe = Rect(
+            bubble.left + margin,
+            bubble.top + margin,
+            bubble.right - margin,
+            bubble.bottom - margin
+        )
+        val rectSafe = Rect(
+            (bubble.exactCenterX() - bubble.width() * 0.46f).toInt().coerceAtLeast(bubble.left),
+            (bubble.exactCenterY() - bubble.height() * 0.48f).toInt().coerceAtLeast(bubble.top),
+            (bubble.exactCenterX() + bubble.width() * 0.46f).toInt().coerceAtMost(bubble.right),
+            (bubble.exactCenterY() + bubble.height() * 0.48f).toInt().coerceAtMost(bubble.bottom)
+        )
+        if (rectSafe.isEmpty) return null
+        val result = Rect(rectSafe)
+        if (!result.intersect(safe) || result.isEmpty) return null
+        return result
+    }
+
+    /**
      * Returns the balloon interior that should be used for translated text.
      *
      * Growth is meaningful when either axis grows by at least 10%. Requiring
@@ -59,7 +85,7 @@ object BubbleLayoutGeometry {
      * readability. Backgrounds and other visual sources must clamp to
      * [clampToSafeOval] at draw time.
      */
-    fun centeredLayoutBox(anchor: Rect, bubble: Rect): Rect? {
+    fun centeredLayoutBox(anchor: Rect, bubble: Rect, isRectangular: Boolean = false): Rect? {
         if (anchor.isEmpty || bubble.isEmpty) return null
         val effectiveBubble = if (bubble.contains(anchor)) {
             bubble
@@ -70,15 +96,32 @@ object BubbleLayoutGeometry {
         } else {
             return null
         }
-        val oval = safeOval(effectiveBubble) ?: return null
+        val safeBounds = if (isRectangular) {
+            safeRectangle(effectiveBubble)
+        } else {
+            safeOval(effectiveBubble)
+        } ?: return null
 
-        val growsWidth = oval.width() >= anchor.width() * MIN_GROWTH_RATIO
-        val growsHeight = oval.height() >= anchor.height() * MIN_GROWTH_RATIO
+        val growsWidth = safeBounds.width() >= anchor.width() * MIN_GROWTH_RATIO
+        val growsHeight = safeBounds.height() >= anchor.height() * MIN_GROWTH_RATIO
         if (!growsWidth && !growsHeight) return Rect(anchor)
 
-        val layoutWidth = if (growsWidth) oval.width() else anchor.width()
-        val layoutHeight = if (growsHeight) oval.height() else anchor.height()
-        return centeredInside(effectiveBubble, layoutWidth, layoutHeight)
+        val layoutWidth = if (growsWidth) safeBounds.width() else anchor.width()
+        val layoutHeight = if (growsHeight) safeBounds.height() else anchor.height()
+
+        val bubbleW = effectiveBubble.width().toFloat()
+        val bubbleH = effectiveBubble.height().toFloat()
+        val isElongatedBubble = bubbleH > bubbleW * 1.30f
+        val anchorYOffset = kotlin.math.abs(anchor.exactCenterY() - effectiveBubble.exactCenterY())
+        val hasSignificantOffset = anchorYOffset > bubbleH * 0.15f
+
+        val targetCenterY = if (isElongatedBubble && hasSignificantOffset) {
+            anchor.exactCenterY()
+        } else {
+            null
+        }
+
+        return centeredInside(effectiveBubble, layoutWidth, layoutHeight, targetCenterY)
     }
 
     /**
@@ -182,12 +225,13 @@ object BubbleLayoutGeometry {
         return result
     }
 
-    private fun centeredInside(bubble: Rect, width: Int, height: Int): Rect {
+    private fun centeredInside(bubble: Rect, width: Int, height: Int, anchorCenterY: Float? = null): Rect {
         val boundedWidth = width.coerceIn(1, bubble.width())
         val boundedHeight = height.coerceIn(1, bubble.height())
         val left = (bubble.centerX() - boundedWidth / 2)
             .coerceIn(bubble.left, bubble.right - boundedWidth)
-        val top = (bubble.centerY() - boundedHeight / 2)
+        val cy = (anchorCenterY ?: bubble.exactCenterY()).toInt()
+        val top = (cy - boundedHeight / 2)
             .coerceIn(bubble.top, bubble.bottom - boundedHeight)
         return Rect(left, top, left + boundedWidth, top + boundedHeight)
     }

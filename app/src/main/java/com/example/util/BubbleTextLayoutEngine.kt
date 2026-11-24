@@ -19,7 +19,8 @@ object BubbleTextLayoutEngine {
         horizontalPaddingDp: Float,
         verticalPaddingDp: Float,
         density: Float,
-        contourProfile: ContourScanlineProfile? = null
+        contourProfile: ContourScanlineProfile? = null,
+        isRectangular: Boolean = false
     ): BubbleLineEnvelope? {
         if (!density.isFinite() || density <= 0f) return null
         if (bubbleBounds.width() <= 0f || bubbleBounds.height() <= 0f) return null
@@ -41,7 +42,8 @@ object BubbleTextLayoutEngine {
             horizontalPaddingPx = horizontalPaddingDp * density,
             verticalPaddingPx = verticalPaddingDp * density,
             safeInsetPx = inset,
-            contourProfile = contourProfile
+            contourProfile = contourProfile,
+            isRectangular = isRectangular
         )
     }
 
@@ -59,7 +61,8 @@ object BubbleTextLayoutEngine {
         measureTypeface: Typeface?,
         allowBrokenWords: Boolean = false,
         textScaleX: Float = 1.0f,
-        contourProfile: ContourScanlineProfile? = null
+        contourProfile: ContourScanlineProfile? = null,
+        isRectangular: Boolean = false
     ): StaticTextLayoutOptimizer.OptimizedLayoutResult? {
         if (!BubbleTextScriptPolicy.isSafe(targetLanguage, text)) return null
         val envelope = envelopeForBubble(
@@ -67,7 +70,8 @@ object BubbleTextLayoutEngine {
             horizontalPaddingDp = horizontalPaddingDp,
             verticalPaddingDp = verticalPaddingDp,
             density = density,
-            contourProfile = contourProfile
+            contourProfile = contourProfile,
+            isRectangular = isRectangular
         ) ?: return null
 
         val safeScaleX = if (textScaleX.isFinite()) textScaleX.coerceIn(0.75f, 1.0f) else 1.0f

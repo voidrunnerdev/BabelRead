@@ -248,6 +248,11 @@ class TranslationService(
             "$1$2"
         )
         text = text.replace(Regex("[_~`|^]+"), " ")
+        // 1. Panel/maddeleme işaretli kalıntı numaralar (örn: "1.", "1)", "1:", "1-")
+        text = text.replace(Regex("""^[0-9]{1,2}[\s]*[.)\]:-]+[\s]*(?=\p{L})"""), "")
+        // 2. Yanında küçük harf olan kalıntı sıra/panel numaraları (örn: "1 uUhm...", "2 bekle...")
+        // Meşru büyük harfli cümleleri (örn: "2 HAFTA ÖNCE") ve saf sayıları korur.
+        text = text.replace(Regex("""^[0-9]{1,2}\s+(?=[a-z\p{Ll}])"""), "")
         if (!isCjkSource) {
             text = text.replace(Regex("[\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uf900-\\ufaff\\uac00-\\ud7af]"), "")
         } else {
@@ -1113,6 +1118,18 @@ class TranslationService(
             if (unionWidth > validParentBubble.width() * 1.10f ||
                 unionHeight > validParentBubble.height() * 1.10f
             ) return false
+
+            // İkiz / kardan adam (snowman) balon koruması: Balon belirgin şekilde uzunsa
+            // ve iki metin bloğu arasında lob ayrımı / dikey boşluk varsa iki ayrı repliktir.
+            val parentH = validParentBubble.height().toFloat()
+            val parentW = validParentBubble.width().toFloat()
+            val isTallParent = parentH > parentW * 1.30f
+            val verticalCenterDist = kotlin.math.abs(a.exactCenterY() - b.exactCenterY())
+            val gapY = if (b.top > a.bottom) b.top - a.bottom else if (a.top > b.bottom) a.top - b.bottom else 0
+            if (isTallParent && (gapY > maxOf(h1, h2) * 0.80f || verticalCenterDist > parentH * 0.35f)) {
+                return false
+            }
+
             return !hasBalloonDividerBetween(a, b, bitmap, scale)
         }
 
