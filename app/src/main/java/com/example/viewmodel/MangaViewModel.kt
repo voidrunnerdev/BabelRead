@@ -3000,7 +3000,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         val consolidated = mutableListOf<BubbleCandidate>()
                         for (candidate in working) {
                             val sameTargetIndex = consolidated.indexOfFirst { existing ->
-                                if (!sameBalloon(existing.bubbleBounds, candidate.bubbleBounds)) {
+                                val bubbleMatch = sameBalloon(existing.bubbleBounds, candidate.bubbleBounds) ||
+                                    (existing.isBubble && candidate.isBubble && rectOverlapArea(existing.bubbleBounds, candidate.bubbleBounds).toFloat() /
+                                        minOf(areaOf(existing.bubbleBounds), areaOf(candidate.bubbleBounds)).coerceAtLeast(1L) >= 0.40f)
+                                if (!bubbleMatch) {
                                     return@indexOfFirst false
                                 }
                                 val interW = (minOf(existing.targetBox.right, candidate.targetBox.right) -
@@ -3014,7 +3017,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     areaOf(existing.targetBox),
                                     areaOf(candidate.targetBox)
                                 ).coerceAtLeast(1L)
-                                intersection.toFloat() / minArea >= 0.55f
+                                intersection.toFloat() / minArea >= 0.35f
                             }
                             if (sameTargetIndex < 0) {
                                 consolidated.add(candidate)
@@ -3066,7 +3069,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
                         )
 
-                        val allCandidateBubbles = if (balloonBoxes.isNotEmpty()) balloonBoxes else dialogueBoxes
+                        val allCandidateBubbles = dedupeRegions(balloonBoxes + dialogueBoxes)
 
                         fun selectContainingBubble(textRect: Rect): Rect? {
                             if (textRect.isEmpty || allCandidateBubbles.isEmpty()) return null
@@ -3113,7 +3116,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         // grouping. text_bubble detections describe text regions and may
                         // split one sentence into several boxes inside the same balloon.
                         // Use them only when the model found no balloon at all.
-                        val yoloBoxes = (if (balloonBoxes.isNotEmpty()) balloonBoxes else dialogueBoxes).distinct()
+                        val yoloBoxes = dedupeRegions(balloonBoxes + dialogueBoxes)
 
                         val pureSfxBoxes = sfxBoxes.filter { sfx ->
                             yoloBoxes.none { yBox ->

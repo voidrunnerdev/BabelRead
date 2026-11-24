@@ -205,11 +205,20 @@ data class BubbleLineEnvelope(
 
         return when (shape.kind) {
             EnvelopeShapeKind.ELLIPSE -> {
-                val halfW = minOf(
+                val rawHalfW = minOf(
                     halfWidthAtY(clampedStart),
                     halfWidthAtY((clampedStart + clampedEnd) / 2f),
                     halfWidthAtY(clampedEnd)
                 )
+                // Konuşma balonlarında tepe/dip kubbe bantları asla 0px çizgiye düşemez:
+                // Tepeye temas eden ilk/son satırların sıfır genişlik yüzünden tüm yerleşimi
+                // çökertmesini engellemek için bant ortasından veya en az %35 kubbe tabanı garantilenir.
+                val halfW = if (rawHalfW <= 0.5f) {
+                    val midY = (clampedStart + clampedEnd) / 2f
+                    maxOf(halfWidthAtY(midY), radiusX * 0.35f)
+                } else {
+                    maxOf(rawHalfW, radiusX * 0.35f)
+                }
                 ScanlineSpan(centerX - halfW, centerX + halfW)
             }
             EnvelopeShapeKind.CONTOUR_SCANLINE -> {

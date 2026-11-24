@@ -310,7 +310,40 @@ private fun separateNearbyBoxes(
             val overlapRatio = if (unionArea > 0L) interArea.toFloat() / unionArea else 1f
             val aContained = interArea >= aArea * 9L / 10L
             val bContained = interArea >= bArea * 9L / 10L
-            if (aContained || bContained || overlapRatio >= 0.5f) continue
+
+            val aCenterY = anchorRects.getOrNull(i)?.centerY() ?: a.centerY()
+            val bCenterY = anchorRects.getOrNull(j)?.centerY() ?: b.centerY()
+            val aCenterX = anchorRects.getOrNull(i)?.centerX() ?: a.centerX()
+            val bCenterX = anchorRects.getOrNull(j)?.centerX() ?: b.centerX()
+
+            if (aContained || bContained || overlapRatio >= 0.35f) {
+                // Ağır çakışma (aynı balonda iki metin): Metinlerin orijinal OCR merkezlerine göre
+                // dikey veya yatay olarak ayrıştırılması zorunludur. continue ile üst üste bırakılamaz.
+                val verticalDist = kotlin.math.abs(aCenterY - bCenterY)
+                val horizontalDist = kotlin.math.abs(aCenterX - bCenterX)
+                if (verticalDist >= horizontalDist * 0.7f) {
+                    val ti = if (aCenterY <= bCenterY) i else j
+                    val bi = if (ti == i) j else i
+                    val topBox = rects[ti]
+                    val bottomBox = rects[bi]
+                    val mid = interTop + interH / 2
+                    topBox.bottom = min(topBox.bottom, mid - margin)
+                    bottomBox.top = max(bottomBox.top, mid + margin)
+                    boosted[ti] = true
+                    boosted[bi] = true
+                } else {
+                    val li = if (aCenterX <= bCenterX) i else j
+                    val ri = if (li == i) j else i
+                    val leftBox = rects[li]
+                    val rightBox = rects[ri]
+                    val mid = interLeft + interW / 2
+                    leftBox.right = min(leftBox.right, mid - margin)
+                    rightBox.left = max(rightBox.left, mid + margin)
+                    boosted[li] = true
+                    boosted[ri] = true
+                }
+                continue
+            }
 
             if (interW <= interH) {
                 // Dikey bölme: soldaki kutunun sağ kenarı, sağdakinin sol kenarı
@@ -1452,8 +1485,8 @@ fun ReaderPageContainer(
                                 val currentAspect = if (layoutBox.height() > 0) layoutBox.width().toFloat() / layoutBox.height().toFloat() else 1f
                                 if (layoutBox.height() > 0 && (currentAspect < 0.85f || (availableBubbleWidth > layoutBox.width() * 1.15f))) {
                                     val targetW = when {
-                                        availableBubbleWidth > layoutBox.width() -> availableBubbleWidth
-                                        else -> maxOf(layoutBox.width(), (layoutBox.height() * 0.65f).toInt())
+                                        availableBubbleWidth > 0 -> maxOf(layoutBox.width(), availableBubbleWidth)
+                                        else -> maxOf(layoutBox.width(), (layoutBox.height() * 0.70f).toInt())
                                     }
                                     val pageW = pageOriginalWidth.toInt().coerceAtLeast(1)
                                     val shiftX = ((targetW - layoutBox.width()) / 2).coerceAtLeast(0)
