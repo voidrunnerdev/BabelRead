@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import com.example.data.web.WebSite
 import com.example.i18n.AppLanguages
 import com.example.i18n.TranslationLanguages
+import com.example.service.DetectorModel
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
@@ -181,8 +182,12 @@ class MangaPreferences(private val context: Context) {
     val notificationNewChapter: Flow<Boolean> = context.dataStore.data.map { it[NOTIFICATION_NEW_CHAPTER] ?: true }
     val updateCheckInterval: Flow<Int> = context.dataStore.data.map { it[UPDATE_CHECK_INTERVAL] ?: 12 }
     val yoloAiEnabled: Flow<Boolean> = context.dataStore.data.map { it[YOLO_AI_ENABLED] ?: true }
-    val detectorModelType: Flow<String> = context.dataStore.data.map { it[DETECTOR_MODEL_TYPE] ?: "yolo11n_seg" }
-    val confidenceThreshold: Flow<Float> = context.dataStore.data.map { it[CONFIDENCE_THRESHOLD] ?: 0.35f }
+    val detectorModelType: Flow<String> = context.dataStore.data.map {
+        it[DETECTOR_MODEL_TYPE] ?: DetectorModel.YOLO11N_SEG.id
+    }
+    val confidenceThreshold: Flow<Float> = context.dataStore.data.map {
+        it[CONFIDENCE_THRESHOLD] ?: DetectorModel.fromId(it[DETECTOR_MODEL_TYPE]).defaultConfidence
+    }
     val debugMode: Flow<Boolean> = context.dataStore.data.map { it[DEBUG_MODE] ?: false }
     val uiLanguage: Flow<String> = context.dataStore.data.map { it[UI_LANGUAGE] ?: AppLanguages.SYSTEM }
     val hiddenMangaIds: Flow<Set<String>> = context.dataStore.data.map { it[HIDDEN_MANGA_IDS] ?: emptySet() }
@@ -342,7 +347,13 @@ class MangaPreferences(private val context: Context) {
     }
 
     suspend fun setDetectorModelType(value: String) {
-        context.dataStore.edit { it[DETECTOR_MODEL_TYPE] = value }
+        context.dataStore.edit { prefs ->
+            val current = prefs[DETECTOR_MODEL_TYPE] ?: DetectorModel.YOLO11N_SEG.id
+            prefs[DETECTOR_MODEL_TYPE] = value
+            if (!current.equals(value, ignoreCase = true) || prefs[CONFIDENCE_THRESHOLD] == null) {
+                prefs[CONFIDENCE_THRESHOLD] = DetectorModel.fromId(value).defaultConfidence
+            }
+        }
     }
 
     suspend fun setConfidenceThreshold(value: Float) {

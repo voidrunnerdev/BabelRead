@@ -264,13 +264,17 @@ class TextLineSegmenter {
             val isLongBorderLine = (componentWidth > w * 0.80f && componentHeight <= 3) ||
                 (componentHeight > h * 0.80f && componentWidth <= 3)
             val isBackgroundBlob = component.area.toLong() > cropArea / 5
-            val touchesEdge = component.left <= 0 || component.top <= 0 ||
-                component.right >= w - 1 || component.bottom >= h - 1
-            val isEdgeArtwork = touchesEdge && (
-                component.area.toLong() > cropArea / 1000 ||
-                    componentWidth > w * 0.40f ||
-                    componentHeight > h * 0.40f
-                )
+            val touchesHorizontalEdge = component.top <= 0 || component.bottom >= h - 1
+            val touchesVerticalEdge = component.left <= 0 || component.right >= w - 1
+            val touchesEdge = touchesHorizontalEdge || touchesVerticalEdge
+            val isEdgeBorderStroke = (touchesHorizontalEdge && componentWidth > w * 0.70f &&
+                componentHeight <= max(4, (h * 0.15f).toInt())) ||
+                (touchesVerticalEdge && componentHeight > h * 0.70f &&
+                    componentWidth <= max(4, (w * 0.15f).toInt()))
+            val isLargeEdgeBlob = touchesEdge &&
+                component.area.toLong() > cropArea / 8 &&
+                (componentWidth > w * 0.50f || componentHeight > h * 0.50f)
+            val isEdgeArtwork = isEdgeBorderStroke || isLargeEdgeBlob
             keep[index] = component.area >= minArea && !isLongBorderLine &&
                 !isBackgroundBlob && !isEdgeArtwork
         }

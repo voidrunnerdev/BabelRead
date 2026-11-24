@@ -5,6 +5,7 @@ import android.content.ComponentCallbacks2
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.graphics.Rect
 import android.graphics.RectF
 import android.net.Uri
@@ -3194,6 +3195,31 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 sfx.contains(textRect.centerX(), textRect.centerY())
                         }
 
+                        fun isBubbleInteriorDark(bubbleRect: Rect?): Boolean {
+                            if (bubbleRect == null || bubbleRect.width() < 8 || bubbleRect.height() < 8) {
+                                return false
+                            }
+                            val insetX = (bubbleRect.width() * 0.12f).toInt().coerceAtLeast(1)
+                            val insetY = (bubbleRect.height() * 0.12f).toInt().coerceAtLeast(1)
+                            val sLeft = (bubbleRect.left + insetX).coerceIn(0, bitmap.width - 1)
+                            val sRight = (bubbleRect.right - insetX).coerceIn(sLeft, bitmap.width - 1)
+                            val sTop = (bubbleRect.top + insetY).coerceIn(0, bitmap.height - 1)
+                            val sBottom = (bubbleRect.bottom - insetY).coerceIn(sTop, bitmap.height - 1)
+                            val stepX = maxOf(1, (sRight - sLeft) / 6)
+                            val stepY = maxOf(1, (sBottom - sTop) / 6)
+                            var total = 0
+                            var dark = 0
+                            for (sy in sTop..sBottom step stepY) {
+                                for (sx in sLeft..sRight step stepX) {
+                                    val px = bitmap.getPixel(sx, sy)
+                                    val lum = Color.red(px) * 0.299f + Color.green(px) * 0.587f + Color.blue(px) * 0.114f
+                                    total++
+                                    if (lum < 65f) dark++
+                                }
+                            }
+                            return total > 0 && dark * 100 >= total * 55
+                        }
+
                         val ocrAssignments = mutableMapOf<Int, Int>()
                         for ((ocrIdx, ocr) in ocrBlocks.withIndex()) {
                             val overlapsWithDialogueOrBalloon = yoloBoxes.any { yBox ->
@@ -3329,12 +3355,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     val textBounds = Rect(textGroup.rect)
                                     val analysis = translationService.analyzeBubble(bitmap, textBounds)
                                     val containingBubble = selectContainingBubble(textBounds)
-                                    val finalIsBubble = containingBubble != null || analysis.isBubble
+                                    val isDarkBubble = analysis.isDarkBubble || isBubbleInteriorDark(containingBubble)
+                                    val finalIsBubble = containingBubble != null || analysis.isBubble || isDarkBubble
 
                                     if (cleanedText.isNotBlank() && translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
                                         val bubbleBounds = when {
                                             containingBubble != null -> containingBubble
-                                            analysis.isBubble -> translationService.refineBubbleBounds(bitmap, textBounds, analysis.isDarkBubble)
+                                            analysis.isBubble || isDarkBubble -> translationService.refineBubbleBounds(bitmap, textBounds, isDarkBubble)
                                             else -> textBounds
                                         }
                                         val candidateContour = yoloBubbles.firstOrNull { yb ->
@@ -3345,7 +3372,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                         // Size bubble text from the balloon interior. The tight
                                         // text_bubble detection remains a fallback anchor, but
                                         // fitting to it left longer translations needlessly tiny.
-                                        val isRectangularBox = !analysis.isBubble || (candidateContour?.isRectangularLike == true) ||
+                                        val isRectangularBox = !finalIsBubble || (candidateContour?.isRectangularLike == true) ||
                                             (containingBubble == null && bubbleBounds.width() > 0 && bubbleBounds.height() > 0)
                                         val targetBox = (if (finalIsBubble) {
                                             BubbleLayoutGeometry.centeredLayoutBox(textBounds, bubbleBounds, isRectangular = isRectangularBox)
@@ -3360,7 +3387,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                                 text = cleanedText,
                                                 textRect = textBounds,
                                                 isBubble = finalIsBubble,
-                                                isDark = analysis.isDarkBubble,
+                                                isDark = isDarkBubble,
                                                 bubbleBounds = bubbleBounds,
                                                 contourProfile = candidateContour
                                             )
@@ -3386,11 +3413,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             val cleanedText = translationService.cleanOcrArtifacts(cluster.text, ppOriginLang ?: originLang)
                             val analysis = translationService.analyzeBubble(bitmap, cluster.rect)
                             val containingBubble = selectContainingBubble(cluster.rect)
-                            val finalIsBubble = containingBubble != null || analysis.isBubble
+                            val isDarkBubble = analysis.isDarkBubble || isBubbleInteriorDark(containingBubble)
+                            val finalIsBubble = containingBubble != null || analysis.isBubble || isDarkBubble
                             if (translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
                                 val refinedBox = when {
                                     containingBubble != null -> containingBubble
-                                    analysis.isBubble -> translationService.refineBubbleBounds(bitmap, cluster.rect, analysis.isDarkBubble)
+                                    analysis.isBubble || isDarkBubble -> translationService.refineBubbleBounds(bitmap, cluster.rect, isDarkBubble)
                                     else -> cluster.rect
                                 }
                                 val unmatchedContour = yoloBubbles.firstOrNull { yb ->
@@ -3398,7 +3426,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 }?.contourProfile ?: yoloBubbles.firstOrNull { yb ->
                                     yb.toPixelRect(bitmap.width, bitmap.height).contains(cluster.rect.centerX(), cluster.rect.centerY())
                                 }?.contourProfile
-                                val isRectangularBox = !analysis.isBubble || (unmatchedContour?.isRectangularLike == true) ||
+                                val isRectangularBox = !finalIsBubble || (unmatchedContour?.isRectangularLike == true) ||
                                     (containingBubble == null && refinedBox.width() > 0 && refinedBox.height() > 0)
                                 val targetBox = (if (finalIsBubble) {
                                     BubbleLayoutGeometry.centeredLayoutBox(cluster.rect, refinedBox, isRectangular = isRectangularBox)
@@ -3413,7 +3441,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                         text = cleanedText,
                                         textRect = cluster.rect,
                                         isBubble = finalIsBubble,
-                                        isDark = analysis.isDarkBubble,
+                                        isDark = isDarkBubble,
                                         bubbleBounds = refinedBox,
                                         contourProfile = unmatchedContour
                                     )

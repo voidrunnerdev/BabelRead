@@ -56,6 +56,7 @@ import com.example.BuildConfig
 import com.example.i18n.AppLanguages
 import com.example.i18n.Text
 import com.example.i18n.TranslationLanguages
+import kotlin.math.roundToInt
 import com.example.ui.components.AppScaffold
 import com.example.ui.components.AppTopBar
 import com.example.ui.components.LanguagePickerDialog
@@ -119,8 +120,10 @@ fun SettingsScreen(viewModel: MangaViewModel) {
     val translationCacheTtlDays by viewModel.preferences.translationCacheTtlDays.collectAsState(initial = 30)
 
     val yoloAiEnabled by viewModel.preferences.yoloAiEnabled.collectAsState(initial = true)
-    val detectorModelType by viewModel.preferences.detectorModelType.collectAsState(initial = "yolo11n_seg")
-    val confidenceThreshold by viewModel.preferences.confidenceThreshold.collectAsState(initial = 0.35f)
+    val detectorModelType by viewModel.preferences.detectorModelType.collectAsState(initial = DetectorModel.YOLO11N_SEG.id)
+    val confidenceThreshold by viewModel.preferences.confidenceThreshold.collectAsState(
+        initial = DetectorModel.fromId(detectorModelType).defaultConfidence
+    )
 
     val isYoloLoaded = remember(yoloAiEnabled, detectorModelType) { viewModel.isYoloModelLoaded() }
     val yoloInfo = remember(yoloAiEnabled, detectorModelType) { viewModel.getYoloModelInfo() }
@@ -439,7 +442,7 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                         }
 
                         Text(
-                            text = "Algılama Hassasiyeti (Confidence): %${(confidenceThreshold * 100).toInt()}",
+                            text = "Algılama Hassasiyeti (Confidence): %${(confidenceThreshold * 100).roundToInt()}",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                             fontWeight = FontWeight.Medium
@@ -450,7 +453,7 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                                 coroutineScope.launch { viewModel.preferences.setConfidenceThreshold(it) }
                             },
                             valueRange = 0.20f..0.80f,
-                            steps = 12,
+                            steps = 11,
                             colors = SliderDefaults.colors(
                                 thumbColor = MaterialTheme.colorScheme.primary,
                                 activeTrackColor = MaterialTheme.colorScheme.primary
