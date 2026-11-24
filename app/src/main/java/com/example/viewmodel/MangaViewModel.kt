@@ -37,6 +37,7 @@ import com.example.i18n.TranslationLanguages
 import eu.kanade.tachiyomi.source.model.FilterList
 import com.example.service.BubbleBox
 import com.example.service.BubbleDetector
+import com.example.service.DetectorModel
 import com.example.service.BulkLocalImportResult
 import com.example.service.LocalMangaImporter
 import com.example.service.TextBlockObj
@@ -4554,6 +4555,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setDetectorModelType(type: DetectorModel) {
+        viewModelScope.launch {
+            preferences.setDetectorModelType(type.id)
+            bubbleDetector.yoloDetector.switchModel(type)
+        }
+    }
+
     fun isYoloModelLoaded(): Boolean = bubbleDetector.yoloDetector.isModelLoaded()
 
     fun getYoloModelInfo(): Map<String, String> = bubbleDetector.yoloDetector.getModelInfo()
@@ -4588,6 +4596,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
         refreshLinkedSources()
         repairMissingLinkedCovers()
+
+        viewModelScope.launch {
+            preferences.detectorModelType.distinctUntilChanged().collect { typeId ->
+                val modelType = DetectorModel.fromId(typeId)
+                bubbleDetector.yoloDetector.switchModel(modelType)
+            }
+        }
 
         viewModelScope.launch {
             preferences.pinnedSources.collect { pinned ->

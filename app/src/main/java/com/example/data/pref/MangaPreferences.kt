@@ -130,6 +130,7 @@ class MangaPreferences(private val context: Context) {
         val NOTIFICATION_NEW_CHAPTER = booleanPreferencesKey("notification_new_chapter")
         val UPDATE_CHECK_INTERVAL = intPreferencesKey("update_check_interval") // 6, 12, 24 saat
         val YOLO_AI_ENABLED = booleanPreferencesKey("yolo_ai_enabled")
+        val DETECTOR_MODEL_TYPE = stringPreferencesKey("detector_model_type") // "yolo11n_seg", "rtdetr_v2"
         val CONFIDENCE_THRESHOLD = floatPreferencesKey("confidence_threshold")
         val DEBUG_MODE = booleanPreferencesKey("debug_mode")
         val UI_LANGUAGE = stringPreferencesKey("ui_language")
@@ -177,6 +178,7 @@ class MangaPreferences(private val context: Context) {
     val notificationNewChapter: Flow<Boolean> = context.dataStore.data.map { it[NOTIFICATION_NEW_CHAPTER] ?: true }
     val updateCheckInterval: Flow<Int> = context.dataStore.data.map { it[UPDATE_CHECK_INTERVAL] ?: 12 }
     val yoloAiEnabled: Flow<Boolean> = context.dataStore.data.map { it[YOLO_AI_ENABLED] ?: true }
+    val detectorModelType: Flow<String> = context.dataStore.data.map { it[DETECTOR_MODEL_TYPE] ?: "yolo11n_seg" }
     val confidenceThreshold: Flow<Float> = context.dataStore.data.map { it[CONFIDENCE_THRESHOLD] ?: 0.35f }
     val debugMode: Flow<Boolean> = context.dataStore.data.map { it[DEBUG_MODE] ?: false }
     val uiLanguage: Flow<String> = context.dataStore.data.map { it[UI_LANGUAGE] ?: AppLanguages.SYSTEM }
@@ -334,6 +336,10 @@ class MangaPreferences(private val context: Context) {
 
     suspend fun setYoloAiEnabled(value: Boolean) {
         context.dataStore.edit { it[YOLO_AI_ENABLED] = value }
+    }
+
+    suspend fun setDetectorModelType(value: String) {
+        context.dataStore.edit { it[DETECTOR_MODEL_TYPE] = value }
     }
 
     suspend fun setConfidenceThreshold(value: Float) {

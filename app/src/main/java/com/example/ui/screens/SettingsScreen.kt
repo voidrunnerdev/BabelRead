@@ -3,6 +3,7 @@ package com.example.ui.screens
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -25,9 +26,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import com.example.service.DetectorModel
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarDuration
@@ -116,10 +119,11 @@ fun SettingsScreen(viewModel: MangaViewModel) {
     val translationCacheTtlDays by viewModel.preferences.translationCacheTtlDays.collectAsState(initial = 30)
 
     val yoloAiEnabled by viewModel.preferences.yoloAiEnabled.collectAsState(initial = true)
+    val detectorModelType by viewModel.preferences.detectorModelType.collectAsState(initial = "yolo11n_seg")
     val confidenceThreshold by viewModel.preferences.confidenceThreshold.collectAsState(initial = 0.35f)
 
-    val isYoloLoaded = remember(yoloAiEnabled) { viewModel.isYoloModelLoaded() }
-    val yoloInfo = remember(yoloAiEnabled) { viewModel.getYoloModelInfo() }
+    val isYoloLoaded = remember(yoloAiEnabled, detectorModelType) { viewModel.isYoloModelLoaded() }
+    val yoloInfo = remember(yoloAiEnabled, detectorModelType) { viewModel.getYoloModelInfo() }
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(engineTestState) {
@@ -237,12 +241,98 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(AppSpacing.lg),
-                        verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                        verticalArrangement = Arrangement.spacedBy(AppSpacing.md)
                     ) {
-                        SettingsInfoRow(label = "Motor:", value = "RT-DETR-v2 Comic AI (Gömülü)")
+                        Text(
+                            text = "Konuşma Balonu Algılama Modeli:",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        // İki Model Seçim Tuşu
+                        val activeModelId = yoloInfo["model_type"] ?: detectorModelType
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)
+                        ) {
+                            // 1. Model: RT-DETR-v2
+                            val isRtDetrSelected = activeModelId == "rtdetr_v2"
+                            Surface(
+                                onClick = { viewModel.setDetectorModelType(DetectorModel.RTDETR_V2) },
+                                shape = MaterialTheme.shapes.medium,
+                                color = if (isRtDetrSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = if (isRtDetrSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(AppSpacing.md),
+                                    verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs)
+                                    ) {
+                                        RadioButton(
+                                            selected = isRtDetrSelected,
+                                            onClick = { viewModel.setDetectorModelType(DetectorModel.RTDETR_V2) }
+                                        )
+                                        Text(
+                                            text = "RT-DETR-v2",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isRtDetrSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Text(
+                                        text = "Klasik Kutu (AABB)\n11.1 MB Transformer",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+
+                            // 2. Model: YOLO11n-seg
+                            val isYoloSegSelected = activeModelId == "yolo11n_seg"
+                            Surface(
+                                onClick = { viewModel.setDetectorModelType(DetectorModel.YOLO11N_SEG) },
+                                shape = MaterialTheme.shapes.medium,
+                                color = if (isYoloSegSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                                border = if (isYoloSegSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(AppSpacing.md),
+                                    verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs)
+                                    ) {
+                                        RadioButton(
+                                            selected = isYoloSegSelected,
+                                            onClick = { viewModel.setDetectorModelType(DetectorModel.YOLO11N_SEG) }
+                                        )
+                                        Text(
+                                            text = "YOLO11n-seg",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isYoloSegSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    Text(
+                                        text = "Piksel Segmentasyon\n12.5 MB Manga109",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+
+                        SettingsInfoRow(label = "Aktif Motor:", value = yoloInfo["model_title"] ?: "Model Seçilmedi")
                         SettingsInfoRow(
                             label = "Durum:",
-                            value = if (isYoloLoaded) "Aktif & Entegre (RT-DETR-v2 INT8)" else "Model Bekleniyor (Opsiyonel)",
+                            value = if (isYoloLoaded) "Aktif & Entegre" else "Model Bekleniyor (Opsiyonel)",
                             valueColor = if (isYoloLoaded) Success else Warning
                         )
                         SettingsInfoRow(
@@ -253,6 +343,10 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                                 yoloInfo["status"] ?: "Model Bekleniyor"
                             },
                             valueColor = if (isYoloLoaded) Success else Warning
+                        )
+                        SettingsInfoRow(
+                            label = "Mimari:",
+                            value = yoloInfo["architecture"] ?: "Bilinmiyor"
                         )
                         SettingsInfoRow(
                             label = "Model Dosya Boyutu:",
@@ -296,13 +390,17 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                                 verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
                             ) {
                                 Text(
-                                    text = "RT-DETR-v2 & Akıllı Kutu Prensibi:",
+                                    text = if (activeModelId == "yolo11n_seg") "YOLO11n-seg & Piksel Segmentasyon Prensibi:" else "RT-DETR-v2 & Akıllı Kutu Prensibi:",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.primary,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "• Balon & Metin Tespiti: Konuşma balonunu (balloon) ve balon içi metin bölgesini (text_bubble) transformer yapay zekasıyla keskin olarak saptar.\n• Metin Merkezli Yerleşim: Türkçe çeviri, balonun kuyruğuna kaymadan orijinal metnin merkezine hizalanır.\n• Ses Efekti (SFX) Filtresi: Çizim üzerindeki dış ve arka plan ses efektlerini (text_free) otomatik olarak eler.",
+                                    text = if (activeModelId == "yolo11n_seg") {
+                                        "• Piksel Konturu: Manga109 üzerinde eğitilmiş sinir ağı, balonun sınırlarını kaba bir dikdörtgen yerine gerçek eğri sınırlarıyla (piksel maskesi) tespit eder.\n• Düzensiz ve Kardan Adam Balonlar: Üst üste binen veya birleşik balonlar ayrı olarak korunur ve birbirine yapışmaz.\n• İnce Halat / Sütun Koruması: Dar veya eğik balonlarda metin, balonun gerçek iç genişliğine göre satır satır optimize edilerek dizilir."
+                                    } else {
+                                        "• Balon & Metin Tespiti: Konuşma balonunu (balloon) ve balon içi metin bölgesini (text_bubble) transformer yapay zekasıyla keskin olarak saptar.\n• Metin Merkezli Yerleşim: Türkçe çeviri, balonun kuyruğuna kaymadan orijinal metnin merkezine hizalanır.\n• Ses Efekti (SFX) Filtresi: Çizim üzerindeki dış ve arka plan ses efektlerini (text_free) otomatik olarak eler."
+                                    },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )

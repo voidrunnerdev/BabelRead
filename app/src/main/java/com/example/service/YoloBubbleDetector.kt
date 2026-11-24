@@ -35,6 +35,46 @@ import kotlin.math.min
  *   1: text_bubble (balon içi metin)
  *   2: text_free (balon dışı metin)
  */
+enum class DetectorModel(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val assetPath: String,
+    val targetFileName: String,
+    val expectedBytes: Long,
+    val sha256: String,
+    val defaultConfidence: Float,
+    val description: String
+) {
+    RTDETR_V2(
+        id = "rtdetr_v2",
+        title = "RT-DETR-v2 Comic AI",
+        subtitle = "Klasik Kutu (11.1 MB)",
+        assetPath = "models/rtdetr_v2.onnx",
+        targetFileName = "rtdetr_v2.onnx",
+        expectedBytes = 11120765L,
+        sha256 = "5fe9e4f576e49d4e7e8b0e029d6d3cdc252abd4694113e1cae120e62c931ea79",
+        defaultConfidence = 0.35f,
+        description = "Transformer tabanlı nesne tespiti. Balon, metin ve ses efektlerini (SFX) dikdörtgen sınır kutularıyla ayrıştırır."
+    ),
+    YOLO11N_SEG(
+        id = "yolo11n_seg",
+        title = "YOLO11n-seg Manga109",
+        subtitle = "Piksel Segmentasyon (12.5 MB)",
+        assetPath = "models/yolo11n_seg.onnx",
+        targetFileName = "yolo11n_seg.onnx",
+        expectedBytes = 12509314L,
+        sha256 = "760146a01c3e9f547bc271751bedacd30ae973bfa043dd7761069be7ae0b1336",
+        defaultConfidence = 0.20f,
+        description = "Manga109 üzerinde eğitilmiş piksel düzeyinde segmentasyon yapay zekası. Düzensiz, kardan adam veya eğri balon sınırlarını kontur profiliyle çıkararak metni balon içine kusursuz yayar."
+    );
+
+    companion object {
+        fun fromId(id: String?): DetectorModel =
+            entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: YOLO11N_SEG
+    }
+}
+
 class YoloBubbleDetector(context: Context) {
     // The detector can outlive the screen that created it; never retain an Activity context.
     private val context: Context = context.applicationContext
@@ -127,6 +167,17 @@ class YoloBubbleDetector(context: Context) {
     @Volatile
     var isYoloSegmentation = false
         private set
+
+    @Volatile
+    var activeModelType: DetectorModel = DetectorModel.YOLO11N_SEG
+        private set
+
+    fun switchModel(modelType: DetectorModel): Boolean = synchronized(sessionLock) {
+        if (activeModelType == modelType && isSessionInitialized && ortSession != null) return true
+        activeModelType = modelType
+        closeSession()
+        return initOnnxEngine()
+    }
 
     private var cachedFloatArray: FloatArray? = null
     private var cachedPixelArray: IntArray? = null
@@ -386,7 +437,7 @@ class YoloBubbleDetector(context: Context) {
                     ortEnv!!.createSession(modelFile.absolutePath, sessionOptions)
                 }
                 ortSession = session
-                verifiedBundledClassMap = runCatching { sha256(modelFile) == VERIFIED_BUNDLED_MODEL_SHA256 }.getOrDefault(false)
+                verifiedBundledClassMap = runCatching { sha256(modelFile) == activeModelType.sha256 }.getOrDefault(false)
 
                 // 1. Giriş boyutunu ve isimlerini session.inputInfo üzerinden oku
                 var inputW = DEFAULT_INPUT_SIZE
@@ -469,24 +520,23 @@ class YoloBubbleDetector(context: Context) {
         return initOnnxEngine()
     }
 
-    fun getModelFile(): File? = synchronized(modelFileLock) {
+    fun getModelFile(modelType: DetectorModel = activeModelType): File? = synchronized(modelFileLock) {
         val internalDir = File(context.filesDir, "models")
         if (!internalDir.exists() && !internalDir.mkdirs()) return@synchronized null
-        val internalFile = File(internalDir, MODEL_FILENAME)
-        // Imported models are accepted above MIN_MODEL_FILE_BYTES; do not replace a
-        // valid small model with the bundled asset on a later initialization.
-        if (internalFile.exists() && internalFile.length() > MIN_MODEL_FILE_BYTES) return@synchronized internalFile
+        val internalFile = File(internalDir, modelType.targetFileName)
+        // Eşleşen boyuttaki model dosyası varsa doğrudan kullan
+        if (internalFile.exists() && internalFile.length() == modelType.expectedBytes) return@synchronized internalFile
 
-        val tempFile = File(internalDir, "${MODEL_FILENAME}.tmp")
+        val tempFile = File(internalDir, "${modelType.targetFileName}.tmp")
         try {
             val stream = try {
-                context.assets.open(EMBEDDED_ASSET_PATH)
+                context.assets.open(modelType.assetPath)
             } catch (_: Throwable) {
                 try {
-                    context.assets.open(MODEL_FILENAME)
+                    context.assets.open(modelType.targetFileName)
                 } catch (_: Throwable) {
                     try {
-                        context.assets.open("models/$LEGACY_MODEL_FILENAME")
+                        context.assets.open(EMBEDDED_ASSET_PATH)
                     } catch (_: Throwable) {
                         null
                     }
@@ -500,7 +550,7 @@ class YoloBubbleDetector(context: Context) {
                         output.flush()
                     }
                 }
-                if (tempFile.exists() && tempFile.length() > MIN_MODEL_FILE_BYTES) {
+                if (tempFile.exists() && tempFile.length() == modelType.expectedBytes) {
                     if (internalFile.exists()) internalFile.delete()
                     if (tempFile.renameTo(internalFile)) {
                         invalidateModelHashCache()
@@ -509,7 +559,7 @@ class YoloBubbleDetector(context: Context) {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Gömülü model kopyalama hatası: ${e.message}")
+            Log.e(TAG, "Gömülü model (${modelType.id}) kopyalama hatası: ${e.message}")
         }
         if (tempFile.exists()) tempFile.delete()
         if (internalFile.exists() && internalFile.length() > MIN_MODEL_FILE_BYTES) internalFile else null
@@ -627,25 +677,32 @@ class YoloBubbleDetector(context: Context) {
     }
 
     fun getModelInfo(): Map<String, String> {
-        // Settings can call this on the main thread. Inspect the existing file only;
-        // model extraction is left to the background ONNX initialization path.
-        val modelFile = File(context.filesDir, "models/$MODEL_FILENAME").takeIf { it.isFile }
+        val modelFile = getModelFile(activeModelType)
         val loaded = isModelLoaded()
         val classLabels = if (dynamicClassNames.isNotEmpty()) {
             dynamicClassNames.values.joinToString(", ")
         } else {
-            if (verifiedBundledClassMap) "bubble (0), text_bubble (1), text_free (2) [SHA-256 verified]" else "Unknown (model metadata has no class names)"
+            if (isRtDetrMultiOutput) "bubble (0), text_bubble (1), text_free (2)" else "balloon (0)"
+        }
+        val architectureName = when {
+            isYoloSegmentation -> "YOLO11n Instance Segmentation (ProtoNet 32-mask)"
+            isRtDetrMultiOutput -> "RT-DETR-v2 End-to-End Transformer"
+            else -> "ONNX Dedektör"
         }
         return mapOf(
-            "engine" to "Microsoft ONNX Runtime Android (Embedded Asset)",
-            "model_name" to (modelFile?.name ?: MODEL_FILENAME),
-            "status" to if (loaded) "Aktif & Yüklendi (RT-DETR-v2 Comic AI, ${(modelFile?.length() ?: 0) / 1024} KB)" else if (lastInitializationError != null) "Yükleme Hatası" else "Model Bekleniyor",
-            "target_path" to "${context.filesDir.absolutePath}/models/$MODEL_FILENAME",
+            "engine" to "Microsoft ONNX Runtime Android",
+            "model_type" to activeModelType.id,
+            "model_title" to activeModelType.title,
+            "model_subtitle" to activeModelType.subtitle,
+            "model_name" to (modelFile?.name ?: activeModelType.targetFileName),
+            "status" to if (loaded) "Aktif & Yüklendi (${activeModelType.title})" else if (lastInitializationError != null) "Yükleme Hatası" else "Model Bekleniyor",
+            "target_path" to (modelFile?.absolutePath ?: "${context.filesDir.absolutePath}/models/${activeModelType.targetFileName}"),
             "file_size" to if (modelFile?.exists() == true) "${modelFile.length()} bayt" else "Mevcut Değil",
             "input_size" to "${modelInputWidth}x${modelInputHeight}",
-            "architecture" to if (isRtDetrMultiOutput) "RT-DETR-v2 End-to-End Transformer" else "Ultralytics YOLO / End2End",
+            "architecture" to architectureName,
             "last_error" to (lastInitializationError ?: "Hata Yok"),
-            "classes" to classLabels
+            "classes" to classLabels,
+            "description" to activeModelType.description
         )
     }
 

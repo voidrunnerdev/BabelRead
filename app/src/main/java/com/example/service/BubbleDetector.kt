@@ -33,13 +33,13 @@ class BubbleDetector(context: Context) {
     fun isAiModelReady(): Boolean = yoloDetector.isModelLoaded()
 
     fun getModelPath(): String = if (yoloDetector.isModelLoaded()) {
-        "RT-DETR-v2 Comic AI (detector.onnx) + ML Kit OCR"
+        "${yoloDetector.activeModelType.title} (${yoloDetector.activeModelType.targetFileName}) + OCR"
     } else {
-        "RT-DETR modeli hazır değil; OCR ve görüntü sezgiselleri kullanılabilir"
+        "Yapay zeka modeli hazır değil; OCR ve görüntü sezgiselleri kullanılabilir"
     }
 
     /**
-     * Sayfadaki konuşma balonu ve metin bölgelerini RT-DETR/ONNX ile saptar.
+     * Sayfadaki konuşma balonu ve metin bölgelerini seçili model ile saptar.
      */
     suspend fun detectBubbles(
         bitmap: Bitmap?,
