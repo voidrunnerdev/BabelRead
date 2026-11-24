@@ -33,7 +33,7 @@ class BubbleDetector(context: Context) {
     fun isAiModelReady(): Boolean = yoloDetector.isModelLoaded()
 
     fun getModelPath(): String = if (yoloDetector.isModelLoaded()) {
-        "${yoloDetector.activeModelType.title} (${yoloDetector.activeModelType.targetFileName}) + OCR"
+        "${yoloDetector.activeModelType.title} (${yoloDetector.activeModelType.subtitle}) + ML Kit OCR"
     } else {
         "Yapay zeka modeli hazır değil; OCR ve görüntü sezgiselleri kullanılabilir"
     }

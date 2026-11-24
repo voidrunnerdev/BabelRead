@@ -30,7 +30,11 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.asComposePath
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
@@ -63,6 +67,7 @@ import com.example.util.BubbleLayoutGeometry
 import com.example.util.BubbleContourExtractor
 import com.example.util.BubbleTextLayoutEngine
 import com.example.util.ContourScanlineProfile
+import com.example.util.buildContourPath
 import com.example.util.OverlayBackgroundBounds
 import com.example.util.OverlayLayoutPolicy
 import com.example.util.PageFontHarmonizer
@@ -2165,8 +2170,11 @@ fun ReaderPageContainer(
                             return@forEach
                         }
                         val isSubtitleMode = bubbleStyle == "Alt Yazı (Şeffaf)"
-                        val isRectangularBox = !block.isBubble || block.bubbleBox.isEmpty ||
-                            (placed.layoutResult.bubbleTextLayout?.contourProfile?.isRectangularLike == true)
+                        val contour = placed.layoutResult.bubbleTextLayout?.contourProfile ?: block.contourProfile
+                        val isAspectExtreme = placed.widthDp.value > 0f && placed.heightDp.value > 0f &&
+                            (placed.widthDp.value / placed.heightDp.value > 2.2f || placed.heightDp.value / placed.widthDp.value > 2.5f)
+                        val isRectangularBox = (contour?.isRectangularLike == true) ||
+                            (!block.isBubble && isAspectExtreme)
 
                         val boxBackground = when {
                             isSubtitleMode -> Color.Black.copy(alpha = 0.85f)
@@ -2205,6 +2213,23 @@ fun ReaderPageContainer(
                         val boxWidth = (boxRight - boxLeft).coerceAtLeast(1.dp)
                         val boxHeight = (boxBottom - boxTop).coerceAtLeast(1.dp)
 
+                        val cachedBackgroundPath = remember(block, boxWidth, boxHeight, coordinateScaleX, coordinateScaleY) {
+                            if (contour != null && contour.isUsable && !isRectangularBox && !isSubtitleMode) {
+                                val bubbleRect = if (hasValidBubble) {
+                                    val left = with(density) { (bubbleLeftDp - boxLeft).toPx() }
+                                    val top = with(density) { (bubbleTopDp - boxTop).toPx() }
+                                    val right = with(density) { (bubbleRightDp - boxLeft).toPx() }
+                                    val bottom = with(density) { (bubbleBottomDp - boxTop).toPx() }
+                                    RectF(left, top, right, bottom)
+                                } else {
+                                    RectF(0f, 0f, with(density) { boxWidth.toPx() }, with(density) { boxHeight.toPx() })
+                                }
+                                buildContourPath(contour, bubbleRect).asComposePath()
+                            } else {
+                                null
+                            }
+                        }
+
                         Box(
                             modifier = Modifier
                                 .absoluteOffset(x = boxLeft, y = boxTop)
@@ -2212,7 +2237,21 @@ fun ReaderPageContainer(
                                 .height(boxHeight)
                                 .drawBehind {
                                     if (size.width <= 0f || size.height <= 0f) return@drawBehind
-                                    if (isRectangularBox || isSubtitleMode) {
+                                    if (cachedBackgroundPath != null) {
+                                        drawPath(
+                                            path = cachedBackgroundPath,
+                                            color = boxBackground
+                                        )
+                                        drawPath(
+                                            path = cachedBackgroundPath,
+                                            color = boxBackground,
+                                            style = Stroke(
+                                                width = with(density) { 2.5.dp.toPx() },
+                                                cap = StrokeCap.Round,
+                                                join = StrokeJoin.Round
+                                            )
+                                        )
+                                    } else if (isRectangularBox || isSubtitleMode) {
                                         drawRoundRect(
                                             color = boxBackground,
                                             size = size,
@@ -2559,33 +2598,88 @@ fun ReaderPageContainer(
                         }
 
                         detectedBubbles.forEach { bubble ->
-                            val normalizedRect = Rect(
-                                (bubble.bounds.left * renderedBitmap.width).toInt(),
-                                (bubble.bounds.top * renderedBitmap.height).toInt(),
-                                (bubble.bounds.right * renderedBitmap.width).toInt(),
-                                (bubble.bounds.bottom * renderedBitmap.height).toInt()
-                            )
-                            drawDebugBox(
-                                normalizedRect,
-                                widthScale,
-                                widthScale,
-                                android.graphics.Color.rgb(0, 229, 255),
-                                "Aday ${bubble.label} #${bubble.id} (${(bubble.confidence * 100).toInt()}%)",
-                                strokePx,
-                                cornerPx
-                            )
+                            val left = bubble.bounds.left * renderedBitmap.width * widthScale
+                            val top = bubble.bounds.top * renderedBitmap.height * widthScale
+                            val right = bubble.bounds.right * renderedBitmap.width * widthScale
+                            val bottom = bubble.bounds.bottom * renderedBitmap.height * widthScale
+                            val label = "Aday ${bubble.label} #${bubble.id} (${(bubble.confidence * 100).toInt()}%)"
+
+                            if (bubble.contourProfile != null && bubble.contourProfile.isUsable) {
+                                val contourPath = buildContourPath(bubble.contourProfile, RectF(left, top, right, bottom))
+                                boxPaint.color = android.graphics.Color.argb(38, 0, 229, 255)
+                                boxPaint.style = android.graphics.Paint.Style.FILL
+                                nativeCanvas.drawPath(contourPath, boxPaint)
+
+                                boxPaint.color = android.graphics.Color.rgb(0, 229, 255)
+                                boxPaint.style = android.graphics.Paint.Style.STROKE
+                                boxPaint.strokeWidth = strokePx
+                                nativeCanvas.drawPath(contourPath, boxPaint)
+
+                                val metrics = textPaint.fontMetrics
+                                val labelWidth = textPaint.measureText(label)
+                                val labelHeight = metrics.descent - metrics.ascent
+                                val labelLeft = left.coerceIn(
+                                    0f,
+                                    (size.width - labelWidth - horizontalPadding * 2).coerceAtLeast(0f)
+                                )
+                                val labelTop = (top - labelHeight - verticalPadding * 2)
+                                    .coerceIn(0f, (size.height - labelHeight - verticalPadding * 2).coerceAtLeast(0f))
+                                labelPaint.color = android.graphics.Color.rgb(0, 229, 255)
+                                nativeCanvas.drawRect(
+                                    labelLeft,
+                                    labelTop,
+                                    labelLeft + labelWidth + horizontalPadding * 2,
+                                    labelTop + labelHeight + verticalPadding * 2,
+                                    labelPaint
+                                )
+                                textPaint.color = android.graphics.Color.BLACK
+                                nativeCanvas.drawText(
+                                    label,
+                                    labelLeft + horizontalPadding,
+                                    labelTop + verticalPadding - metrics.ascent,
+                                    textPaint
+                                )
+                            } else {
+                                val normalizedRect = Rect(
+                                    (bubble.bounds.left * renderedBitmap.width).toInt(),
+                                    (bubble.bounds.top * renderedBitmap.height).toInt(),
+                                    (bubble.bounds.right * renderedBitmap.width).toInt(),
+                                    (bubble.bounds.bottom * renderedBitmap.height).toInt()
+                                )
+                                drawDebugBox(
+                                    normalizedRect,
+                                    widthScale,
+                                    widthScale,
+                                    android.graphics.Color.rgb(0, 229, 255),
+                                    label,
+                                    strokePx,
+                                    cornerPx
+                                )
+                            }
                         }
 
                         translatedBlocks.forEachIndexed { idx, block ->
-                            drawDebugBox(
-                                block.bubbleBox,
-                                coordinateScaleX,
-                                coordinateScaleY,
-                                android.graphics.Color.rgb(224, 64, 251),
-                                "Ham balon #${idx + 1} [${block.bubbleBox.width()}x${block.bubbleBox.height()}]",
-                                with(density) { 2.dp.toPx() },
-                                cornerPx
-                            )
+                            if (block.contourProfile != null && block.contourProfile.isUsable) {
+                                val left = block.bubbleBox.left * coordinateScaleX
+                                val top = block.bubbleBox.top * coordinateScaleY
+                                val right = block.bubbleBox.right * coordinateScaleX
+                                val bottom = block.bubbleBox.bottom * coordinateScaleY
+                                val contourPath = buildContourPath(block.contourProfile, RectF(left, top, right, bottom))
+                                boxPaint.color = android.graphics.Color.rgb(224, 64, 251)
+                                boxPaint.style = android.graphics.Paint.Style.STROKE
+                                boxPaint.strokeWidth = with(density) { 2.dp.toPx() }
+                                nativeCanvas.drawPath(contourPath, boxPaint)
+                            } else {
+                                drawDebugBox(
+                                    block.bubbleBox,
+                                    coordinateScaleX,
+                                    coordinateScaleY,
+                                    android.graphics.Color.rgb(224, 64, 251),
+                                    "Ham balon #${idx + 1} [${block.bubbleBox.width()}x${block.bubbleBox.height()}]",
+                                    with(density) { 2.dp.toPx() },
+                                    cornerPx
+                                )
+                            }
                             val placed = if (translationActive) {
                                 debugPlacedOverlays.firstOrNull {
                                     it.block.boundingBox == block.boundingBox &&

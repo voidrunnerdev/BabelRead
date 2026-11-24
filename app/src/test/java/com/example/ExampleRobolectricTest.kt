@@ -187,4 +187,14 @@ class ExampleRobolectricTest {
         assertTrue(service.isValidDialogueText("Ne?", isBubble = false))
         assertTrue(!service.isValidDialogueText("Wtakes", isBubble = false))
     }
+
+    @Test
+    fun `test buildContourPath generates valid non-empty path from scanline profile`() {
+        val lefts = floatArrayOf(0.4f, 0.2f, 0.1f, 0.2f, 0.4f)
+        val rights = floatArrayOf(0.6f, 0.8f, 0.9f, 0.8f, 0.6f)
+        val profile = com.example.util.ContourScanlineProfile(lefts, rights)
+        val bounds = android.graphics.RectF(10f, 20f, 110f, 220f)
+        val path = com.example.util.buildContourPath(profile, bounds)
+        assertTrue(!path.isEmpty)
+    }
 }

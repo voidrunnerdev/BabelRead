@@ -1,5 +1,7 @@
 package com.example.util
 
+import android.graphics.Path
+import android.graphics.RectF
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
@@ -105,6 +107,48 @@ class ContourScanlineProfile(
         result = 31 * result + opticalCenterY.hashCode()
         return result
     }
+}
+
+/**
+ * Builds an organic [Path] representing the continuous contour
+ * profile of the speech bubble within the target bounding box.
+ */
+fun buildContourPath(profile: ContourScanlineProfile, bounds: RectF): Path {
+    val path = Path()
+    if (!profile.isUsable || bounds.width() <= 0f || bounds.height() <= 0f) {
+        path.addOval(bounds, Path.Direction.CW)
+        return path
+    }
+    val totalRows = profile.rowCount
+    val stepY = bounds.height() / totalRows
+    val startRow = profile.firstValidRow
+    val endRow = profile.lastValidRow
+
+    // 1. Tepe kubbe merkezi
+    val topMidX = bounds.left + (profile.rowLeftFractions[startRow] + profile.rowRightFractions[startRow]) * 0.5f * bounds.width()
+    val topY = bounds.top + startRow * stepY
+    path.moveTo(topMidX, topY)
+
+    // 2. Sağ kenar (yukarıdan aşağıya organik iniş)
+    for (r in startRow..endRow) {
+        val y = bounds.top + (r + 0.5f) * stepY
+        val x = bounds.left + profile.rowRightFractions[r] * bounds.width()
+        path.lineTo(x, y)
+    }
+
+    // 3. Dip kubbe merkezi
+    val botMidX = bounds.left + (profile.rowLeftFractions[endRow] + profile.rowRightFractions[endRow]) * 0.5f * bounds.width()
+    val botY = bounds.top + (endRow + 1) * stepY
+    path.lineTo(botMidX, botY)
+
+    // 4. Sol kenar (aşağıdan yukarıya organik çıkış)
+    for (r in endRow downTo startRow) {
+        val y = bounds.top + (r + 0.5f) * stepY
+        val x = bounds.left + profile.rowLeftFractions[r] * bounds.width()
+        path.lineTo(x, y)
+    }
+    path.close()
+    return path
 }
 
 /**
