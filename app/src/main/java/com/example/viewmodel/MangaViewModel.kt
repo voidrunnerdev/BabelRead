@@ -43,6 +43,7 @@ import com.example.service.TextBlockObj
 import com.example.service.TranslationRequest
 import com.example.service.TranslationService
 import com.example.util.BubbleLayoutGeometry
+import com.example.util.ContourScanlineProfile
 import com.example.util.ReaderBitmapPolicy
 import com.example.work.NewChapterWorker
 import kotlinx.coroutines.*
@@ -2836,7 +2837,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         val textRect: Rect,
                         val isBubble: Boolean,
                         val isDark: Boolean,
-                        val bubbleBounds: Rect = targetBox
+                        val bubbleBounds: Rect = targetBox,
+                        val contourProfile: ContourScanlineProfile? = null
                     )
                     val candidates = mutableListOf<BubbleCandidate>()
                     // Modelin ham text_free/onomatopeya kutuları. Bunlar yalnızca
@@ -2894,7 +2896,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     first.bubbleBounds
                                 } else {
                                     second.bubbleBounds
-                                }
+                                },
+                                contourProfile = first.contourProfile ?: second.contourProfile
                             )
 
                             fun joinFragmentText(firstText: String, secondText: String): String {
@@ -3044,7 +3047,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     existing.bubbleBounds
                                 } else {
                                     candidate.bubbleBounds
-                                }
+                                },
+                                contourProfile = existing.contourProfile ?: candidate.contourProfile
                             )
                         }
                         return consolidated
@@ -3285,6 +3289,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                             analysis.isBubble -> translationService.refineBubbleBounds(bitmap, textBounds, analysis.isDarkBubble)
                                             else -> textBounds
                                         }
+                                        val candidateContour = yoloBubbles.firstOrNull { yb ->
+                                            val r = yb.toPixelRect(bmpW, bmpH)
+                                            r == bubbleBounds || r.contains(textBounds.centerX(), textBounds.centerY())
+                                        }?.contourProfile
                                         // Size bubble text from the balloon interior. The tight
                                         // text_bubble detection remains a fallback anchor, but
                                         // fitting to it left longer translations needlessly tiny.
@@ -3302,7 +3310,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                                 textRect = textBounds,
                                                 isBubble = finalIsBubble,
                                                 isDark = analysis.isDarkBubble,
-                                                bubbleBounds = bubbleBounds
+                                                bubbleBounds = bubbleBounds,
+                                                contourProfile = candidateContour
                                             )
                                         )
                                     }
@@ -3333,6 +3342,10 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     analysis.isBubble -> translationService.refineBubbleBounds(bitmap, cluster.rect, analysis.isDarkBubble)
                                     else -> cluster.rect
                                 }
+                                val unmatchedContour = yoloBubbles.firstOrNull { yb ->
+                                    val r = yb.toPixelRect(bmpW, bmpH)
+                                    r == refinedBox || r.contains(cluster.rect.centerX(), cluster.rect.centerY())
+                                }?.contourProfile
                                 val targetBox = (if (finalIsBubble) {
                                     BubbleLayoutGeometry.centeredLayoutBox(cluster.rect, refinedBox)
                                 } else {
@@ -3347,7 +3360,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                         textRect = cluster.rect,
                                         isBubble = finalIsBubble,
                                         isDark = analysis.isDarkBubble,
-                                        bubbleBounds = refinedBox
+                                        bubbleBounds = refinedBox,
+                                        contourProfile = unmatchedContour
                                     )
                                 )
                             }
@@ -3488,7 +3502,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     layoutBox = cand.targetBox,
                                     translationSucceeded = result?.succeeded == true,
                                     coordinateImageWidth = bitmap.width,
-                                    coordinateImageHeight = bitmap.height
+                                    coordinateImageHeight = bitmap.height,
+                                    contourProfile = cand.contourProfile
                                 )
                             )
                         }

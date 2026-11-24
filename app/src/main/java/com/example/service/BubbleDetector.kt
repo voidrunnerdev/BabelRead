@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.graphics.RectF
+import com.example.util.ContourScanlineProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -13,7 +14,8 @@ data class BubbleBox(
     val confidence: Float,
     val label: String = "text",
     var originalText: String = "",
-    var translatedText: String = ""
+    var translatedText: String = "",
+    val contourProfile: ContourScanlineProfile? = null
 ) {
     fun toPixelRect(bitmapWidth: Int, bitmapHeight: Int): Rect {
         if (bitmapWidth <= 0 || bitmapHeight <= 0) return Rect()

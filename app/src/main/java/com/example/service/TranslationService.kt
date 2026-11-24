@@ -1,6 +1,7 @@
 package com.example.service
 
 import com.example.util.BubbleContourExtractor
+import com.example.util.ContourScanlineProfile
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -82,7 +83,8 @@ data class TextBlockObj(
     val translationSucceeded: Boolean = true,
     // Pixel coordinate space used by OCR and all rectangles above.
     val coordinateImageWidth: Int = 0,
-    val coordinateImageHeight: Int = 0
+    val coordinateImageHeight: Int = 0,
+    val contourProfile: ContourScanlineProfile? = null
 )
 
 data class TranslationRequest(

@@ -1725,7 +1725,7 @@ fun ReaderPageContainer(
                             } else {
                                 val bubbleBounds = p1BubbleBounds()
                                 val bubbleGeo = bubbleBounds?.let { geometryFor(it) }
-                                val contourProfile = if (validMasked != null && bubbleBounds != null) {
+                                val contourProfile = block.contourProfile ?: if (validMasked != null && bubbleBounds != null) {
                                     contourCache.getOrPut(blockIndex) {
                                         BubbleContourExtractor.extractFromBitmap(
                                             bitmap = validMasked,

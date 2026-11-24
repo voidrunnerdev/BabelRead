@@ -10,6 +10,7 @@ import android.graphics.Bitmap
 import android.graphics.RectF
 import android.net.Uri
 import android.util.Log
+import com.example.util.ContourScanlineProfile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -42,7 +43,8 @@ class YoloBubbleDetector(context: Context) {
         val classId: Int,
         val label: String,
         val confidence: Float,
-        val box: RectF // Normalize edilmiş koordinatlar (0.0f .. 1.0f)
+        val box: RectF, // Normalize edilmiş koordinatlar (0.0f .. 1.0f)
+        val contourProfile: ContourScanlineProfile? = null
     )
 
     data class DetectionResult(
@@ -120,6 +122,10 @@ class YoloBubbleDetector(context: Context) {
 
     @Volatile
     var isRtDetrMultiOutput = false
+        private set
+
+    @Volatile
+    var isYoloSegmentation = false
         private set
 
     private var cachedFloatArray: FloatArray? = null
@@ -278,7 +284,8 @@ class YoloBubbleDetector(context: Context) {
                         min(a.box.top, b.box.top),
                         max(a.box.right, b.box.right),
                         max(a.box.bottom, b.box.bottom)
-                    )
+                    ),
+                    contourProfile = null
                 )
             } else {
                 merged += first.detection
@@ -421,6 +428,10 @@ class YoloBubbleDetector(context: Context) {
                 )
                 val logitsOutputName = findOutputName(outNames, setOf("logits", "predlogits", "classlogits"))
                 isRtDetrMultiOutput = boxOutputName != null && (scoreOutputName != null || logitsOutputName != null)
+
+                val protoOutputName = findOutputName(outNames, setOf("output1", "proto", "prototypes", "1"))
+                val detOutputName = findOutputName(outNames, setOf("output0", "detections", "pred", "0"))
+                isYoloSegmentation = detOutputName != null && protoOutputName != null
 
                 // 3. Sınıf adlarını ONNX metadata'sından oku
                 val parsedClasses = mutableMapOf<Int, String>()
@@ -723,7 +734,7 @@ class YoloBubbleDetector(context: Context) {
             }
             return nmsDetections(mergeTileSeamDetections(tiledDetections))
                 .mapIndexed { index, det ->
-                    BubbleBox(index + 1, det.box, det.confidence, det.label)
+                    BubbleBox(index + 1, det.box, det.confidence, det.label, contourProfile = det.contourProfile)
                 }
         }
 
@@ -782,7 +793,8 @@ class YoloBubbleDetector(context: Context) {
                     id = index + 1,
                     bounds = det.box,
                     confidence = det.confidence,
-                    label = det.label
+                    label = det.label,
+                    contourProfile = det.contourProfile
                 )
             }
         }
@@ -793,7 +805,8 @@ class YoloBubbleDetector(context: Context) {
                 id = index + 1,
                 bounds = det.box,
                 confidence = det.confidence,
-                label = det.label
+                label = det.label,
+                contourProfile = det.contourProfile
             )
         }
     }
@@ -1136,6 +1149,22 @@ class YoloBubbleDetector(context: Context) {
                 }
             }
 
+            // --- 2. Biçim: YOLO Instance Segmentation (output0: detections, output1: proto masks) ---
+            val protoOutputName = findOutputName(outputNames, setOf("output1", "proto", "prototypes", "1"))
+            val detOutputName = findOutputName(outputNames, setOf("output0", "detections", "pred", "0"))
+            if (protoOutputName != null && detOutputName != null) {
+                return parseYoloSegmentationOutput(
+                    results = results,
+                    detOutputName = detOutputName,
+                    protoOutputName = protoOutputName,
+                    origW = origW,
+                    origH = origH,
+                    inputW = inputW,
+                    inputH = inputH,
+                    confThreshold = confThreshold
+                )
+            }
+
             // An unrecognized multi-output graph must not be parsed as a single YOLO tensor.
             if (outputNames.size > 1) {
                 lastInferenceError = "ONNX modelinin çoklu çıkış biçimi desteklenmiyor: $outputNames"
@@ -1316,5 +1345,247 @@ class YoloBubbleDetector(context: Context) {
             try { sizeTensor?.close() } catch (_: Exception) {}
             try { results?.close() } catch (_: Exception) {}
         }
+    }
+
+    private fun parseYoloSegmentationOutput(
+        results: OrtSession.Result,
+        detOutputName: String,
+        protoOutputName: String,
+        origW: Float,
+        origH: Float,
+        inputW: Int,
+        inputH: Int,
+        confThreshold: Float
+    ): List<YoloDetection> {
+        val detOpt = results.get(detOutputName)
+        val protoOpt = results.get(protoOutputName)
+        val detTensor = detOpt.takeIf { it.isPresent }?.get() as? OnnxTensor
+        val protoTensor = protoOpt.takeIf { it.isPresent }?.get() as? OnnxTensor
+
+        if (detTensor == null || protoTensor == null) {
+            lastInferenceError = "YOLO segmentasyon tensörleri okunamadı."
+            return emptyList()
+        }
+
+        val detShape = detTensor.info.shape
+        val protoShape = protoTensor.info.shape
+        if (detShape.size != 3 || protoShape.size != 4) {
+            lastInferenceError = "Geçersiz YOLO segmentasyon tensör şekli: det=${detShape.contentToString()}, proto=${protoShape.contentToString()}"
+            return emptyList()
+        }
+
+        val protoH = protoShape[2].toInt()
+        val protoW = protoShape[3].toInt()
+        val numProtos = protoShape[1].toInt().coerceAtLeast(1)
+        if (protoH <= 0 || protoW <= 0) return emptyList()
+
+        val protoStride = inputW.toFloat() / protoW.toFloat()
+
+        val detBuffer = detTensor.floatBuffer
+        val detData = FloatArray(detBuffer.remaining()).also { detBuffer.get(it) }
+        val protoBuffer = protoTensor.floatBuffer
+        val protoData = FloatArray(protoBuffer.remaining()).also { protoBuffer.get(it) }
+
+        val dim1 = detShape[1].toInt()
+        val dim2 = detShape[2].toInt()
+        val rowMajor = dim1 > dim2 && dim2 in 5..512
+        val featureMajor = dim2 > dim1 && dim1 in 5..512
+        if (!rowMajor && !featureMajor) {
+            lastInferenceError = "Tanınmayan YOLO segmentasyon çıktı eksenleri: ${detShape.contentToString()}"
+            return emptyList()
+        }
+
+        val numFeatures = if (rowMajor) dim2 else dim1
+        val numCandidates = if (rowMajor) dim1 else dim2
+
+        fun getDetValue(candidate: Int, feature: Int): Float =
+            if (rowMajor) detData[candidate * numFeatures + feature]
+            else detData[feature * numCandidates + candidate]
+
+        // Check if coordinates are normalized
+        var maxCoordinateMagnitude = 0f
+        val checkLimit = min(numCandidates, 100)
+        for (candidate in 0 until checkLimit) {
+            for (c in 0..3) {
+                maxCoordinateMagnitude = max(maxCoordinateMagnitude, abs(getDetValue(candidate, c)))
+            }
+        }
+        val coordinatesAreNormalized = maxCoordinateMagnitude <= 2f
+
+        class RawSegCandidate(
+            val boxModel: RectF,
+            val score: Float,
+            val classId: Int,
+            val maskCoeffs: FloatArray
+        )
+
+        val rawCandidates = ArrayList<RawSegCandidate>(64)
+        val numMaskCoeffs = min(min(32, numProtos), numFeatures - 5)
+
+        for (candidate in 0 until numCandidates) {
+            // Sınıf skoru (kanal 4). YOLO-seg ONNX çıktısında skorlar zaten 0.0..1.0 aralığındadır.
+            val score = getDetValue(candidate, 4)
+            if (!score.isFinite() || score < confThreshold) continue
+
+            val rawCx = getDetValue(candidate, 0)
+            val rawCy = getDetValue(candidate, 1)
+            val rawW = getDetValue(candidate, 2)
+            val rawH = getDetValue(candidate, 3)
+
+            val cx = if (coordinatesAreNormalized) rawCx * inputW else rawCx
+            val cy = if (coordinatesAreNormalized) rawCy * inputH else rawCy
+            val w = if (coordinatesAreNormalized) rawW * inputW else rawW
+            val h = if (coordinatesAreNormalized) rawH * inputH else rawH
+
+            val x1 = (cx - w * 0.5f).coerceIn(0f, inputW.toFloat())
+            val y1 = (cy - h * 0.5f).coerceIn(0f, inputH.toFloat())
+            val x2 = (cx + w * 0.5f).coerceIn(x1, inputW.toFloat())
+            val y2 = (cy + h * 0.5f).coerceIn(y1, inputH.toFloat())
+
+            val coeffs = FloatArray(numMaskCoeffs) { k ->
+                getDetValue(candidate, 5 + k)
+            }
+            rawCandidates.add(RawSegCandidate(RectF(x1, y1, x2, y2), score, 0, coeffs))
+        }
+
+        if (rawCandidates.isEmpty()) return emptyList()
+        rawCandidates.sortByDescending { it.score }
+
+        // Greedy NMS with Optical-Center-Aware Snowman / Stacked Bubble Protection
+        fun boxIoU(a: RectF, b: RectF): Float {
+            val interL = max(a.left, b.left)
+            val interT = max(a.top, b.top)
+            val interR = min(a.right, b.right)
+            val interB = min(a.bottom, b.bottom)
+            if (interR <= interL || interB <= interT) return 0f
+            val interArea = (interR - interL) * (interB - interT)
+            val unionArea = a.width() * a.height() + b.width() * b.height() - interArea
+            return if (unionArea > 0f) interArea / unionArea else 0f
+        }
+
+        val selected = ArrayList<RawSegCandidate>(rawCandidates.size)
+        val suppressed = BooleanArray(rawCandidates.size)
+
+        for (i in 0 until rawCandidates.size) {
+            if (suppressed[i]) continue
+            val candA = rawCandidates[i]
+            selected.add(candA)
+
+            for (j in (i + 1) until rawCandidates.size) {
+                if (suppressed[j]) continue
+                val candB = rawCandidates[j]
+                val iou = boxIoU(candA.boxModel, candB.boxModel)
+
+                if (iou > 0.65f) {
+                    suppressed[j] = true
+                } else if (iou >= 0.35f) {
+                    // Şüpheci kuralı: Kardan adam / dikey bitişik balon koruması
+                    val deltaY = abs(candA.boxModel.centerY() - candB.boxModel.centerY())
+                    val maxH = max(candA.boxModel.height(), candB.boxModel.height())
+                    if (deltaY < 0.28f * maxH) {
+                        // Merkezler çok yakın, tek balonun birden fazla aday kutusu
+                        suppressed[j] = true
+                    }
+                    // Aksi halde ayrı konuşma balonlarıdır; silinmez!
+                }
+            }
+        }
+
+        // Mask extraction and ContourScanlineProfile generation
+        val detections = ArrayList<YoloDetection>(selected.size)
+        val maskThreshold = 0.45f
+        val thresholdLogit = kotlin.math.ln(maskThreshold / (1.0f - maskThreshold))
+        val hw = protoH * protoW
+
+        for (det in selected) {
+            val normL = (det.boxModel.left / inputW).coerceIn(0f, 1f)
+            val normT = (det.boxModel.top / inputH).coerceIn(0f, 1f)
+            val normR = (det.boxModel.right / inputW).coerceIn(normL, 1f)
+            val normB = (det.boxModel.bottom / inputH).coerceIn(normT, 1f)
+
+            val pxMin = (det.boxModel.left / protoStride).toInt().coerceIn(0, protoW - 1)
+            val pxMax = (det.boxModel.right / protoStride).toInt().coerceIn(pxMin, protoW - 1)
+            val pyMin = (det.boxModel.top / protoStride).toInt().coerceIn(0, protoH - 1)
+            val pyMax = (det.boxModel.bottom / protoStride).toInt().coerceIn(pyMin, protoH - 1)
+
+            val subW = pxMax - pxMin + 1
+            val subH = pyMax - pyMin + 1
+
+            // Şüpheci kuralı: Mikro balonlarda kaba poligon yerine analitik elipse düş
+            val profile = if (subW >= 8 && subH >= 8) {
+                val rowLeftFractions = FloatArray(subH) { -1f }
+                val rowRightFractions = FloatArray(subH) { -1f }
+                var sumPx = 0.0
+                var sumPy = 0.0
+                var validCount = 0
+
+                for (py in pyMin..pyMax) {
+                    val r = py - pyMin
+                    var firstX = -1
+                    var lastX = -1
+                    val baseRowIdx = py * protoW
+
+                    for (px in pxMin..pxMax) {
+                        var z = 0f
+                        val pixelIdx = baseRowIdx + px
+                        for (k in 0 until numMaskCoeffs) {
+                            z += det.maskCoeffs[k] * protoData[k * hw + pixelIdx]
+                        }
+                        if (z >= thresholdLogit) {
+                            if (firstX < 0) firstX = px
+                            lastX = px
+                            sumPx += (px - pxMin)
+                            sumPy += (py - pyMin)
+                            validCount++
+                        }
+                    }
+
+                    if (firstX in 0..lastX) {
+                        rowLeftFractions[r] = (firstX - pxMin).toFloat() / subW.toFloat()
+                        rowRightFractions[r] = (lastX - pxMin + 1).toFloat() / subW.toFloat()
+                    }
+                }
+
+                // Şüpheci kuralı: Koyu kanji nedeniyle oluşan delikleri komşulardan onar
+                for (r in 0 until subH) {
+                    if (rowLeftFractions[r] < 0f) {
+                        val prevL = if (r > 0) rowLeftFractions[r - 1] else -1f
+                        val nextL = (r + 1 until subH).firstOrNull { rowLeftFractions[it] >= 0f }?.let { rowLeftFractions[it] } ?: -1f
+                        if (prevL >= 0f && nextL >= 0f) {
+                            rowLeftFractions[r] = (prevL + nextL) * 0.5f
+                            rowRightFractions[r] = ((rowRightFractions.getOrNull(r - 1) ?: 1f) + (rowRightFractions.getOrNull(r + 1) ?: 1f)) * 0.5f
+                        } else if (prevL >= 0f) {
+                            rowLeftFractions[r] = prevL
+                            rowRightFractions[r] = rowRightFractions.getOrNull(r - 1) ?: 1f
+                        } else if (nextL >= 0f) {
+                            rowLeftFractions[r] = nextL
+                            rowRightFractions[r] = min(1f, nextL + 0.35f)
+                        } else {
+                            rowLeftFractions[r] = 0.30f
+                            rowRightFractions[r] = 0.70f
+                        }
+                    }
+                }
+
+                val optX = if (validCount > 0) ((sumPx / validCount) / subW).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
+                val optY = if (validCount > 0) ((sumPy / validCount) / subH).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
+
+                ContourScanlineProfile(rowLeftFractions, rowRightFractions, optX, optY)
+            } else {
+                null
+            }
+
+            detections.add(
+                YoloDetection(
+                    classId = 0,
+                    label = "bubble",
+                    confidence = det.score,
+                    box = RectF(normL, normT, normR, normB),
+                    contourProfile = profile
+                )
+            )
+        }
+
+        return detections
     }
 }
