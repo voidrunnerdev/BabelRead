@@ -47,9 +47,9 @@ class ParSeqEngine(private val context: Context) {
         private const val INPUT_WIDTH = 128
         private const val MIN_LINE_CONFIDENCE = 0.40f
 
-        // docTR / PARSeq default vocabulary (118 characters + special tokens)
+        // docTR / PARSeq default vocabulary for 8-bit dynamic model (126 characters + EOS at index 126)
         private const val DEFAULT_VOCAB =
-            "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~°£€¥¢฿àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇáãíóõúÁÃÍÓÕÚñÑ¡¿äößÄÖẞčďěňřšťůýžČĎĚŇŘŠŤŮÝŽąćęłńśźżĄĆĘŁŃŚŹŻìòÌÒæøåÆØÅ§"
+            "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~°£€¥¢฿àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ"
 
         fun hasModelAsset(context: Context): Boolean {
             return try {
@@ -288,7 +288,10 @@ class ParSeqEngine(private val context: Context) {
         val builder = StringBuilder()
         var confidenceSum = 0.0
         var charCount = 0
-        val eosIndex = vocab.length // 118 (<eos> token)
+        // In docTR / OnnxTR PARSeq ONNX, output shape is [1, 33, classCount].
+        // Valid character indices are 0 until vocab.length.
+        // Index vocab.length (or classCount - 1) is <eos>.
+        val eosIndex = minOf(vocab.length, classCount - 1)
 
         for (t in 0 until timesteps) {
             val base = t * classCount
@@ -302,8 +305,8 @@ class ParSeqEngine(private val context: Context) {
                 }
             }
 
-            // Stop immediately on <eos> token
-            if (bestIndex == eosIndex) {
+            // Stop decoding immediately once EOS or any special/out-of-bounds token is reached
+            if (bestIndex >= eosIndex) {
                 break
             }
 

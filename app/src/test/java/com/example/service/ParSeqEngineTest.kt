@@ -12,14 +12,15 @@ import java.nio.ByteOrder
 @RunWith(RobolectricTestRunner::class)
 class ParSeqEngineTest {
 
+    private val vocab = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~°£€¥¢฿àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ"
+    private val classCount = 127 // 126 vocab chars + 1 EOS token at index 126
+
     @Test
     fun `decodeParSeq decodes words correctly and stops at eos token without truncating on zero`() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val engine = ParSeqEngine(context)
 
-        val vocab = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~°£€¥¢฿àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇáãíóõúÁÃÍÓÕÚñÑ¡¿äößÄÖẞčďěňřšťůýžČĎĚŇŘŠŤŮÝŽąćęłńśźżĄĆĘŁŃŚŹŻìòÌÒæøåÆØÅ§"
-        val eosIndex = vocab.length // 118
-        val classCount = vocab.length + 3 // 121
+        val eosIndex = vocab.length // 126
 
         // Target word to encode: "100% COOL!"
         // Notice it contains '0' at index 0 in vocab!
@@ -36,7 +37,7 @@ class ParSeqEngineTest {
             val targetIndex = when {
                 targetChar != null -> vocab.indexOf(targetChar)
                 t == targetText.length -> eosIndex // EOS
-                else -> eosIndex + 2 // PAD
+                else -> classCount - 1 // PAD
             }
             for (c in 0 until classCount) {
                 buffer.put(base + c, if (c == targetIndex) 8.0f else -8.0f)
@@ -48,5 +49,39 @@ class ParSeqEngineTest {
 
         assertEquals("Decoded text should match target exactly without truncating at '0'", targetText, result.text)
         assertTrue("Confidence should be very high for strong logits", result.confidence > 0.95f)
+    }
+
+    @Test
+    fun `decodeParSeq stops immediately at EOS token and ignores trailing hallucinated repetitions`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val engine = ParSeqEngine(context)
+
+        val eosIndex = vocab.length // 126
+        val targetText = "OHASHI-KUN"
+        val totalTimesteps = 33 // Full unrolled ONNX sequence
+
+        val buffer = ByteBuffer.allocateDirect(totalTimesteps * classCount * Float.SIZE_BYTES)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+
+        // Steps 0..9: "OHASHI-KUN"
+        // Step 10: EOS (index 126)
+        // Steps 11..32: Trailing hallucinations/repetitions ("HHIKUNHIIA-OOHSOOOO")
+        for (t in 0 until totalTimesteps) {
+            val base = t * classCount
+            val targetIndex = when {
+                t < targetText.length -> vocab.indexOf(targetText[t])
+                t == targetText.length -> eosIndex
+                else -> vocab.indexOf("H") // Trailing repeating token
+            }
+            for (c in 0 until classCount) {
+                buffer.put(base + c, if (c == targetIndex) 8.0f else -8.0f)
+            }
+        }
+        buffer.position(0)
+
+        val result = engine.decodeParSeq(buffer, totalTimesteps, classCount, vocab)
+
+        assertEquals("Decoded text should strictly stop at EOS and not stutter or repeat trailing characters", targetText, result.text)
     }
 }
