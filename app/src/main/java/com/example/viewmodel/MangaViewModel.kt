@@ -3053,7 +3053,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     // 3. Eşleştirme ve Çeviri Akışı
                     if (yoloBubbles.isNotEmpty()) {
                         val sfxBoxes = yoloBubbles.filter {
-                            it.label == "onomatopoeia_text"
+                            it.label in setOf("text_free", "onomatopoeia_text")
                         }
                             .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
                         pageAuxBoxes.addAll(sfxBoxes)
@@ -3062,7 +3062,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
                         )
                         val dialogueBoxes = dedupeRegions(
-                            yoloBubbles.filter { it.label in setOf("text_bubble", "dialogue_text", "text", "text_free") }
+                            yoloBubbles.filter { it.label in setOf("text_bubble", "dialogue_text", "text") }
                                 .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
                         )
 
@@ -3155,8 +3155,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 val ocrArea = (ocr.rect.width().toLong() * ocr.rect.height().toLong()).coerceAtLeast(1)
                                 (interArea.toFloat() / ocrArea.toFloat()) > 0.20f || yBox.contains(ocr.rect.centerX(), ocr.rect.centerY())
                             }
-                            val isSfx = !overlapsWithDialogueOrBalloon && overlapsPureSfx(ocr.rect) &&
-                                !translationService.isValidDialogueText(ocr.text, false)
+                            val isSfx = !overlapsWithDialogueOrBalloon && overlapsPureSfx(ocr.rect)
                             if (isSfx) continue
 
                             var bestYoloIdx = -1
@@ -3315,7 +3314,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             if (matchedOcrIndices.contains(idx) || raw.text.trim().isEmpty()) {
                                 false
                             } else {
-                                !overlapsPureSfx(raw.rect) || translationService.isValidDialogueText(raw.text, false)
+                                !overlapsPureSfx(raw.rect)
                             }
                         }
                         val clusteredUnmatched = translationService.clusterAdjacentBlocks(
