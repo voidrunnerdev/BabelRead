@@ -5,6 +5,7 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Rect
 import android.util.Log
@@ -20,6 +21,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.ceil
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 /**
  * PP-OCRv5 mobile recognizer with DBNet line detection.
@@ -51,7 +54,7 @@ class PpOcrV5Engine(
             modelAssets = listOf("models/en_PP-OCRv5_mobile_rec.onnx", "models/en_ppocrv5_rec.onnx"),
             dictAsset = "models/en_ppocrv5_dict.txt",
             cacheFileName = "en_ppocrv5_rec_v1.onnx",
-            expectedBytes = null,
+            expectedBytes = 7_848_423L,
             englishOnly = true
         )
     }
@@ -63,7 +66,12 @@ class PpOcrV5Engine(
         private const val MIN_REC_WIDTH = 320
         private const val MAX_REC_WIDTH = 3200
         private const val MIN_LINE_CONFIDENCE = 0.65f
+        private const val MIN_EN_LINE_CONFIDENCE = 0.55f
+        private const val MIN_EN_SHORT_LINE_CONFIDENCE = 0.50f
         private const val MIN_CJK_LINE_CONFIDENCE = 0.45f
+        private const val DARK_REGION_MEDIAN_LUMA = 95f
+        private const val INVERT_CONTRAST = 1.85f
+        private val LEGACY_PARSEQ_CACHE_FILES = listOf("parseq_rec_v1.onnx", "parseq_rec_v2_090.onnx")
 
         /**
          * Lightweight existence check for Settings UI without initializing ONNX Runtime
@@ -90,7 +98,7 @@ class PpOcrV5Engine(
         }
     }
 
-    private data class LineResult(
+    internal data class LineResult(
         val text: String,
         val confidence: Float
     )
@@ -139,84 +147,144 @@ class PpOcrV5Engine(
         region: Rect,
         originLanguage: String
     ): List<TranslationService.RectAndText> = withContext(Dispatchers.Default) {
+        if (bitmap.isRecycled || region.isEmpty) return@withContext emptyList()
         val primaryLanguage = normalizeLanguage(originLanguage) ?: return@withContext emptyList()
         if (!ensureInitialized()) return@withContext emptyList()
 
-        suspend fun recognize(
-            language: String,
-            forceVertical: Boolean = false,
-            forceHorizontal: Boolean = false
-        ): BlockAttempt {
-            val detected = if (!forceVertical && !forceHorizontal) {
-                detector.detect(bitmap, region)
-            } else {
-                emptyList()
-            }
-            val lines = if (detected.isNotEmpty()) {
-                detectedToLines(detected, language, forceVertical, forceHorizontal)
-            } else {
-                lineSegmenter.segment(
+        val pageRegion = Rect(region)
+        if (!pageRegion.intersect(0, 0, bitmap.width, bitmap.height) || pageRegion.isEmpty) {
+            return@withContext emptyList()
+        }
+
+        val isDarkRegion = isDarkBackgroundRegion(bitmap, pageRegion)
+        val workBitmap: Bitmap
+        val workRegion: Rect
+        val offsetX: Int
+        val offsetY: Int
+
+        if (isDarkRegion) {
+            val regionCrop = try {
+                Bitmap.createBitmap(
                     bitmap,
-                    region,
-                    language,
-                    forceVertical = forceVertical,
-                    forceHorizontal = forceHorizontal
+                    pageRegion.left,
+                    pageRegion.top,
+                    pageRegion.width(),
+                    pageRegion.height()
+                )
+            } catch (_: Exception) {
+                return@withContext emptyList()
+            }
+            workBitmap = try {
+                invertHighContrastBitmap(regionCrop)
+            } finally {
+                if (regionCrop !== bitmap && !regionCrop.isRecycled) regionCrop.recycle()
+            }
+            workRegion = Rect(0, 0, workBitmap.width, workBitmap.height)
+            offsetX = pageRegion.left
+            offsetY = pageRegion.top
+        } else {
+            workBitmap = bitmap
+            workRegion = pageRegion
+            offsetX = 0
+            offsetY = 0
+        }
+
+        try {
+            var regionComponentsChecked = false
+            var regionHasValidComponents = false
+            fun ensureValidComponents(): Boolean {
+                if (!regionComponentsChecked) {
+                    regionHasValidComponents = hasValidTextRegionComponents(workBitmap, workRegion)
+                    regionComponentsChecked = true
+                }
+                return regionHasValidComponents
+            }
+
+            suspend fun recognize(
+                language: String,
+                forceVertical: Boolean = false,
+                forceHorizontal: Boolean = false
+            ): BlockAttempt {
+                val effectiveHorizontal = forceHorizontal || variant.englishOnly
+                val effectiveVertical = forceVertical && !variant.englishOnly
+                val detected = if (!effectiveVertical && !forceHorizontal) {
+                    detector.detect(workBitmap, workRegion)
+                } else {
+                    emptyList()
+                }
+                val lines = if (detected.isNotEmpty()) {
+                    detectedToLines(detected, language, effectiveVertical, effectiveHorizontal)
+                } else if (ensureValidComponents()) {
+                    lineSegmenter.segment(
+                        workBitmap,
+                        workRegion,
+                        language,
+                        forceVertical = effectiveVertical,
+                        forceHorizontal = effectiveHorizontal
+                    )
+                } else {
+                    emptyList()
+                }
+                val vertical = if (lines.isEmpty()) {
+                    !variant.englishOnly && isJapanese(primaryLanguage) && workRegion.height() > workRegion.width() * 1.8f
+                } else {
+                    lines.count { it.vertical } * 2 >= lines.size
+                }
+                if (lines.isEmpty()) return BlockAttempt(emptyList(), 0, vertical)
+
+                val results = ArrayList<TranslationService.RectAndText>(lines.size)
+                for (line in lines) {
+                    currentCoroutineContext().ensureActive()
+                    val recognized = recognizeLine(workBitmap, line.rect, line.vertical) ?: continue
+                    if (!acceptsLine(recognized, language)) {
+                        Log.d(TAG, "PP-OCRv5 rejected low-confidence line: '${recognized.text}' (${recognized.confidence}, $language)")
+                        continue
+                    }
+                    if (recognized.text.isNotBlank()) {
+                        val pageRect = Rect(line.rect).apply { offset(offsetX, offsetY) }
+                        results.add(TranslationService.RectAndText(pageRect, recognized.text))
+                    }
+                }
+                return BlockAttempt(results, lines.size, vertical)
+            }
+
+            val primary = recognize(primaryLanguage)
+            if (variant.englishOnly || (primary.lineCount > 0 && primary.results.size >= primary.lineCount)) {
+                return@withContext primary.results
+            }
+
+            // Some lines may be rejected in the detected direction. Retry the same
+            // language in the opposite direction and keep the successful lines.
+            val retryVertical = !primary.vertical
+            val fallback = recognize(
+                primaryLanguage,
+                forceVertical = retryVertical,
+                forceHorizontal = !retryVertical
+            )
+            if (fallback.results.isEmpty()) return@withContext primary.results
+
+            val merged = ArrayList(primary.results)
+            val seen = HashSet<Rect>()
+            for (result in primary.results) seen.add(Rect(result.rect))
+            for (result in fallback.results) {
+                val rect = Rect(result.rect)
+                if (!seen.add(rect)) continue
+                if (overlapsExisting(rect, merged)) continue
+                merged.add(result)
+            }
+            if (merged.size > primary.results.size) {
+                Log.d(
+                    TAG,
+                    "PP-OCRv5 recovered ${merged.size - primary.results.size} lines with " +
+                        "${if (retryVertical) "vertical" else "horizontal"} retry"
                 )
             }
-            val vertical = if (lines.isEmpty()) {
-                isJapanese(primaryLanguage) && region.height() > region.width() * 1.8f
-            } else {
-                lines.count { it.vertical } * 2 >= lines.size
+            merged
+        } finally {
+            if (workBitmap !== bitmap && !workBitmap.isRecycled) {
+                workBitmap.recycle()
             }
-            if (lines.isEmpty()) return BlockAttempt(emptyList(), 0, vertical)
-
-            val results = ArrayList<TranslationService.RectAndText>(lines.size)
-            for (line in lines) {
-                currentCoroutineContext().ensureActive()
-                val recognized = recognizeLine(bitmap, line.rect, line.vertical) ?: continue
-                if (!acceptsLine(recognized, language)) {
-                    Log.d(TAG, "PP-OCRv5 rejected low-confidence line: ${recognized.confidence} ($language)")
-                    continue
-                }
-                if (recognized.text.isNotBlank()) {
-                    results.add(TranslationService.RectAndText(line.rect, recognized.text))
-                }
-            }
-            return BlockAttempt(results, lines.size, vertical)
         }
-
-        val primary = recognize(primaryLanguage)
-        if (variant.englishOnly || (primary.lineCount > 0 && primary.results.size >= primary.lineCount)) {
-            return@withContext primary.results
-        }
-
-        // Some lines may be rejected in the detected direction. Retry the same
-        // language in the opposite direction and keep the successful lines.
-        val retryVertical = !primary.vertical
-        val fallback = recognize(
-            primaryLanguage,
-            forceVertical = retryVertical,
-            forceHorizontal = !retryVertical
-        )
-        if (fallback.results.isEmpty()) return@withContext primary.results
-
-        val merged = ArrayList(primary.results)
-        val seen = HashSet<Rect>()
-        for (result in primary.results) seen.add(Rect(result.rect))
-        for (result in fallback.results) {
-            val rect = Rect(result.rect)
-            if (!seen.add(rect)) continue
-            if (overlapsExisting(rect, merged)) continue
-            merged.add(result)
-        }
-        if (merged.size > primary.results.size) {
-            Log.d(
-                TAG,
-                "PP-OCRv5 recovered ${merged.size - primary.results.size} lines with " +
-                    "${if (retryVertical) "vertical" else "horizontal"} retry"
-            )
-        }
-        merged
     }
 
     private fun detectedToLines(
@@ -240,7 +308,7 @@ class PpOcrV5Engine(
         return if (vertical) {
             lines.sortedByDescending { it.rect.right }
         } else {
-            lines.sortedBy { it.rect.top }
+            lines.sortedWith(compareBy<SegmentedTextLine> { it.rect.top }.thenBy { it.rect.left })
         }
     }
 
@@ -262,11 +330,18 @@ class PpOcrV5Engine(
         return false
     }
 
-    private fun acceptsLine(line: LineResult, language: String): Boolean {
-        if (line.text.isBlank()) return false
+    internal fun acceptsLine(line: LineResult, language: String): Boolean {
+        val trimmed = line.text.trim()
+        if (trimmed.isEmpty()) return false
+        if (variant.englishOnly) {
+            val alphaNumCount = trimmed.count { it.isLetterOrDigit() }
+            if (alphaNumCount == 0) return false
+            val minConfidence = if (alphaNumCount <= 4) MIN_EN_SHORT_LINE_CONFIDENCE else MIN_EN_LINE_CONFIDENCE
+            return line.confidence >= minConfidence
+        }
         if (line.confidence >= MIN_LINE_CONFIDENCE) return true
         if (!isCjkLanguage(language)) return false
-        val hasCjk = line.text.any { ch ->
+        val hasCjk = trimmed.any { ch ->
             ch.code in 0x3040..0x9FAF || ch.code in 0xAC00..0xD7AF
         }
         return hasCjk && line.confidence >= MIN_CJK_LINE_CONFIDENCE
@@ -399,16 +474,15 @@ class PpOcrV5Engine(
         }
     }
 
-    private fun decodeCtc(
+    internal fun decodeCtc(
         values: FloatBuffer,
         timesteps: Int,
         classCount: Int,
         dictionary: List<String>
     ): LineResult {
-        val builder = StringBuilder()
+        val tokens = ArrayList<String>()
+        val confidences = ArrayList<Float>()
         var lastIndex = -1
-        var confidenceSum = 0.0
-        var confidenceCount = 0
         for (t in 0 until timesteps) {
             val base = t * classCount
             var bestIndex = 0
@@ -426,22 +500,257 @@ class PpOcrV5Engine(
                     bestIndex == dictionary.size + 1 -> " "
                     else -> null
                 }
-                if (token != null) {
-                    builder.append(token)
-                    confidenceSum += bestValue
-                    confidenceCount++
+                if (token != null && (token != " " || tokens.isNotEmpty())) {
+                    tokens.add(token)
+                    confidences.add(bestValue)
                 }
             }
             lastIndex = bestIndex
         }
+        while (tokens.isNotEmpty() && tokens.last() == " ") {
+            tokens.removeAt(tokens.lastIndex)
+            confidences.removeAt(confidences.lastIndex)
+        }
+        if (tokens.isEmpty()) return LineResult("", 0f)
+
+        val builder = StringBuilder(tokens.size)
+        var confidenceSum = 0.0
+        for (i in tokens.indices) {
+            builder.append(tokens[i])
+            confidenceSum += confidences[i]
+        }
         val text = builder.toString().trim()
-        val confidence = if (confidenceCount > 0) {
-            (confidenceSum / confidenceCount).toFloat()
+        val confidence = if (text.isNotEmpty()) {
+            (confidenceSum / tokens.size).toFloat()
         } else {
             0f
         }
         return LineResult(text, confidence)
     }
+
+    internal fun isDarkBackgroundRegion(bitmap: Bitmap, region: Rect): Boolean {
+        if (bitmap.isRecycled || region.isEmpty) return false
+        val safe = Rect(region)
+        if (!safe.intersect(0, 0, bitmap.width, bitmap.height) || safe.isEmpty) return false
+
+        val w = safe.width()
+        val h = safe.height()
+        val stepX = max(1, w / 32)
+        val stepY = max(1, h / 32)
+        val samples = ArrayList<Float>(1024)
+
+        var y = safe.top
+        while (y < safe.bottom) {
+            var x = safe.left
+            while (x < safe.right) {
+                samples.add(pixelLuma(bitmap.getPixel(x, y)))
+                x += stepX
+            }
+            y += stepY
+        }
+        if (samples.isEmpty()) return false
+        samples.sort()
+        val medianLuma = samples[samples.size / 2]
+        val p90Luma = samples[((samples.size - 1) * 9) / 10]
+        if (medianLuma >= DARK_REGION_MEDIAN_LUMA || p90Luma <= 125f) return false
+
+        // Verify outer perimeter is predominantly dark so a super-tight black-on-white
+        // crop with dense ink is not misclassified as a dark bubble.
+        var borderSamples = 0
+        var darkBorderSamples = 0
+        val borderStepX = max(1, w / 24)
+        val borderStepY = max(1, h / 24)
+        var bx = safe.left
+        while (bx < safe.right) {
+            if (pixelLuma(bitmap.getPixel(bx, safe.top)) < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+            borderSamples++
+            if (h > 1) {
+                if (pixelLuma(bitmap.getPixel(bx, safe.bottom - 1)) < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+                borderSamples++
+            }
+            bx += borderStepX
+        }
+        var by = safe.top
+        while (by < safe.bottom) {
+            if (pixelLuma(bitmap.getPixel(safe.left, by)) < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+            borderSamples++
+            if (w > 1) {
+                if (pixelLuma(bitmap.getPixel(safe.right - 1, by)) < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+                borderSamples++
+            }
+            by += borderStepY
+        }
+        val darkBorderFraction = if (borderSamples > 0) darkBorderSamples.toFloat() / borderSamples else 0f
+        return darkBorderFraction >= 0.40f
+    }
+
+    internal fun invertHighContrastBitmap(source: Bitmap): Bitmap {
+        val w = source.width
+        val h = source.height
+        val pixels = IntArray(w * h)
+        source.getPixels(pixels, 0, w, 0, 0, w, h)
+        for (i in pixels.indices) {
+            val gray = pixelLuma(pixels[i])
+            val out = ((127.5f - gray) * INVERT_CONTRAST + 127.5f).roundToInt().coerceIn(0, 255)
+            pixels[i] = Color.rgb(out, out, out)
+        }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            setPixels(pixels, 0, w, 0, 0, w, h)
+        }
+    }
+
+    internal fun hasValidTextRegionComponents(bitmap: Bitmap, region: Rect): Boolean {
+        if (bitmap.isRecycled || region.isEmpty) return false
+        val safe = Rect(region)
+        if (!safe.intersect(0, 0, bitmap.width, bitmap.height) || safe.isEmpty) return false
+        if (safe.width() < 8 || safe.height() < 8) return false
+
+        val crop = try {
+            Bitmap.createBitmap(bitmap, safe.left, safe.top, safe.width(), safe.height())
+        } catch (_: Exception) {
+            return false
+        }
+        val maxSide = max(crop.width, crop.height)
+        val work = if (maxSide > 320) {
+            val scale = 320f / maxSide
+            try {
+                Bitmap.createScaledBitmap(
+                    crop,
+                    max(8, (crop.width * scale).roundToInt()),
+                    max(8, (crop.height * scale).roundToInt()),
+                    true
+                )
+            } catch (_: Exception) {
+                crop
+            }
+        } else {
+            crop
+        }
+
+        try {
+            val w = work.width
+            val h = work.height
+            val pixels = IntArray(w * h)
+            work.getPixels(pixels, 0, w, 0, 0, w, h)
+            val gray = IntArray(pixels.size) { idx -> pixelLumaInt(pixels[idx]) }
+            val minGray = gray.minOrNull() ?: 255
+            val maxGray = gray.maxOrNull() ?: 0
+            if (maxGray - minGray < 35) return false
+
+            val threshold = otsuThreshold(gray)
+            var inkCount = 0
+            var inkSum = 0L
+            var bgCount = 0
+            var bgSum = 0L
+            val ink = BooleanArray(gray.size)
+            for (i in gray.indices) {
+                if (gray[i] < threshold) {
+                    ink[i] = true
+                    inkCount++
+                    inkSum += gray[i]
+                } else {
+                    bgCount++
+                    bgSum += gray[i]
+                }
+            }
+            if (inkCount < 10 || bgCount == 0) return false
+            if ((bgSum.toDouble() / bgCount) - (inkSum.toDouble() / inkCount) < 35.0) return false
+
+            val visited = BooleanArray(ink.size)
+            val queue = IntArray(ink.size)
+            val totalPixels = w * h
+            var glyphCount = 0
+
+            for (start in ink.indices) {
+                if (!ink[start] || visited[start]) continue
+                var head = 0
+                var tail = 0
+                queue[tail++] = start
+                visited[start] = true
+                var area = 0
+                var minX = w
+                var maxX = -1
+                var minY = h
+                var maxY = -1
+
+                while (head < tail) {
+                    val idx = queue[head++]
+                    val x = idx % w
+                    val y = idx / w
+                    area++
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+
+                    for (dy in -1..1) {
+                        val ny = y + dy
+                        if (ny < 0 || ny >= h) continue
+                        for (dx in -1..1) {
+                            if (dx == 0 && dy == 0) continue
+                            val nx = x + dx
+                            if (nx < 0 || nx >= w) continue
+                            val next = ny * w + nx
+                            if (ink[next] && !visited[next]) {
+                                visited[next] = true
+                                queue[tail++] = next
+                            }
+                        }
+                    }
+                }
+
+                val compW = maxX - minX + 1
+                val compH = maxY - minY + 1
+                val isLongBorder = (compW > w * 0.75f && compH <= 3) ||
+                    (compH > h * 0.75f && compW <= 3)
+                if (!isLongBorder && area in 5..(totalPixels / 6) && compW >= 2 && compH >= 4) {
+                    glyphCount++
+                    if (glyphCount >= 2) return true
+                }
+            }
+            return false
+        } finally {
+            if (work !== crop && !work.isRecycled) work.recycle()
+            if (crop !== bitmap && !crop.isRecycled) crop.recycle()
+        }
+    }
+
+    private fun otsuThreshold(gray: IntArray): Int {
+        val histogram = IntArray(256)
+        for (value in gray) histogram[value.coerceIn(0, 255)]++
+        val total = gray.size
+        var sum = 0L
+        for (i in 0 until 256) sum += i.toLong() * histogram[i]
+        var sumBackground = 0L
+        var weightBackground = 0
+        var bestVariance = -1.0
+        var bestThreshold = 127
+        for (t in 0 until 256) {
+            weightBackground += histogram[t]
+            if (weightBackground == 0) continue
+            val weightForeground = total - weightBackground
+            if (weightForeground == 0) break
+            sumBackground += t.toLong() * histogram[t]
+            val meanBackground = sumBackground.toDouble() / weightBackground
+            val meanForeground = (sum - sumBackground).toDouble() / weightForeground
+            val diff = meanBackground - meanForeground
+            val variance = weightBackground.toDouble() * weightForeground * diff * diff
+            if (variance > bestVariance) {
+                bestVariance = variance
+                bestThreshold = t
+            }
+        }
+        return bestThreshold.coerceIn(1, 254)
+    }
+
+    private fun pixelLumaInt(color: Int): Int {
+        val r = (color shr 16) and 0xFF
+        val g = (color shr 8) and 0xFF
+        val b = color and 0xFF
+        return (r * 299 + g * 587 + b * 114) / 1000
+    }
+
+    private fun pixelLuma(color: Int): Float = pixelLumaInt(color).toFloat()
 
     fun close() {
         synchronized(sessionLock) {
@@ -462,6 +771,7 @@ class PpOcrV5Engine(
             if (session != null && dictionary != null) return true
             if (initFailed) return false
             try {
+                cleanupLegacyParSeqCaches()
                 val dict = readDictionary()
                 val modelFile = ensureModelFile()
                 if (modelFile == null) {
@@ -486,6 +796,19 @@ class PpOcrV5Engine(
                 initFailed = true
                 Log.e(TAG, "PP-OCRv5 recognizer could not be loaded: ${t.message}", t)
                 return false
+            }
+        }
+    }
+
+    private fun cleanupLegacyParSeqCaches() {
+        for (fileName in LEGACY_PARSEQ_CACHE_FILES) {
+            val legacyFile = File(appContext.filesDir, fileName)
+            if (legacyFile.exists()) {
+                runCatching { legacyFile.delete() }
+            }
+            val legacyTmp = File(appContext.filesDir, "$fileName.tmp")
+            if (legacyTmp.exists()) {
+                runCatching { legacyTmp.delete() }
             }
         }
     }

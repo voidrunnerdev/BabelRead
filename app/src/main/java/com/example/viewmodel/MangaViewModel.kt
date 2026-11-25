@@ -2163,11 +2163,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun isParSeqModelInstalled(): Boolean =
-        translationService.isParSeqModelInstalled()
-
     fun isPpOcrEnglishModelInstalled(): Boolean =
-        isParSeqModelInstalled()
+        translationService.isPpOcrEnglishModelInstalled()
 
     fun setOcrEngine(engine: String) {
         viewModelScope.launch {
@@ -2719,23 +2716,23 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                 // karşılığı yoktur. PP-OCRv5 bu sayfaları Japonca varsayarak
                 // dikey metin segmentasyonunu çalıştırır; gerçek dil OCR
                 // sonrasında detectRealLanguage ile düzeltilir.
-                val isParSeq = translationService.isParSeqEngine(ocrEngine)
+                val isPpOcrEnglish = translationService.isPpOcrEnglishEngine(ocrEngine)
                 val isPpOcrAny = translationService.isRegionOcrEngine(ocrEngine)
                 val localUnknownOrigin = originLang.equals("Yerel", ignoreCase = true) ||
                     originLang.equals("Bilinmiyor", ignoreCase = true)
                 val ppOriginLang = when {
-                    isParSeq && (originCode == "en" || localUnknownOrigin) -> "İngilizce"
-                    isParSeq -> null
+                    isPpOcrEnglish && (originCode == "en" || localUnknownOrigin) -> "İngilizce"
+                    isPpOcrEnglish -> null
                     originCode == "en" || originCode == "ja" -> originLang
                     localUnknownOrigin -> "Japonca"
                     else -> null
                 }
                 if (isPpOcrAny) {
-                    if (isParSeq && ppOriginLang == null) {
-                        emitTranslationNotice("PARSeq yalnızca İngilizce kaynakları destekler.")
+                    if (isPpOcrEnglish && ppOriginLang == null) {
+                        emitTranslationNotice("PP-OCRv5 EN yalnızca İngilizce kaynakları destekler.")
                         return@launch
                     }
-                    if (!isParSeq && (originCode == "zh" || originCode == "ko")) {
+                    if (!isPpOcrEnglish && (originCode == "zh" || originCode == "ko")) {
                         Log.d("TR", "PP-OCRv5: $originLang kaynağı sessizce atlandı (sayfa=$pageIdx)")
                         return@launch
                     }
@@ -2793,8 +2790,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         emitTranslationNotice("$ocrEngine için RT-DETR açık olmalı; tüm sayfa OCR'ı desteklenmiyor.")
                         return@launch
                     }
-                    if (isParSeq && !translationService.isOcrEngineAvailable(ocrEngine)) {
-                        emitTranslationNotice("parseq_rec.onnx bulunamadı. Dosyayı assets/models/ klasörüne ekleyin.")
+                    if (isPpOcrEnglish && !translationService.isOcrEngineAvailable(ocrEngine)) {
+                        emitTranslationNotice("en_PP-OCRv5_mobile_rec.onnx bulunamadı. Dosyayı assets/models/ klasörüne ekleyin.")
                         return@launch
                     }
 

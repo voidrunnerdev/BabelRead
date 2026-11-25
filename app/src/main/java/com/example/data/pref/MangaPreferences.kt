@@ -114,7 +114,7 @@ class MangaPreferences(private val context: Context) {
         val BRIGHTNESS_LOCK = booleanPreferencesKey("brightness_lock")
         val KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
         val TRANSLATION_ENGINE = stringPreferencesKey("translation_engine") // "Otomatik", "Gemini", "DeepL", "ML Kit", "Google", "MyMemory"
-        val OCR_ENGINE = stringPreferencesKey("ocr_engine") // "ML Kit", "PARSeq", "PP-OCRv5"
+        val OCR_ENGINE = stringPreferencesKey("ocr_engine") // "ML Kit", "PP-OCRv5 EN", "PP-OCRv5"
         val TRANSLATION_TARGET_LANG = stringPreferencesKey("translation_target_lang")
         val TRANSLATION_SOURCE_LANG = stringPreferencesKey("translation_source_lang")
         val RECENT_TRANSLATION_LANGS = stringPreferencesKey("recent_translation_langs")
@@ -155,7 +155,15 @@ class MangaPreferences(private val context: Context) {
     val translationEngine: Flow<String> = context.dataStore.data.map { it[TRANSLATION_ENGINE] ?: "Otomatik" }
     val ocrEngine: Flow<String> = context.dataStore.data.map {
         val raw = it[OCR_ENGINE] ?: "ML Kit"
-        if (raw.equals("PP-OCRv5 EN", ignoreCase = true)) "PARSeq" else raw
+        if (
+            raw.equals("PARSeq", ignoreCase = true) ||
+            raw.equals("PARSeq EN", ignoreCase = true) ||
+            raw.equals("PP-OCRv5 EN", ignoreCase = true)
+        ) {
+            "PP-OCRv5 EN"
+        } else {
+            raw
+        }
     }
     val translationCacheTtlDays: Flow<Int> = context.dataStore.data.map { it[TRANSLATION_CACHE_TTL_DAYS] ?: 30 }
     val translationTargetLang: Flow<String> = context.dataStore.data.map {
@@ -241,7 +249,16 @@ class MangaPreferences(private val context: Context) {
     }
 
     suspend fun setOcrEngine(value: String) {
-        context.dataStore.edit { it[OCR_ENGINE] = value }
+        val normalized = if (
+            value.equals("PARSeq", ignoreCase = true) ||
+            value.equals("PARSeq EN", ignoreCase = true) ||
+            value.equals("PP-OCRv5 EN", ignoreCase = true)
+        ) {
+            "PP-OCRv5 EN"
+        } else {
+            value
+        }
+        context.dataStore.edit { it[OCR_ENGINE] = normalized }
     }
 
     suspend fun setTranslationCacheTtlDays(days: Int) {

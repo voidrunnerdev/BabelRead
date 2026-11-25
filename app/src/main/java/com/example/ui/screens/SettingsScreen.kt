@@ -574,32 +574,36 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                     ) {
                         SettingsSubHeader("OCR Motoru")
                         Spacer(modifier = Modifier.height(AppSpacing.sm))
+                        val isPpOcrEnglishSelected =
+                            ocrEngine.equals("PP-OCRv5 EN", ignoreCase = true) ||
+                                ocrEngine.equals("PARSeq", ignoreCase = true) ||
+                                ocrEngine.equals("PARSeq EN", ignoreCase = true)
                         SegmentedChoice(
-                            options = listOf("ML Kit", "PARSeq", "PP-OCRv5"),
-                            selected = if (ocrEngine.equals("PP-OCRv5 EN", ignoreCase = true)) "PARSeq" else ocrEngine,
+                            options = listOf("ML Kit", "PP-OCRv5 EN", "PP-OCRv5"),
+                            selected = if (isPpOcrEnglishSelected) "PP-OCRv5 EN" else ocrEngine,
                             onSelect = { engine -> viewModel.setOcrEngine(engine) }
                         )
-                        if (ocrEngine.equals("PARSeq", ignoreCase = true) || ocrEngine.equals("PP-OCRv5 EN", ignoreCase = true)) {
-                            val parseqInstalled = remember { viewModel.isParSeqModelInstalled() }
+                        if (isPpOcrEnglishSelected) {
+                            val ppOcrEnglishInstalled = remember { viewModel.isPpOcrEnglishModelInstalled() }
                             Spacer(modifier = Modifier.height(AppSpacing.sm))
                             Text(
                                 text = if (yoloAiEnabled) {
-                                    "PARSeq: Manga ve çizgi romanlar için özel İngilizce OCR; stilize fontları, büyük harfleri ve konuşma balonlarını kusursuz okur."
+                                    "PP-OCRv5 EN: Yalnızca İngilizce için optimize edilmiş hafif manga ve çizgi roman OCR motoru; konuşma balonları içinde yüksek doğrulukla çalışır."
                                 } else {
-                                    "PARSeq için yapay zeka balon tespiti açık olmalı; şu anda tüm sayfa OCR'ı devre dışı."
+                                    "PP-OCRv5 EN için yapay zeka balon tespiti açık olmalı; şu anda tüm sayfa OCR'ı devre dışı."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = Warning
                             )
                             Spacer(modifier = Modifier.height(AppSpacing.xs))
                             Text(
-                                text = if (parseqInstalled) {
-                                    "Model hazır (parseq_rec.onnx, 8-bit dynamic INT8)."
+                                text = if (ppOcrEnglishInstalled) {
+                                    "Model hazır (en_PP-OCRv5_mobile_rec.onnx)."
                                 } else {
-                                    "Model eksik: parseq_rec.onnx dosyasını app/src/main/assets/models/ klasörüne ekleyin."
+                                    "Model eksik: en_PP-OCRv5_mobile_rec.onnx dosyasını app/src/main/assets/models/ klasörüne ekleyin."
                                 },
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (parseqInstalled) {
+                                color = if (ppOcrEnglishInstalled) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
                                     MaterialTheme.colorScheme.error

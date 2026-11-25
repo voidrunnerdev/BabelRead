@@ -114,8 +114,8 @@ class TranslationService(
     private val appContext = context.applicationContext
     private val ppOcrV5EngineLazy = lazy { PpOcrV5Engine(appContext, PpOcrV5Engine.Variant.MULTILINGUAL) }
     private val ppOcrV5Engine: PpOcrV5Engine by ppOcrV5EngineLazy
-    private val parSeqEngineLazy = lazy { ParSeqEngine(appContext) }
-    private val parSeqEngine: ParSeqEngine by parSeqEngineLazy
+    private val ppOcrV5EnglishEngineLazy = lazy { PpOcrV5Engine(appContext, PpOcrV5Engine.Variant.ENGLISH_ONLY) }
+    private val ppOcrV5EnglishEngine: PpOcrV5Engine by ppOcrV5EnglishEngineLazy
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
@@ -427,28 +427,25 @@ class TranslationService(
         return performOcr(bitmap, originLanguage, applyPageMarginFilter = true)
     }
 
-    fun isParSeqEngine(engine: String): Boolean =
-        engine.equals("PARSeq", ignoreCase = true) ||
-            engine.equals("PARSeq EN", ignoreCase = true) ||
-            engine.equals("PP-OCRv5 EN", ignoreCase = true)
+    fun isPpOcrEnglishEngine(engine: String): Boolean =
+        engine.equals("PP-OCRv5 EN", ignoreCase = true) ||
+            engine.equals("PARSeq", ignoreCase = true) ||
+            engine.equals("PARSeq EN", ignoreCase = true)
 
     fun isPpOcrEngine(engine: String): Boolean =
         engine.equals("PP-OCRv5", ignoreCase = true)
 
     fun isRegionOcrEngine(engine: String): Boolean =
-        isParSeqEngine(engine) || isPpOcrEngine(engine)
+        isPpOcrEnglishEngine(engine) || isPpOcrEngine(engine)
 
     fun isOcrEngineAvailable(ocrEngine: String): Boolean = when {
-        isParSeqEngine(ocrEngine) -> parSeqEngine.isReady()
+        isPpOcrEnglishEngine(ocrEngine) -> ppOcrV5EnglishEngine.isReady()
         isPpOcrEngine(ocrEngine) -> ppOcrV5Engine.isReady()
         else -> true
     }
 
-    fun isParSeqModelInstalled(): Boolean =
-        ParSeqEngine.hasModelAsset(appContext)
-
     fun isPpOcrEnglishModelInstalled(): Boolean =
-        isParSeqModelInstalled()
+        PpOcrV5Engine.hasModelAsset(appContext, PpOcrV5Engine.Variant.ENGLISH_ONLY)
 
     /**
      * Fetches the live catalog of Gemini models available to the user's API key
@@ -509,7 +506,7 @@ class TranslationService(
 
     suspend fun prewarmOcrEngine(ocrEngine: String): Boolean {
         return when {
-            isParSeqEngine(ocrEngine) -> parSeqEngine.prewarm()
+            isPpOcrEnglishEngine(ocrEngine) -> ppOcrV5EnglishEngine.prewarm()
             isPpOcrEngine(ocrEngine) -> ppOcrV5Engine.prewarm()
             else -> false
         }
@@ -811,35 +808,14 @@ class TranslationService(
         ocrEngine: String = "ML Kit"
     ): List<RectAndText> = withContext(Dispatchers.Default) {
         if (bitmap.isRecycled || regions.isEmpty()) return@withContext emptyList()
-        if (isParSeqEngine(ocrEngine)) {
-            if (!parSeqEngine.isReady()) {
-                Log.w(TAG, "PARSeq recognizer is unavailable, falling back to ML Kit")
-                return@withContext performOcr(bitmap, originLanguage, applyPageMarginFilter = true)
-            }
-            val parseqResults = mutableListOf<RectAndText>()
-            for (region in regions) {
-                currentCoroutineContext().ensureActive()
-                if (region.isEmpty) continue
-                val marginX = max(4, (region.width() * 0.04f).toInt())
-                val marginY = max(4, (region.height() * 0.04f).toInt())
-                val expanded = Rect(
-                    (region.left - marginX).coerceAtLeast(0),
-                    (region.top - marginY).coerceAtLeast(0),
-                    (region.right + marginX).coerceAtMost(bitmap.width),
-                    (region.bottom + marginY).coerceAtMost(bitmap.height)
-                )
-                if (expanded.width() < 8 || expanded.height() < 8) continue
-                parseqResults.addAll(
-                    parSeqEngine.recognizeBlock(bitmap, expanded, originLanguage).map {
-                        RectAndText(it.rect, cleanOcrArtifacts(it.text, originLanguage))
-                    }
-                )
-            }
-            return@withContext resolveCollidingBlocks(parseqResults)
-        }
-        if (isPpOcrEngine(ocrEngine)) {
-            val activePpEngine = ppOcrV5Engine
+        if (isRegionOcrEngine(ocrEngine)) {
+            val isEnglishVariant = isPpOcrEnglishEngine(ocrEngine)
+            val activePpEngine = if (isEnglishVariant) ppOcrV5EnglishEngine else ppOcrV5Engine
             if (!activePpEngine.isReady()) {
+                if (isEnglishVariant) {
+                    Log.w(TAG, "PP-OCRv5 EN recognizer is unavailable, falling back to ML Kit")
+                    return@withContext performOcr(bitmap, originLanguage, applyPageMarginFilter = true)
+                }
                 Log.e(TAG, "$ocrEngine recognizer is unavailable")
                 throw IllegalStateException("PP-OCRv5 recognizer could not be loaded")
             }
@@ -2316,8 +2292,8 @@ class TranslationService(
                     if (ppOcrV5EngineLazy.isInitialized()) {
                         runCatching { ppOcrV5Engine.close() }
                     }
-                    if (parSeqEngineLazy.isInitialized()) {
-                        runCatching { parSeqEngine.close() }
+                    if (ppOcrV5EnglishEngineLazy.isInitialized()) {
+                        runCatching { ppOcrV5EnglishEngine.close() }
                     }
                 } finally {
                     translatorLifecycleMutex.withLock {
