@@ -66,7 +66,7 @@ enum class DetectorModel(
         targetFileName = "yolo11n_seg.onnx",
         expectedBytes = 12509314L,
         sha256 = "760146a01c3e9f547bc271751bedacd30ae973bfa043dd7761069be7ae0b1336",
-        defaultConfidence = 0.20f,
+        defaultConfidence = 0.25f,
         description = "Manga109 üzerinde eğitilmiş piksel düzeyinde segmentasyon yapay zekası. Düzensiz, kardan adam veya eğri balon sınırlarını kontur profiliyle çıkararak metni balon içine kusursuz yayar."
     );
 
@@ -103,13 +103,26 @@ class YoloBubbleDetector(context: Context) {
         val touchesRight: Boolean
     )
 
+    internal data class LetterboxTransform(
+        val origW: Int,
+        val origH: Int,
+        val inputW: Int,
+        val inputH: Int,
+        val gain: Float,
+        val contentW: Int,
+        val contentH: Int,
+        val padLeft: Int,
+        val padTop: Int
+    )
+
     companion object {
         private const val TAG = "BabelRead_Detector"
         const val MODEL_FILENAME = "detector.onnx"
         const val EMBEDDED_ASSET_PATH = "models/detector.onnx"
         const val LEGACY_MODEL_FILENAME = "koharu-yolo26s.onnx"
         const val DEFAULT_INPUT_SIZE = 640
-        const val DEFAULT_CONF_THRESHOLD = 0.20f
+        const val DEFAULT_CONF_THRESHOLD = 0.25f
+        private const val LETTERBOX_FILL_VALUE = 114f / 255f
         private const val MIN_MODEL_FILE_BYTES = 10_000L
         private const val VERIFIED_BUNDLED_MODEL_SHA256 = "5fe9e4f576e49d4e7e8b0e029d6d3cdc252abd4694113e1cae120e62c931ea79"
 
@@ -751,14 +764,19 @@ class YoloBubbleDetector(context: Context) {
         val origH = bitmap.height
 
         // Avoid shrinking high-resolution spreads and near-square pages to one
-        // 640px input. Overlapped square crops preserve small text and bubbles.
+        // input. Overlapped square crops preserve small text and bubbles.
         val inputLongSide = max(modelInputWidth, modelInputHeight)
-        val baseDetections: List<YoloDetection> = if (origH <= origW * 2.2f && max(origW, origH) >= inputLongSide * 2.5f) {
+        val runInvertedPass = isYoloSegmentation
+        val pass1Detections: List<YoloDetection>
+        val pass2Detections: List<YoloDetection>
+
+        if (origH <= origW * 2.2f && max(origW, origH) >= inputLongSide * 2.5f) {
             val sourceTileSide = min(min(origW, origH), inputLongSide * 2)
             val overlap = (sourceTileSide * 0.25f).toInt().coerceAtLeast(1)
             val xStarts = tileStarts(origW, sourceTileSide, overlap)
             val yStarts = tileStarts(origH, sourceTileSide, overlap)
-            val tiledDetections = mutableListOf<TileDetection>()
+            val pass1Tiled = mutableListOf<TileDetection>()
+            val pass2Tiled = mutableListOf<TileDetection>()
             for ((row, tileY) in yStarts.withIndex()) {
                 for ((column, tileX) in xStarts.withIndex()) {
                     val tileW = min(sourceTileSide, origW - tileX)
@@ -773,35 +791,44 @@ class YoloBubbleDetector(context: Context) {
                         continue
                     }
                     try {
-                        for (det in runOnnxInference(tile, confidenceThreshold)) {
-                            tiledDetections += TileDetection(
-                                detection = det.copy(
-                                    box = RectF(
-                                        (tileX + det.box.left * tileW) / origW.toFloat(),
-                                        (tileY + det.box.top * tileH) / origH.toFloat(),
-                                        (tileX + det.box.right * tileW) / origW.toFloat(),
-                                        (tileY + det.box.bottom * tileH) / origH.toFloat()
-                                    )
-                                ),
-                                tileRow = row,
-                                tileColumn = column,
-                                touchesTop = det.box.top <= 0.015f,
-                                touchesBottom = det.box.bottom >= 0.985f,
-                                touchesLeft = det.box.left <= 0.015f,
-                                touchesRight = det.box.right >= 0.985f
-                            )
+                        fun toTileDetection(det: YoloDetection) = TileDetection(
+                            detection = det.copy(
+                                box = RectF(
+                                    (tileX + det.box.left * tileW) / origW.toFloat(),
+                                    (tileY + det.box.top * tileH) / origH.toFloat(),
+                                    (tileX + det.box.right * tileW) / origW.toFloat(),
+                                    (tileY + det.box.bottom * tileH) / origH.toFloat()
+                                )
+                            ),
+                            tileRow = row,
+                            tileColumn = column,
+                            touchesTop = det.box.top <= 0.015f,
+                            touchesBottom = det.box.bottom >= 0.985f,
+                            touchesLeft = det.box.left <= 0.015f,
+                            touchesRight = det.box.right >= 0.985f
+                        )
+
+                        for (det in runOnnxInference(tile, confidenceThreshold, invertColors = false)) {
+                            pass1Tiled += toTileDetection(det)
+                        }
+                        if (runInvertedPass) {
+                            for (det in runOnnxInference(tile, confidenceThreshold, invertColors = true)) {
+                                pass2Tiled += toTileDetection(det)
+                            }
                         }
                     } finally {
                         if (tile !== bitmap && !tile.isRecycled) tile.recycle()
                     }
                 }
             }
-            nmsDetections(mergeTileSeamDetections(tiledDetections))
+            pass1Detections = nmsDetections(mergeTileSeamDetections(pass1Tiled))
+            pass2Detections = if (runInvertedPass) nmsDetections(mergeTileSeamDetections(pass2Tiled)) else emptyList()
         } else if (origH > origW * 2.2f && origH > 2400) {
             // Çok uzun Webtoon sayfalarında dikey parçalama (tiling)
             val tileH = (origW * 1.8f).toInt().coerceIn(1200, 2400)
             val overlap = (origW * 0.25f).toInt().coerceIn(150, 400)
-            val allDetections = mutableListOf<TileDetection>()
+            val pass1Tiled = mutableListOf<TileDetection>()
+            val pass2Tiled = mutableListOf<TileDetection>()
             var tileRow = 0
             var y = 0
             while (y < origH) {
@@ -820,23 +847,29 @@ class YoloBubbleDetector(context: Context) {
                     lastInferenceError = "Dikey görüntü tile'ı oluşturulamadı (y=$y)."
                 } else {
                     try {
-                        val tileDets = runOnnxInference(tile, confidenceThreshold)
-                        for (det in tileDets) {
+                        fun toVerticalTileDetection(det: YoloDetection): TileDetection {
                             val normL = det.box.left
                             val normR = det.box.right
                             val normT = (det.box.top * h + y) / origH.toFloat()
                             val normB = (det.box.bottom * h + y) / origH.toFloat()
-                            allDetections.add(
-                                TileDetection(
-                                    detection = det.copy(box = RectF(normL, normT, normR, normB)),
-                                    tileRow = tileRow,
-                                    tileColumn = 0,
-                                    touchesTop = det.box.top <= 0.015f,
-                                    touchesBottom = det.box.bottom >= 0.985f,
-                                    touchesLeft = false,
-                                    touchesRight = false
-                                )
+                            return TileDetection(
+                                detection = det.copy(box = RectF(normL, normT, normR, normB)),
+                                tileRow = tileRow,
+                                tileColumn = 0,
+                                touchesTop = det.box.top <= 0.015f,
+                                touchesBottom = det.box.bottom >= 0.985f,
+                                touchesLeft = false,
+                                touchesRight = false
                             )
+                        }
+
+                        for (det in runOnnxInference(tile, confidenceThreshold, invertColors = false)) {
+                            pass1Tiled.add(toVerticalTileDetection(det))
+                        }
+                        if (runInvertedPass) {
+                            for (det in runOnnxInference(tile, confidenceThreshold, invertColors = true)) {
+                                pass2Tiled.add(toVerticalTileDetection(det))
+                            }
                         }
                     } finally {
                         if (tile !== bitmap && !tile.isRecycled) tile.recycle()
@@ -846,13 +879,23 @@ class YoloBubbleDetector(context: Context) {
                 if (y + h >= origH) break
                 y += (tileH - overlap)
             }
-            nmsDetections(mergeTileSeamDetections(allDetections))
+            pass1Detections = nmsDetections(mergeTileSeamDetections(pass1Tiled))
+            pass2Detections = if (runInvertedPass) nmsDetections(mergeTileSeamDetections(pass2Tiled)) else emptyList()
         } else {
-            runOnnxInference(bitmap, confidenceThreshold)
+            pass1Detections = runOnnxInference(bitmap, confidenceThreshold, invertColors = false)
+            pass2Detections = if (runInvertedPass) {
+                runOnnxInference(bitmap, confidenceThreshold, invertColors = true)
+            } else {
+                emptyList()
+            }
         }
 
-        val darkBubbles = detectDarkSpeechBubbles(bitmap, baseDetections)
-        val combinedDetections = if (darkBubbles.isEmpty()) baseDetections else baseDetections + darkBubbles
+        val darkBubbles = if (pass2Detections.isNotEmpty()) {
+            filterInvertedBubbleDetections(bitmap, pass2Detections, pass1Detections)
+        } else {
+            emptyList()
+        }
+        val combinedDetections = if (darkBubbles.isEmpty()) pass1Detections else pass1Detections + darkBubbles
         return combinedDetections.mapIndexed { index, det ->
             BubbleBox(
                 id = index + 1,
@@ -864,14 +907,22 @@ class YoloBubbleDetector(context: Context) {
         }
     }
 
-    private suspend fun runOnnxInference(source: Bitmap, confThreshold: Float): List<YoloDetection> =
+    private suspend fun runOnnxInference(
+        source: Bitmap,
+        confThreshold: Float,
+        invertColors: Boolean = false
+    ): List<YoloDetection> =
         inferenceMutex.withLock {
             synchronized(sessionLock) {
-                runOnnxInferenceLocked(source, confThreshold)
+                runOnnxInferenceLocked(source, confThreshold, invertColors)
             }
         }
 
-    private fun runOnnxInferenceLocked(source: Bitmap, confThreshold: Float): List<YoloDetection> {
+    private fun runOnnxInferenceLocked(
+        source: Bitmap,
+        confThreshold: Float,
+        invertColors: Boolean = false
+    ): List<YoloDetection> {
         val session = ortSession ?: run {
             lastInferenceError = "ONNX oturumu hazır değil."
             return emptyList()
@@ -886,8 +937,24 @@ class YoloBubbleDetector(context: Context) {
         val origW = source.width.toFloat()
         val origH = source.height.toFloat()
 
-        // The bundled RT-DETR model is trained on a direct 640x640 resize (no letterbox).
-        // Letterboxing here shifts boxes and changes the geometry the model learned.
+        // RT-DETR is trained on direct 640x640 resize; YOLO11n-seg (1600x1600) is
+        // trained with Ultralytics Letterbox (padding color 114).
+        val useLetterbox = isYoloSegmentation
+        val letterbox = if (useLetterbox) {
+            computeLetterboxTransform(source.width, source.height, inputW, inputH)
+        } else {
+            LetterboxTransform(
+                origW = source.width,
+                origH = source.height,
+                inputW = inputW,
+                inputH = inputH,
+                gain = 1f,
+                contentW = inputW,
+                contentH = inputH,
+                padLeft = 0,
+                padTop = 0
+            )
+        }
         val scaleX = inputW / origW
         val scaleY = inputH / origH
 
@@ -897,27 +964,37 @@ class YoloBubbleDetector(context: Context) {
         var results: OrtSession.Result? = null
 
         try {
-            scaledBmp = Bitmap.createScaledBitmap(source, inputW, inputH, true)
+            val targetW = letterbox.contentW
+            val targetH = letterbox.contentH
+            val padLeft = letterbox.padLeft
+            val padTop = letterbox.padTop
+            scaledBmp = Bitmap.createScaledBitmap(source, targetW, targetH, true)
             val numPixels = inputW * inputH
             val floatArray = getOrCreateFloatArray(inputW, inputH)
+            if (useLetterbox && (padLeft > 0 || padTop > 0 || targetW < inputW || targetH < inputH)) {
+                java.util.Arrays.fill(floatArray, 0, 3 * numPixels, LETTERBOX_FILL_VALUE)
+            }
 
             val gOffset = numPixels
             val bOffset = 2 * numPixels
-            val pixels = getOrCreatePixelArray(numPixels)
-            scaledBmp.getPixels(pixels, 0, inputW, 0, 0, inputW, inputH)
+            val pixels = getOrCreatePixelArray(targetW * targetH)
+            scaledBmp.getPixels(pixels, 0, targetW, 0, 0, targetW, targetH)
 
-            for (y in 0 until inputH) {
-                val srcRowOffset = y * inputW
-                val dstRowOffset = y * inputW
-                for (x in 0 until inputW) {
+            for (y in 0 until targetH) {
+                val srcRowOffset = y * targetW
+                val dstRowOffset = (padTop + y) * inputW + padLeft
+                for (x in 0 until targetW) {
                     val pixel = pixels[srcRowOffset + x]
                     val targetIdx = dstRowOffset + x
                     val alpha = ((pixel ushr 24) and 0xFF) / 255.0f
                     // Composite transparent pixels over white paper instead of treating
                     // their hidden RGB values as visible black ink.
-                    val r = (((pixel shr 16) and 0xFF) * alpha + 255f * (1f - alpha)) / 255f
-                    val g = (((pixel shr 8) and 0xFF) * alpha + 255f * (1f - alpha)) / 255f
-                    val b = ((pixel and 0xFF) * alpha + 255f * (1f - alpha)) / 255f
+                    val rawR = ((pixel shr 16) and 0xFF) * alpha + 255f * (1f - alpha)
+                    val rawG = ((pixel shr 8) and 0xFF) * alpha + 255f * (1f - alpha)
+                    val rawB = (pixel and 0xFF) * alpha + 255f * (1f - alpha)
+                    val r = (if (invertColors) 255f - rawR else rawR) / 255f
+                    val g = (if (invertColors) 255f - rawG else rawG) / 255f
+                    val b = (if (invertColors) 255f - rawB else rawB) / 255f
                     floatArray[targetIdx] = r
                     floatArray[gOffset + targetIdx] = g
                     floatArray[bOffset + targetIdx] = b
@@ -1210,10 +1287,9 @@ class YoloBubbleDetector(context: Context) {
                     results = results,
                     detOutputName = detOutputName,
                     protoOutputName = protoOutputName,
-                    origW = origW,
-                    origH = origH,
                     inputW = inputW,
                     inputH = inputH,
+                    letterbox = letterbox,
                     confThreshold = confThreshold
                 )
             }
@@ -1404,10 +1480,9 @@ class YoloBubbleDetector(context: Context) {
         results: OrtSession.Result,
         detOutputName: String,
         protoOutputName: String,
-        origW: Float,
-        origH: Float,
         inputW: Int,
         inputH: Int,
+        letterbox: LetterboxTransform,
         confThreshold: Float
     ): List<YoloDetection> {
         val detOpt = results.get(detOutputName)
@@ -1431,8 +1506,6 @@ class YoloBubbleDetector(context: Context) {
         val protoW = protoShape[3].toInt()
         val numProtos = protoShape[1].toInt().coerceAtLeast(1)
         if (protoH <= 0 || protoW <= 0) return emptyList()
-
-        val protoStride = inputW.toFloat() / protoW.toFloat()
 
         val detBuffer = detTensor.floatBuffer
         val detData = FloatArray(detBuffer.remaining()).also { detBuffer.get(it) }
@@ -1544,171 +1617,29 @@ class YoloBubbleDetector(context: Context) {
             }
         }
 
-        // Mask extraction and ContourScanlineProfile generation
+        // Un-letterbox boxes and prototype masks back to original page normalized coordinates
         val detections = ArrayList<YoloDetection>(selected.size)
-        val maskThreshold = 0.45f
-        val thresholdLogit = kotlin.math.ln(maskThreshold / (1.0f - maskThreshold))
-        val hw = protoH * protoW
 
         for (det in selected) {
-            val normL = (det.boxModel.left / inputW).coerceIn(0f, 1f)
-            val normT = (det.boxModel.top / inputH).coerceIn(0f, 1f)
-            val normR = (det.boxModel.right / inputW).coerceIn(normL, 1f)
-            val normB = (det.boxModel.bottom / inputH).coerceIn(normT, 1f)
+            val normBox = mapLetterboxBoxToNormalized(det.boxModel, letterbox)
+            if (normBox.width() < 0.004f || normBox.height() < 0.004f) continue
 
-            val pxMin = (det.boxModel.left / protoStride).toInt().coerceIn(0, protoW - 1)
-            val pxMax = (det.boxModel.right / protoStride).toInt().coerceIn(pxMin, protoW - 1)
-            val pyMin = (det.boxModel.top / protoStride).toInt().coerceIn(0, protoH - 1)
-            val pyMax = (det.boxModel.bottom / protoStride).toInt().coerceIn(pyMin, protoH - 1)
-
-            val subW = pxMax - pxMin + 1
-            val subH = pyMax - pyMin + 1
-
-            // Şüpheci kuralı: Mikro balonlarda kaba poligon yerine analitik elipse düş
-            val profile = if (subW >= 8 && subH >= 8) {
-                val rowLeftFractions = FloatArray(subH) { -1f }
-                val rowRightFractions = FloatArray(subH) { -1f }
-                var sumPx = 0.0
-                var sumPy = 0.0
-                var validCount = 0
-
-                for (py in pyMin..pyMax) {
-                    val r = py - pyMin
-                    val baseRowIdx = py * protoW
-
-                    val runs = mutableListOf<Pair<Int, Int>>()
-                    var runStart = -1
-                    for (px in pxMin..pxMax) {
-                        var z = 0f
-                        val pixelIdx = baseRowIdx + px
-                        for (k in 0 until numMaskCoeffs) {
-                            z += det.maskCoeffs[k] * protoData[k * hw + pixelIdx]
-                        }
-                        if (z >= thresholdLogit) {
-                            if (runStart < 0) runStart = px
-                            sumPx += (px - pxMin)
-                            sumPy += (py - pyMin)
-                            validCount++
-                        } else {
-                            if (runStart >= 0) {
-                                runs.add(runStart to (px - 1))
-                                runStart = -1
-                            }
-                        }
-                    }
-                    if (runStart >= 0) runs.add(runStart to pxMax)
-
-                    if (runs.isNotEmpty()) {
-                        // İzole saç/parlama mikro piksellerini (ana kümeden >5px uzakta) filtrele
-                        val substantialRuns = runs.filter { (it.second - it.first + 1) >= 2 }
-                        val mainCluster = if (substantialRuns.isNotEmpty()) {
-                            val mainLeft = substantialRuns.first().first
-                            val mainRight = substantialRuns.last().second
-                            runs.filter { run ->
-                                val distToCluster = when {
-                                    run.second < mainLeft -> mainLeft - run.second
-                                    run.first > mainRight -> run.first - mainRight
-                                    else -> 0
-                                }
-                                distToCluster <= 5
-                            }
-                        } else {
-                            runs
-                        }
-                        if (mainCluster.isNotEmpty()) {
-                            val firstX = mainCluster.minOf { it.first }
-                            val lastX = mainCluster.maxOf { it.second }
-                            rowLeftFractions[r] = (firstX - pxMin).toFloat() / subW.toFloat()
-                            rowRightFractions[r] = (lastX - pxMin + 1).toFloat() / subW.toFloat()
-                        }
-                    }
-                }
-
-                // 1. Koyu kanji nedeniyle oluşan delikleri komşulardan onar
-                for (r in 0 until subH) {
-                    if (rowLeftFractions[r] < 0f) {
-                        val prevL = if (r > 0) rowLeftFractions[r - 1] else -1f
-                        val nextL = (r + 1 until subH).firstOrNull { rowLeftFractions[it] >= 0f }?.let { rowLeftFractions[it] } ?: -1f
-                        if (prevL >= 0f && nextL >= 0f) {
-                            rowLeftFractions[r] = (prevL + nextL) * 0.5f
-                            rowRightFractions[r] = ((rowRightFractions.getOrNull(r - 1) ?: 1f) + (rowRightFractions.getOrNull(r + 1) ?: 1f)) * 0.5f
-                        } else if (prevL >= 0f) {
-                            rowLeftFractions[r] = prevL
-                            rowRightFractions[r] = rowRightFractions.getOrNull(r - 1) ?: 1f
-                        } else if (nextL >= 0f) {
-                            rowLeftFractions[r] = nextL
-                            rowRightFractions[r] = min(1f, nextL + 0.35f)
-                        } else {
-                            rowLeftFractions[r] = 0.30f
-                            rowRightFractions[r] = 0.70f
-                        }
-                    }
-                }
-
-                // 2. Aykırı Diken (Outlier Spike) Filtresi: Ani sıçramaları komşuların ortalamasıyla düzelt
-                for (r in 1 until subH - 1) {
-                    val prevL = rowLeftFractions[r - 1]
-                    val currL = rowLeftFractions[r]
-                    val nextL = rowLeftFractions[r + 1]
-                    val expectedL = (prevL + nextL) * 0.5f
-                    if (kotlin.math.abs(currL - expectedL) > 0.15f) {
-                        rowLeftFractions[r] = expectedL
-                    }
-
-                    val prevR = rowRightFractions[r - 1]
-                    val currR = rowRightFractions[r]
-                    val nextR = rowRightFractions[r + 1]
-                    val expectedR = (prevR + nextR) * 0.5f
-                    if (kotlin.math.abs(currR - expectedR) > 0.15f) {
-                        rowRightFractions[r] = expectedR
-                    }
-                }
-
-                // 3. Bölgesel Kubbe ve Taban Daralma Kalkanı (Top %15 & Bottom %15)
-                val topCut = (subH * 0.15f).toInt().coerceAtLeast(1)
-                for (r in 0 until topCut) {
-                    if (r + 1 < subH) {
-                        rowLeftFractions[r] = maxOf(rowLeftFractions[r], rowLeftFractions[r + 1] - 0.04f)
-                        rowRightFractions[r] = minOf(rowRightFractions[r], rowRightFractions[r + 1] + 0.04f)
-                    }
-                }
-                val botCut = (subH * 0.85f).toInt().coerceIn(topCut, subH - 1)
-                for (r in subH - 1 downTo botCut) {
-                    if (r > 0) {
-                        rowLeftFractions[r] = maxOf(rowLeftFractions[r], rowLeftFractions[r - 1] - 0.04f)
-                        rowRightFractions[r] = minOf(rowRightFractions[r], rowRightFractions[r - 1] + 0.04f)
-                    }
-                }
-
-                // 4. 3-Noktalı Ağırlıklı Gauss Yumuşatma (0.20, 0.60, 0.20)
-                val smoothL = FloatArray(subH)
-                val smoothR = FloatArray(subH)
-                for (r in 0 until subH) {
-                    val pL = if (r > 0) rowLeftFractions[r - 1] else rowLeftFractions[r]
-                    val cL = rowLeftFractions[r]
-                    val nL = if (r < subH - 1) rowLeftFractions[r + 1] else rowLeftFractions[r]
-                    smoothL[r] = 0.20f * pL + 0.60f * cL + 0.20f * nL
-
-                    val pR = if (r > 0) rowRightFractions[r - 1] else rowRightFractions[r]
-                    val cR = rowRightFractions[r]
-                    val nR = if (r < subH - 1) rowRightFractions[r + 1] else rowRightFractions[r]
-                    smoothR[r] = 0.20f * pR + 0.60f * cR + 0.20f * nR
-                }
-
-                val optX = if (validCount > 0) ((sumPx / validCount) / subW).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
-                val optY = if (validCount > 0) ((sumPy / validCount) / subH).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
-
-                ContourScanlineProfile(smoothL, smoothR, optX, optY)
-            } else {
-                null
-            }
+            val profile = extractSegmentationContourProfile(
+                normBox = normBox,
+                letterbox = letterbox,
+                protoData = protoData,
+                protoW = protoW,
+                protoH = protoH,
+                maskCoeffs = det.maskCoeffs,
+                numMaskCoeffs = numMaskCoeffs
+            )
 
             detections.add(
                 YoloDetection(
                     classId = 0,
                     label = "bubble",
                     confidence = det.score,
-                    box = RectF(normL, normT, normR, normB),
+                    box = normBox,
                     contourProfile = profile
                 )
             )
@@ -1717,499 +1648,294 @@ class YoloBubbleDetector(context: Context) {
         return detections
     }
 
-    /**
-     * Fast deterministic supplement for solid dark speech bubbles with white lettering
-     * (e.g. black jagged/octagonal bubbles missed by Manga109-trained models).
-     */
-    internal fun detectDarkSpeechBubbles(
-        bitmap: Bitmap,
-        existing: List<YoloDetection> = emptyList()
-    ): List<YoloDetection> {
-        if (bitmap.isRecycled || bitmap.width < 30 || bitmap.height < 30) return emptyList()
-        val origW = bitmap.width
-        val origH = bitmap.height
+    internal fun computeLetterboxTransform(
+        origW: Int,
+        origH: Int,
+        inputW: Int,
+        inputH: Int
+    ): LetterboxTransform {
+        val safeOrigW = origW.coerceAtLeast(1)
+        val safeOrigH = origH.coerceAtLeast(1)
+        val safeInputW = inputW.coerceAtLeast(1)
+        val safeInputH = inputH.coerceAtLeast(1)
+        val gain = min(
+            safeInputW.toFloat() / safeOrigW.toFloat(),
+            safeInputH.toFloat() / safeOrigH.toFloat()
+        )
+        val contentW = (safeOrigW * gain).roundToInt().coerceIn(1, safeInputW)
+        val contentH = (safeOrigH * gain).roundToInt().coerceIn(1, safeInputH)
+        val padLeft = (safeInputW - contentW) / 2
+        val padTop = (safeInputH - contentH) / 2
+        return LetterboxTransform(
+            origW = safeOrigW,
+            origH = safeOrigH,
+            inputW = safeInputW,
+            inputH = safeInputH,
+            gain = gain,
+            contentW = contentW,
+            contentH = contentH,
+            padLeft = padLeft,
+            padTop = padTop
+        )
+    }
 
-        val existingBalloons = existing.filter { it.label in setOf("bubble", "balloon") }
-        val rawCandidates = mutableListOf<YoloDetection>()
+    internal fun mapLetterboxBoxToNormalized(
+        boxModel: RectF,
+        letterbox: LetterboxTransform
+    ): RectF {
+        val padX = letterbox.padLeft.toFloat()
+        val padY = letterbox.padTop.toFloat()
+        val contentW = letterbox.contentW.toFloat().coerceAtLeast(1f)
+        val contentH = letterbox.contentH.toFloat().coerceAtLeast(1f)
+        val normL = ((boxModel.left - padX) / contentW).coerceIn(0f, 1f)
+        val normT = ((boxModel.top - padY) / contentH).coerceIn(0f, 1f)
+        val normR = ((boxModel.right - padX) / contentW).coerceIn(normL, 1f)
+        val normB = ((boxModel.bottom - padY) / contentH).coerceIn(normT, 1f)
+        return RectF(normL, normT, normR, normB)
+    }
 
-        if (origH > origW * 2.2f && origH > 2400) {
-            // Process tall webtoon pages in overlapping vertical slices so horizontal bubble detail isn't crushed.
-            val sliceOrigH = (origW * 1.8f).toInt().coerceIn(800, 1800)
-            val overlap = (sliceOrigH * 0.25f).toInt().coerceAtLeast(1)
-            var y = 0
-            while (y < origH) {
-                val remaining = origH - y
-                if (y > 0 && remaining <= overlap) break
-                if (y > 0 && remaining < sliceOrigH) y = (origH - sliceOrigH).coerceAtLeast(0)
-                val h = min(sliceOrigH, origH - y)
-                val slice = runCatching { Bitmap.createBitmap(bitmap, 0, y, origW, h) }.getOrNull()
-                if (slice != null) {
-                    try {
-                        for (det in detectDarkSpeechBubblesInFrame(slice)) {
-                            val mappedBox = RectF(
-                                det.box.left,
-                                ((det.box.top * h + y) / origH.toFloat()).coerceIn(0f, 1f),
-                                det.box.right,
-                                ((det.box.bottom * h + y) / origH.toFloat()).coerceIn(0f, 1f)
-                            )
-                            rawCandidates.add(det.copy(box = mappedBox))
-                        }
-                    } finally {
-                        if (slice !== bitmap && !slice.isRecycled) slice.recycle()
+    internal fun extractSegmentationContourProfile(
+        normBox: RectF,
+        letterbox: LetterboxTransform,
+        protoData: FloatArray,
+        protoW: Int,
+        protoH: Int,
+        maskCoeffs: FloatArray,
+        numMaskCoeffs: Int = maskCoeffs.size
+    ): ContourScanlineProfile? {
+        if (protoW <= 0 || protoH <= 0 || numMaskCoeffs <= 0) return null
+        val maskThreshold = 0.45f
+        val thresholdLogit = kotlin.math.ln(maskThreshold / (1.0f - maskThreshold))
+        val hw = protoH * protoW
+        val protoStrideX = letterbox.inputW.toFloat() / protoW.toFloat()
+        val protoStrideY = letterbox.inputH.toFloat() / protoH.toFloat()
+
+        // Clamp mask sampling strictly to the un-letterboxed page content region so padding
+        // never leaks into scanline rows/columns or shifts contour fractions.
+        val clampedModelL = letterbox.padLeft + normBox.left * letterbox.contentW
+        val clampedModelT = letterbox.padTop + normBox.top * letterbox.contentH
+        val clampedModelR = letterbox.padLeft + normBox.right * letterbox.contentW
+        val clampedModelB = letterbox.padTop + normBox.bottom * letterbox.contentH
+
+        val pxMin = kotlin.math.floor(clampedModelL / protoStrideX).toInt().coerceIn(0, protoW - 1)
+        val pxMax = (kotlin.math.ceil(clampedModelR / protoStrideX).toInt() - 1).coerceIn(pxMin, protoW - 1)
+        val pyMin = kotlin.math.floor(clampedModelT / protoStrideY).toInt().coerceIn(0, protoH - 1)
+        val pyMax = (kotlin.math.ceil(clampedModelB / protoStrideY).toInt() - 1).coerceIn(pyMin, protoH - 1)
+
+        val subW = pxMax - pxMin + 1
+        val subH = pyMax - pyMin + 1
+        // Şüpheci kuralı: Mikro balonlarda kaba poligon yerine analitik elipse düş
+        if (subW < 8 || subH < 8) return null
+
+        val boxProtoL = clampedModelL / protoStrideX
+        val boxProtoT = clampedModelT / protoStrideY
+        val boxProtoW = ((clampedModelR - clampedModelL) / protoStrideX).coerceAtLeast(1f)
+        val boxProtoH = ((clampedModelB - clampedModelT) / protoStrideY).coerceAtLeast(1f)
+
+        val rowLeftFractions = FloatArray(subH) { -1f }
+        val rowRightFractions = FloatArray(subH) { -1f }
+        var sumOptX = 0.0
+        var sumOptY = 0.0
+        var validCount = 0
+
+        for (py in pyMin..pyMax) {
+            val r = py - pyMin
+            val baseRowIdx = py * protoW
+
+            val runs = mutableListOf<Pair<Int, Int>>()
+            var runStart = -1
+            for (px in pxMin..pxMax) {
+                var z = 0f
+                val pixelIdx = baseRowIdx + px
+                for (k in 0 until numMaskCoeffs) {
+                    z += maskCoeffs[k] * protoData[k * hw + pixelIdx]
+                }
+                if (z >= thresholdLogit) {
+                    if (runStart < 0) runStart = px
+                    sumOptX += ((px + 0.5f - boxProtoL) / boxProtoW).coerceIn(0f, 1f)
+                    sumOptY += ((py + 0.5f - boxProtoT) / boxProtoH).coerceIn(0f, 1f)
+                    validCount++
+                } else {
+                    if (runStart >= 0) {
+                        runs.add(runStart to (px - 1))
+                        runStart = -1
                     }
                 }
-                if (y + h >= origH) break
-                y += (sliceOrigH - overlap)
             }
-        } else {
-            rawCandidates.addAll(detectDarkSpeechBubblesInFrame(bitmap))
+            if (runStart >= 0) runs.add(runStart to pxMax)
+
+            if (runs.isNotEmpty()) {
+                // İzole saç/parlama mikro piksellerini (ana kümeden >5px uzakta) filtrele
+                val substantialRuns = runs.filter { (it.second - it.first + 1) >= 2 }
+                val mainCluster = if (substantialRuns.isNotEmpty()) {
+                    val mainLeft = substantialRuns.first().first
+                    val mainRight = substantialRuns.last().second
+                    runs.filter { run ->
+                        val distToCluster = when {
+                            run.second < mainLeft -> mainLeft - run.second
+                            run.first > mainRight -> run.first - mainRight
+                            else -> 0
+                        }
+                        distToCluster <= 5
+                    }
+                } else {
+                    runs
+                }
+                if (mainCluster.isNotEmpty()) {
+                    val firstX = mainCluster.minOf { it.first }
+                    val lastX = mainCluster.maxOf { it.second }
+                    val leftFrac = ((firstX.toFloat() - boxProtoL) / boxProtoW).coerceIn(0f, 1f)
+                    val rightFrac = ((lastX + 1f - boxProtoL) / boxProtoW).coerceIn(leftFrac, 1f)
+                    rowLeftFractions[r] = leftFrac
+                    rowRightFractions[r] = rightFrac
+                }
+            }
         }
 
-        if (rawCandidates.isEmpty()) return emptyList()
+        // 1. Koyu kanji nedeniyle oluşan delikleri komşulardan onar
+        for (r in 0 until subH) {
+            if (rowLeftFractions[r] < 0f) {
+                val prevL = if (r > 0) rowLeftFractions[r - 1] else -1f
+                val nextL = (r + 1 until subH).firstOrNull { rowLeftFractions[it] >= 0f }?.let { rowLeftFractions[it] } ?: -1f
+                if (prevL >= 0f && nextL >= 0f) {
+                    rowLeftFractions[r] = (prevL + nextL) * 0.5f
+                    rowRightFractions[r] = ((rowRightFractions.getOrNull(r - 1) ?: 1f) + (rowRightFractions.getOrNull(r + 1) ?: 1f)) * 0.5f
+                } else if (prevL >= 0f) {
+                    rowLeftFractions[r] = prevL
+                    rowRightFractions[r] = rowRightFractions.getOrNull(r - 1) ?: 1f
+                } else if (nextL >= 0f) {
+                    rowLeftFractions[r] = nextL
+                    rowRightFractions[r] = min(1f, nextL + 0.35f)
+                } else {
+                    rowLeftFractions[r] = 0.30f
+                    rowRightFractions[r] = 0.70f
+                }
+            }
+        }
+
+        // 2. Aykırı Diken (Outlier Spike) Filtresi: Ani sıçramaları komşuların ortalamasıyla düzelt
+        for (r in 1 until subH - 1) {
+            val prevL = rowLeftFractions[r - 1]
+            val currL = rowLeftFractions[r]
+            val nextL = rowLeftFractions[r + 1]
+            val expectedL = (prevL + nextL) * 0.5f
+            if (abs(currL - expectedL) > 0.15f) {
+                rowLeftFractions[r] = expectedL
+            }
+
+            val prevR = rowRightFractions[r - 1]
+            val currR = rowRightFractions[r]
+            val nextR = rowRightFractions[r + 1]
+            val expectedR = (prevR + nextR) * 0.5f
+            if (abs(currR - expectedR) > 0.15f) {
+                rowRightFractions[r] = expectedR
+            }
+        }
+
+        // 3. Bölgesel Kubbe ve Taban Daralma Kalkanı (Top %15 & Bottom %15)
+        val topCut = (subH * 0.15f).toInt().coerceAtLeast(1)
+        for (r in 0 until topCut) {
+            if (r + 1 < subH) {
+                rowLeftFractions[r] = maxOf(rowLeftFractions[r], rowLeftFractions[r + 1] - 0.04f)
+                rowRightFractions[r] = minOf(rowRightFractions[r], rowRightFractions[r + 1] + 0.04f)
+            }
+        }
+        val botCut = (subH * 0.85f).toInt().coerceIn(topCut, subH - 1)
+        for (r in subH - 1 downTo botCut) {
+            if (r > 0) {
+                rowLeftFractions[r] = maxOf(rowLeftFractions[r], rowLeftFractions[r - 1] - 0.04f)
+                rowRightFractions[r] = minOf(rowRightFractions[r], rowRightFractions[r - 1] + 0.04f)
+            }
+        }
+
+        // 4. 3-Noktalı Ağırlıklı Gauss Yumuşatma (0.20, 0.60, 0.20)
+        val smoothL = FloatArray(subH)
+        val smoothR = FloatArray(subH)
+        for (r in 0 until subH) {
+            val pL = if (r > 0) rowLeftFractions[r - 1] else rowLeftFractions[r]
+            val cL = rowLeftFractions[r]
+            val nL = if (r < subH - 1) rowLeftFractions[r + 1] else rowLeftFractions[r]
+            smoothL[r] = (0.20f * pL + 0.60f * cL + 0.20f * nL).coerceIn(0f, 1f)
+
+            val pR = if (r > 0) rowRightFractions[r - 1] else rowRightFractions[r]
+            val cR = rowRightFractions[r]
+            val nR = if (r < subH - 1) rowRightFractions[r + 1] else rowRightFractions[r]
+            smoothR[r] = (0.20f * pR + 0.60f * cR + 0.20f * nR).coerceIn(smoothL[r], 1f)
+        }
+
+        val optX = if (validCount > 0) (sumOptX / validCount).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
+        val optY = if (validCount > 0) (sumOptY / validCount).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
+
+        return ContourScanlineProfile(smoothL, smoothR, optX, optY).takeIf { it.isUsable }
+    }
+
+    /**
+     * Filters candidates produced by the inverted YOLO11n-seg pass so only genuine
+     * dark-interior speech bubbles not already covered by the primary pass survive.
+     */
+    internal fun filterInvertedBubbleDetections(
+        bitmap: Bitmap,
+        invertedDetections: List<YoloDetection>,
+        primaryDetections: List<YoloDetection>
+    ): List<YoloDetection> {
+        if (invertedDetections.isEmpty() || bitmap.isRecycled || bitmap.width < 8 || bitmap.height < 8) {
+            return emptyList()
+        }
+        val primaryBalloons = primaryDetections.filter { it.label in setOf("bubble", "balloon") }
         val accepted = mutableListOf<YoloDetection>()
-        for (cand in rawCandidates.sortedByDescending { it.confidence }) {
-            val overlapsExisting = existingBalloons.any { det ->
+        for (cand in invertedDetections.sortedByDescending { it.confidence }) {
+            if (cand.label !in setOf("bubble", "balloon")) continue
+            val overlapsPrimary = primaryBalloons.any { det ->
                 iou(cand.box, det.box) > 0.30f || intersectionOverSmallerArea(cand.box, det.box) > 0.45f
             }
-            if (overlapsExisting) continue
+            if (overlapsPrimary) continue
             val overlapsAccepted = accepted.any { det ->
                 iou(cand.box, det.box) > 0.30f || intersectionOverSmallerArea(cand.box, det.box) > 0.45f
             }
-            if (!overlapsAccepted) {
-                accepted.add(cand)
-            }
+            if (overlapsAccepted) continue
+            if (!hasDarkInterior(bitmap, cand.box)) continue
+            accepted.add(cand)
         }
         return accepted
     }
 
-    private fun detectDarkSpeechBubblesInFrame(frame: Bitmap): List<YoloDetection> {
-        val frameW = frame.width
-        val frameH = frame.height
-        val maxSide = max(frameW, frameH)
-        val scale = min(1f, 480f / maxSide.toFloat())
-        val w = (frameW * scale).roundToInt().coerceAtLeast(1)
-        val h = (frameH * scale).roundToInt().coerceAtLeast(1)
-        if (w < 24 || h < 24) return emptyList()
+    internal fun hasDarkInterior(
+        bitmap: Bitmap,
+        normBox: RectF,
+        maxMedianLuma: Float = 85f
+    ): Boolean {
+        if (bitmap.isRecycled || bitmap.width < 8 || bitmap.height < 8) return false
+        val pxLeft = (normBox.left * bitmap.width).toInt().coerceIn(0, bitmap.width - 1)
+        val pxTop = (normBox.top * bitmap.height).toInt().coerceIn(0, bitmap.height - 1)
+        val pxRight = (normBox.right * bitmap.width).toInt().coerceIn(pxLeft + 1, bitmap.width)
+        val pxBottom = (normBox.bottom * bitmap.height).toInt().coerceIn(pxTop + 1, bitmap.height)
+        val boxW = pxRight - pxLeft
+        val boxH = pxBottom - pxTop
+        if (boxW < 8 || boxH < 8) return false
 
-        val scaled = if (w == frameW && h == frameH) {
-            frame
-        } else {
-            try {
-                Bitmap.createScaledBitmap(frame, w, h, true)
-            } catch (_: Exception) {
-                return emptyList()
+        val insetX = (boxW * 0.15f).toInt().coerceIn(1, max(1, boxW / 3))
+        val insetY = (boxH * 0.15f).toInt().coerceIn(1, max(1, boxH / 3))
+        val sLeft = (pxLeft + insetX).coerceIn(0, bitmap.width - 1)
+        val sRight = (pxRight - insetX).coerceIn(sLeft, bitmap.width - 1)
+        val sTop = (pxTop + insetY).coerceIn(0, bitmap.height - 1)
+        val sBottom = (pxBottom - insetY).coerceIn(sTop, bitmap.height - 1)
+
+        val stepX = max(1, (sRight - sLeft) / 10)
+        val stepY = max(1, (sBottom - sTop) / 10)
+        val lums = ArrayList<Float>(121)
+        for (y in sTop..sBottom step stepY) {
+            for (x in sLeft..sRight step stepX) {
+                val pixel = bitmap.getPixel(x, y)
+                val alpha = ((pixel ushr 24) and 0xFF) / 255f
+                val r = ((pixel shr 16) and 0xFF) * alpha + 255f * (1f - alpha)
+                val g = ((pixel shr 8) and 0xFF) * alpha + 255f * (1f - alpha)
+                val b = (pixel and 0xFF) * alpha + 255f * (1f - alpha)
+                lums.add(r * 0.299f + g * 0.587f + b * 0.114f)
             }
         }
-
-        try {
-            val n = w * h
-            val pixels = IntArray(n)
-            scaled.getPixels(pixels, 0, w, 0, 0, w, h)
-
-            val luma = IntArray(n)
-            val isDark = BooleanArray(n)
-            for (i in 0 until n) {
-                val p = pixels[i]
-                val alpha = (p ushr 24) and 0xFF
-                val r = (p shr 16) and 0xFF
-                val g = (p shr 8) and 0xFF
-                val b = p and 0xFF
-                val rawLum = (77 * r + 150 * g + 29 * b) shr 8
-                val lum = if (alpha < 255) {
-                    (rawLum * alpha + 255 * (255 - alpha)) / 255
-                } else {
-                    rawLum
-                }
-                luma[i] = lum
-                isDark[i] = lum < 55
-            }
-
-            // 1-px 4-neighbor erosion eliminates 1-3px panel frames and thin ink bridges
-            // while keeping dark speech bubble interiors connected.
-            val eroded = BooleanArray(n)
-            for (y in 1 until h - 1) {
-                val row = y * w
-                for (x in 1 until w - 1) {
-                    val idx = row + x
-                    if (isDark[idx] && isDark[idx - 1] && isDark[idx + 1] && isDark[idx - w] && isDark[idx + w]) {
-                        eroded[idx] = true
-                    }
-                }
-            }
-
-            class DarkComp(
-                val id: Int,
-                var minX: Int,
-                var maxX: Int,
-                var minY: Int,
-                var maxY: Int,
-                var darkCount: Int
-            )
-
-            val labels = IntArray(n)
-            val queue = IntArray(n)
-            val components = mutableListOf<DarkComp>()
-            var nextId = 0
-
-            for (startIdx in 0 until n) {
-                if (!eroded[startIdx] || labels[startIdx] != 0) continue
-                nextId++
-                val compId = nextId
-                val sx = startIdx % w
-                val sy = startIdx / w
-                var minX = sx
-                var maxX = sx
-                var minY = sy
-                var maxY = sy
-                var count = 0
-
-                var head = 0
-                var tail = 0
-                queue[tail++] = startIdx
-                labels[startIdx] = compId
-
-                while (head < tail) {
-                    val cur = queue[head++]
-                    val cx = cur % w
-                    val cy = cur / w
-                    count++
-                    if (cx < minX) minX = cx
-                    if (cx > maxX) maxX = cx
-                    if (cy < minY) minY = cy
-                    if (cy > maxY) maxY = cy
-
-                    for (dy in -1..1) {
-                        val ny = cy + dy
-                        if (ny !in 0 until h) continue
-                        val nRow = ny * w
-                        for (dx in -1..1) {
-                            if (dx == 0 && dy == 0) continue
-                            val nx = cx + dx
-                            if (nx !in 0 until w) continue
-                            val nIdx = nRow + nx
-                            if (eroded[nIdx] && labels[nIdx] == 0) {
-                                labels[nIdx] = compId
-                                queue[tail++] = nIdx
-                            }
-                        }
-                    }
-                }
-                components.add(DarkComp(compId, minX, maxX, minY, maxY, count))
-            }
-
-            if (components.isEmpty()) return emptyList()
-
-            // Constrained 1-px dilation back into originally dark pixels restores outer bubble contour.
-            val dilatedLabels = labels.copyOf()
-            for (y in 0 until h) {
-                val row = y * w
-                for (x in 0 until w) {
-                    val idx = row + x
-                    if (labels[idx] == 0 && isDark[idx]) {
-                        val neighborLabel = when {
-                            x > 0 && labels[idx - 1] != 0 -> labels[idx - 1]
-                            x + 1 < w && labels[idx + 1] != 0 -> labels[idx + 1]
-                            y > 0 && labels[idx - w] != 0 -> labels[idx - w]
-                            y + 1 < h && labels[idx + w] != 0 -> labels[idx + w]
-                            else -> 0
-                        }
-                        if (neighborLabel != 0) {
-                            dilatedLabels[idx] = neighborLabel
-                            val comp = components[neighborLabel - 1]
-                            if (x < comp.minX) comp.minX = x
-                            if (x > comp.maxX) comp.maxX = x
-                            if (y < comp.minY) comp.minY = y
-                            if (y > comp.maxY) comp.maxY = y
-                            comp.darkCount++
-                        }
-                    }
-                }
-            }
-
-            val detections = mutableListOf<YoloDetection>()
-            for (comp in components) {
-                val compW = comp.maxX - comp.minX + 1
-                val compH = comp.maxY - comp.minY + 1
-                val fracW = compW.toFloat() / w.toFloat()
-                val fracH = compH.toFloat() / h.toFloat()
-                if (compW < 10 || compH < 10 || fracW < 0.025f || fracH < 0.025f) continue
-                if (fracW > 0.60f || fracH > 0.60f) continue
-
-                val aspect = compW.toFloat() / compH.toFloat()
-                if (aspect < 0.15f || aspect > 6.5f) continue
-                val darkFillRatio = comp.darkCount.toFloat() / (compW * compH).toFloat()
-                if (darkFillRatio < 0.25f) continue
-
-                val rowLeftX = IntArray(compH) { -1 }
-                val rowRightX = IntArray(compH) { -1 }
-                val colTopY = IntArray(compW) { -1 }
-                val colBotY = IntArray(compW) { -1 }
-
-                for (ry in 0 until compH) {
-                    val y = comp.minY + ry
-                    val rowOffset = y * w
-                    for (rx in 0 until compW) {
-                        val x = comp.minX + rx
-                        if (dilatedLabels[rowOffset + x] == comp.id) {
-                            if (rowLeftX[ry] < 0) rowLeftX[ry] = x
-                            rowRightX[ry] = x
-                            if (colTopY[rx] < 0) colTopY[rx] = y
-                            colBotY[rx] = y
-                        }
-                    }
-                }
-
-                // Core interior strictly enclosed inside the dark blob (shrunk away from edges).
-                val marginX = (compW * 0.08f).toInt().coerceIn(2, 5)
-                val marginY = (compH * 0.08f).toInt().coerceIn(2, 5)
-                val subN = compW * compH
-                val inCore = BooleanArray(subN)
-                var interiorPixels = 0
-                var darkInCore = 0
-                var brightInCore = 0
-
-                for (ry in 0 until compH) {
-                    val y = comp.minY + ry
-                    val rLeft = rowLeftX[ry]
-                    val rRight = rowRightX[ry]
-                    if (rLeft < 0 || rRight - rLeft < marginX * 2) continue
-                    val minCoreX = rLeft + marginX
-                    val maxCoreX = rRight - marginX
-                    val imgRow = y * w
-                    val subRow = ry * compW
-                    for (rx in 0 until compW) {
-                        val x = comp.minX + rx
-                        if (x < minCoreX || x > maxCoreX) continue
-                        val cTop = colTopY[rx]
-                        val cBot = colBotY[rx]
-                        if (cTop < 0 || y < cTop + marginY || y > cBot - marginY) continue
-                        val subIdx = subRow + rx
-                        inCore[subIdx] = true
-                        interiorPixels++
-                        val lum = luma[imgRow + x]
-                        if (lum < 55) darkInCore++
-                        if (lum > 180) brightInCore++
-                    }
-                }
-
-                if (interiorPixels < 16 || brightInCore < 6) continue
-                val darkRatio = darkInCore.toFloat() / interiorPixels.toFloat()
-                val brightRatio = brightInCore.toFloat() / interiorPixels.toFloat()
-                if (darkRatio < 0.45f || brightRatio < 0.02f || brightRatio > 0.45f) continue
-
-                // 4-connected bright component count inside core interior.
-                val visitedBright = BooleanArray(subN)
-                val brightQueue = IntArray(subN)
-                var brightCompCount = 0
-                var substantialBrightComps = 0
-                var maxBrightCompArea = 0
-
-                for (startSub in 0 until subN) {
-                    if (!inCore[startSub] || visitedBright[startSub]) continue
-                    val sx = comp.minX + (startSub % compW)
-                    val sy = comp.minY + (startSub / compW)
-                    if (luma[sy * w + sx] <= 180) continue
-
-                    brightCompCount++
-                    var bHead = 0
-                    var bTail = 0
-                    brightQueue[bTail++] = startSub
-                    visitedBright[startSub] = true
-                    var area = 0
-
-                    while (bHead < bTail) {
-                        val cur = brightQueue[bHead++]
-                        area++
-                        val rx = cur % compW
-                        val ry = cur / compW
-                        if (rx > 0) {
-                            val nxt = cur - 1
-                            if (inCore[nxt] && !visitedBright[nxt] && luma[(comp.minY + ry) * w + (comp.minX + rx - 1)] > 180) {
-                                visitedBright[nxt] = true
-                                brightQueue[bTail++] = nxt
-                            }
-                        }
-                        if (rx + 1 < compW) {
-                            val nxt = cur + 1
-                            if (inCore[nxt] && !visitedBright[nxt] && luma[(comp.minY + ry) * w + (comp.minX + rx + 1)] > 180) {
-                                visitedBright[nxt] = true
-                                brightQueue[bTail++] = nxt
-                            }
-                        }
-                        if (ry > 0) {
-                            val nxt = cur - compW
-                            if (inCore[nxt] && !visitedBright[nxt] && luma[(comp.minY + ry - 1) * w + (comp.minX + rx)] > 180) {
-                                visitedBright[nxt] = true
-                                brightQueue[bTail++] = nxt
-                            }
-                        }
-                        if (ry + 1 < compH) {
-                            val nxt = cur + compW
-                            if (inCore[nxt] && !visitedBright[nxt] && luma[(comp.minY + ry + 1) * w + (comp.minX + rx)] > 180) {
-                                visitedBright[nxt] = true
-                                brightQueue[bTail++] = nxt
-                            }
-                        }
-                    }
-                    if (area >= 2) substantialBrightComps++
-                    if (area > maxBrightCompArea) maxBrightCompArea = area
-                }
-
-                if (brightCompCount < 2) continue
-                if (substantialBrightComps < 2 && brightCompCount < 3) continue
-                if (maxBrightCompArea.toFloat() / interiorPixels.toFloat() > 0.22f) continue
-
-                // Horizontal & vertical dark->bright stroke transitions inside core interior.
-                var maxRowTransitions = 0
-                var totalRowTransitions = 0
-                for (ry in 0 until compH) {
-                    var rowTransitions = 0
-                    var seenDark = false
-                    val imgRow = (comp.minY + ry) * w
-                    val subRow = ry * compW
-                    for (rx in 0 until compW) {
-                        if (!inCore[subRow + rx]) {
-                            seenDark = false
-                            continue
-                        }
-                        val lum = luma[imgRow + comp.minX + rx]
-                        if (lum <= 140) {
-                            seenDark = true
-                        } else if (lum > 180 && seenDark) {
-                            rowTransitions++
-                            seenDark = false
-                        }
-                    }
-                    if (rowTransitions > maxRowTransitions) maxRowTransitions = rowTransitions
-                    totalRowTransitions += rowTransitions
-                }
-
-                var maxColTransitions = 0
-                var totalColTransitions = 0
-                for (rx in 0 until compW) {
-                    var colTransitions = 0
-                    var seenDark = false
-                    val x = comp.minX + rx
-                    for (ry in 0 until compH) {
-                        val subIdx = ry * compW + rx
-                        if (!inCore[subIdx]) {
-                            seenDark = false
-                            continue
-                        }
-                        val lum = luma[(comp.minY + ry) * w + x]
-                        if (lum <= 140) {
-                            seenDark = true
-                        } else if (lum > 180 && seenDark) {
-                            colTransitions++
-                            seenDark = false
-                        }
-                    }
-                    if (colTransitions > maxColTransitions) maxColTransitions = colTransitions
-                    totalColTransitions += colTransitions
-                }
-
-                if (maxRowTransitions < 2 && maxColTransitions < 2) continue
-                if (totalRowTransitions < 4 || totalColTransitions < 3) continue
-
-                val profile = buildDarkBubbleContourProfile(comp.minX, compW, compH, rowLeftX, rowRightX)
-                val normL = (comp.minX.toFloat() / w.toFloat()).coerceIn(0f, 1f)
-                val normT = (comp.minY.toFloat() / h.toFloat()).coerceIn(0f, 1f)
-                val normR = ((comp.maxX + 1).toFloat() / w.toFloat()).coerceIn(normL, 1f)
-                val normB = ((comp.maxY + 1).toFloat() / h.toFloat()).coerceIn(normT, 1f)
-                val confidence = (0.78f + min(0.14f, brightCompCount * 0.02f)).coerceIn(0.78f, 0.92f)
-
-                detections.add(
-                    YoloDetection(
-                        classId = 0,
-                        label = "bubble",
-                        confidence = confidence,
-                        box = RectF(normL, normT, normR, normB),
-                        contourProfile = profile
-                    )
-                )
-            }
-            return detections
-        } finally {
-            if (scaled !== frame && !scaled.isRecycled) {
-                scaled.recycle()
-            }
-        }
-    }
-
-    private fun buildDarkBubbleContourProfile(
-        minX: Int,
-        compW: Int,
-        compH: Int,
-        rowLeftX: IntArray,
-        rowRightX: IntArray
-    ): ContourScanlineProfile? {
-        if (compW < 8 || compH < 8) return null
-        val rawL = FloatArray(compH) { -1f }
-        val rawR = FloatArray(compH) { -1f }
-        var sumCenterX = 0.0
-        var sumCenterY = 0.0
-        var spanWeight = 0.0
-
-        for (r in 0 until compH) {
-            if (rowLeftX[r] >= 0 && rowRightX[r] >= rowLeftX[r]) {
-                val lFrac = ((rowLeftX[r] - minX).toFloat() / compW.toFloat()).coerceIn(0f, 1f)
-                val rFrac = ((rowRightX[r] - minX + 1).toFloat() / compW.toFloat()).coerceIn(lFrac, 1f)
-                rawL[r] = lFrac
-                rawR[r] = rFrac
-                val span = (rFrac - lFrac).toDouble()
-                sumCenterX += ((lFrac + rFrac) * 0.5) * span
-                sumCenterY += ((r + 0.5) / compH.toDouble()) * span
-                spanWeight += span
-            }
-        }
-
-        for (r in 0 until compH) {
-            if (rawL[r] < 0f) {
-                val prev = if (r > 0 && rawL[r - 1] >= 0f) r - 1 else -1
-                val next = (r + 1 until compH).firstOrNull { rawL[it] >= 0f } ?: -1
-                when {
-                    prev >= 0 && next >= 0 -> {
-                        rawL[r] = (rawL[prev] + rawL[next]) * 0.5f
-                        rawR[r] = (rawR[prev] + rawR[next]) * 0.5f
-                    }
-                    prev >= 0 -> {
-                        rawL[r] = rawL[prev]
-                        rawR[r] = rawR[prev]
-                    }
-                    next >= 0 -> {
-                        rawL[r] = rawL[next]
-                        rawR[r] = rawR[next]
-                    }
-                    else -> {
-                        rawL[r] = 0.25f
-                        rawR[r] = 0.75f
-                    }
-                }
-            }
-        }
-
-        // Outlier spike filter + 3-point Gaussian smoothing (0.20, 0.60, 0.20)
-        for (r in 1 until compH - 1) {
-            val expectedL = (rawL[r - 1] + rawL[r + 1]) * 0.5f
-            if (abs(rawL[r] - expectedL) > 0.15f) rawL[r] = expectedL
-            val expectedR = (rawR[r - 1] + rawR[r + 1]) * 0.5f
-            if (abs(rawR[r] - expectedR) > 0.15f) rawR[r] = expectedR
-        }
-
-        val smoothL = FloatArray(compH)
-        val smoothR = FloatArray(compH)
-        for (r in 0 until compH) {
-            val pL = if (r > 0) rawL[r - 1] else rawL[r]
-            val nL = if (r < compH - 1) rawL[r + 1] else rawL[r]
-            smoothL[r] = (0.20f * pL + 0.60f * rawL[r] + 0.20f * nL).coerceIn(0f, 1f)
-
-            val pR = if (r > 0) rawR[r - 1] else rawR[r]
-            val nR = if (r < compH - 1) rawR[r + 1] else rawR[r]
-            smoothR[r] = (0.20f * pR + 0.60f * rawR[r] + 0.20f * nR).coerceIn(smoothL[r], 1f)
-        }
-
-        val optX = if (spanWeight > 0.0) (sumCenterX / spanWeight).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
-        val optY = if (spanWeight > 0.0) (sumCenterY / spanWeight).toFloat().coerceIn(0.1f, 0.9f) else 0.5f
-        return ContourScanlineProfile(smoothL, smoothR, optX, optY).takeIf { it.isUsable }
+        if (lums.isEmpty()) return false
+        lums.sort()
+        val medianLuma = lums[lums.size / 2]
+        return medianLuma < maxMedianLuma
     }
 }

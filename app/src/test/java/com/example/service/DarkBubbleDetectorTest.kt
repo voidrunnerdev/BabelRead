@@ -33,7 +33,15 @@ class DarkBubbleDetectorTest {
         }
     }
 
-    private fun drawOctagon(canvas: Canvas, left: Float, top: Float, right: Float, bottom: Float, chamfer: Float, paint: Paint) {
+    private fun drawOctagon(
+        canvas: Canvas,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        chamfer: Float,
+        paint: Paint
+    ) {
         val path = Path().apply {
             moveTo(left + chamfer, top)
             lineTo(right - chamfer, top)
@@ -49,167 +57,179 @@ class DarkBubbleDetectorTest {
     }
 
     @Test
-    fun `detectDarkSpeechBubbles detects black octagonal bubble with white SO text and contour profile`() {
+    fun `computeLetterboxTransform and mapLetterboxBoxToNormalized preserve vertical and horizontal aspect ratios`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val detector = YoloBubbleDetector(context)
+
+        // Vertical manga page: 1000 x 1400 into 1600 x 1600
+        val vertical = detector.computeLetterboxTransform(1000, 1400, 1600, 1600)
+        assertEquals(1143, vertical.contentW)
+        assertEquals(1600, vertical.contentH)
+        assertEquals(228, vertical.padLeft)
+        assertEquals(0, vertical.padTop)
+
+        val vertModelBox = RectF(
+            vertical.padLeft + 0.20f * vertical.contentW,
+            0.10f * vertical.contentH,
+            vertical.padLeft + 0.60f * vertical.contentW,
+            0.40f * vertical.contentH
+        )
+        val vertNorm = detector.mapLetterboxBoxToNormalized(vertModelBox, vertical)
+        assertEquals(0.20f, vertNorm.left, 0.002f)
+        assertEquals(0.10f, vertNorm.top, 0.002f)
+        assertEquals(0.60f, vertNorm.right, 0.002f)
+        assertEquals(0.40f, vertNorm.bottom, 0.002f)
+
+        // Horizontal spread: 2400 x 1600 into 1600 x 1600
+        val spread = detector.computeLetterboxTransform(2400, 1600, 1600, 1600)
+        assertEquals(1600, spread.contentW)
+        assertEquals(1067, spread.contentH)
+        assertEquals(0, spread.padLeft)
+        assertEquals(266, spread.padTop)
+
+        // Box extending slightly into top padding must clamp cleanly to page top edge (0f)
+        val spreadModelBox = RectF(
+            0.15f * spread.contentW,
+            spread.padTop - 12f,
+            0.45f * spread.contentW,
+            spread.padTop + 0.50f * spread.contentH
+        )
+        val spreadNorm = detector.mapLetterboxBoxToNormalized(spreadModelBox, spread)
+        assertEquals(0.15f, spreadNorm.left, 0.002f)
+        assertEquals(0.0f, spreadNorm.top, 0.0001f)
+        assertEquals(0.45f, spreadNorm.right, 0.002f)
+        assertEquals(0.50f, spreadNorm.bottom, 0.002f)
+    }
+
+    @Test
+    fun `extractSegmentationContourProfile un-letterboxes 400x400 prototype mask without pad shift`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val detector = YoloBubbleDetector(context)
+
+        // 800 x 1600 vertical page -> padLeft = 400, contentW = 800, contentH = 1600
+        val letterbox = detector.computeLetterboxTransform(800, 1600, 1600, 1600)
+        assertEquals(400, letterbox.padLeft)
+        assertEquals(800, letterbox.contentW)
+
+        val protoW = 400
+        val protoH = 400
+        val protoData = FloatArray(protoW * protoH) { -4f }
+
+        // Normalized page box [0.0..0.5, 0.25..0.50] -> model x [400..800] (proto [100..200]), y [400..800] (proto [100..200])
+        // Also put stray positive logits inside gray padding (proto x 90..99) to verify padding is never sampled.
+        for (py in 100 until 200) {
+            for (px in 90 until 200) {
+                val insideInsetBubble = px in 110 until 190
+                val strayPadding = px in 92 until 98
+                if (insideInsetBubble || strayPadding) {
+                    protoData[py * protoW + px] = 4f
+                }
+            }
+        }
+
+        val normBox = RectF(0.0f, 0.25f, 0.50f, 0.50f)
+        val profile = detector.extractSegmentationContourProfile(
+            normBox = normBox,
+            letterbox = letterbox,
+            protoData = protoData,
+            protoW = protoW,
+            protoH = protoH,
+            maskCoeffs = floatArrayOf(1f),
+            numMaskCoeffs = 1
+        )
+        assertNotNull("Expected non-null contour profile", profile)
+        assertTrue("Expected usable contour profile", profile!!.isUsable)
+
+        val midRow = profile.rowCount / 2
+        // Expected span inside normBox [proto 100..200] is [110..190] -> fractions [0.10..0.90]
+        assertEquals(0.10f, profile.rowLeftFractions[midRow], 0.03f)
+        assertEquals(0.90f, profile.rowRightFractions[midRow], 0.03f)
+        assertEquals(0.50f, profile.opticalCenterX, 0.05f)
+        assertEquals(0.50f, profile.opticalCenterY, 0.05f)
+    }
+
+    @Test
+    fun `filterInvertedBubbleDetections keeps dark interior bubbles and rejects white bubbles or duplicates`() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val detector = YoloBubbleDetector(context)
         val page = createWhitePage(480, 720)
         val canvas = Canvas(page)
 
+        // 1. Dark octagonal bubble with white "SO..." text
         val blackFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
             style = Paint.Style.FILL
         }
-        drawOctagon(canvas, left = 160f, top = 240f, right = 320f, bottom = 360f, chamfer = 26f, paint = blackFill)
-
+        drawOctagon(canvas, left = 160f, top = 200f, right = 320f, bottom = 320f, chamfer = 26f, paint = blackFill)
         val whiteText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
             textSize = 28f
             typeface = Typeface.DEFAULT_BOLD
             textAlign = Paint.Align.CENTER
         }
-        canvas.drawText("SO...", 240f, 310f, whiteText)
+        canvas.drawText("SO...", 240f, 270f, whiteText)
 
-        val detections = detector.detectDarkSpeechBubbles(page, emptyList())
-        assertEquals("Expected exactly 1 dark speech bubble detection", 1, detections.size)
-
-        val det = detections.first()
-        assertEquals(0, det.classId)
-        assertEquals("bubble", det.label)
-        assertTrue("Confidence should be substantial", det.confidence >= 0.70f)
-        assertTrue("Expected left bound near bubble", det.box.left in 0.28f..0.40f)
-        assertTrue("Expected right bound near bubble", det.box.right in 0.60f..0.72f)
-        assertTrue("Expected top bound near bubble", det.box.top in 0.28f..0.38f)
-        assertTrue("Expected bottom bound near bubble", det.box.bottom in 0.45f..0.55f)
-
-        val profile = det.contourProfile
-        assertNotNull("Dark bubble should generate ContourScanlineProfile", profile)
-        assertTrue("ContourScanlineProfile should be usable", profile!!.isUsable)
-        assertFalse("Octagonal bubble should not be classified as rectangular", profile.isRectangularLike)
-    }
-
-    @Test
-    fun `detectDarkSpeechBubbles detects black jagged bubble with multi-line white dialogue`() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val detector = YoloBubbleDetector(context)
-        val page = createWhitePage(480, 720)
-        val canvas = Canvas(page)
-
-        val blackFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        // 2. White bubble with black text (must be rejected by dark interior gate)
+        val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
-            style = Paint.Style.FILL
-        }
-        drawOctagon(canvas, left = 110f, top = 160f, right = 350f, bottom = 360f, chamfer = 30f, paint = blackFill)
-
-        val whiteText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
-            textAlign = Paint.Align.CENTER
-        }
-        canvas.drawText("DON'T GO HOME", 230f, 225f, whiteText)
-        canvas.drawText("UNTIL YOU'VE", 230f, 255f, whiteText)
-        canvas.drawText("FINISHED YOUR", 230f, 285f, whiteText)
-        canvas.drawText("WORK. GET IT?", 230f, 315f, whiteText)
-
-        val detections = detector.detectDarkSpeechBubbles(page, emptyList())
-        assertEquals("Expected multi-line dark bubble detection", 1, detections.size)
-        assertEquals("bubble", detections.first().label)
-        assertNotNull(detections.first().contourProfile)
-    }
-
-    @Test
-    fun `detectDarkSpeechBubbles rejects black hair, suit blobs, panel borders, and giant dark panels`() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val detector = YoloBubbleDetector(context)
-        val page = createWhitePage(480, 720)
-        val canvas = Canvas(page)
-
-        val blackFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK
-            style = Paint.Style.FILL
-        }
-
-        // 1. Solid black hair blob without white lettering
-        canvas.drawOval(RectF(40f, 40f, 180f, 170f), blackFill)
-
-        // 2. Dark suit/hair blob with a single specular white highlight streak
-        canvas.drawRoundRect(RectF(260f, 40f, 420f, 190f), 20f, 20f, blackFill)
-        val highlight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
             strokeWidth = 3f
             style = Paint.Style.STROKE
         }
-        canvas.drawLine(295f, 80f, 385f, 105f, highlight)
-
-        // 3. Thin 2px panel frame (separate from giant panel)
-        val borderPaint = Paint().apply {
+        canvas.drawOval(RectF(140f, 400f, 340f, 520f), outline)
+        val blackText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.BLACK
-            strokeWidth = 2f
-            style = Paint.Style.STROKE
-        }
-        canvas.drawRect(RectF(30f, 195f, 450f, 240f), borderPaint)
-
-        // 4. Giant dark panel background (> 60% page width & height)
-        canvas.drawRect(RectF(20f, 255f, 460f, 705f), blackFill)
-
-        val detections = detector.detectDarkSpeechBubbles(page, emptyList())
-        assertTrue("Expected zero false positives on non-bubble dark regions, got ${detections.size}", detections.isEmpty())
-    }
-
-    @Test
-    fun `detectDarkSpeechBubbles deduplicates against existing YOLO bubble detections but not text_free`() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val detector = YoloBubbleDetector(context)
-        val page = createWhitePage(480, 720)
-        val canvas = Canvas(page)
-
-        val blackFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.BLACK
-            style = Paint.Style.FILL
-        }
-        drawOctagon(canvas, left = 160f, top = 240f, right = 320f, bottom = 360f, chamfer = 26f, paint = blackFill)
-
-        val whiteText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            textSize = 28f
+            textSize = 24f
             typeface = Typeface.DEFAULT_BOLD
             textAlign = Paint.Align.CENTER
         }
-        canvas.drawText("SO...", 240f, 310f, whiteText)
+        canvas.drawText("HELLO", 240f, 468f, blackText)
 
-        // Already covered by an existing YOLO bubble detection -> must not duplicate
-        val existingBubble = YoloBubbleDetector.YoloDetection(
-            classId = 0,
-            label = "bubble",
-            confidence = 0.28f,
-            box = RectF(160f / 480f, 240f / 720f, 320f / 480f, 360f / 720f)
+        val darkCandBox = RectF(160f / 480f, 200f / 720f, 320f / 480f, 320f / 720f)
+        val whiteCandBox = RectF(140f / 480f, 400f / 720f, 340f / 480f, 520f / 720f)
+
+        val invertedCandidates = listOf(
+            YoloBubbleDetector.YoloDetection(classId = 0, label = "bubble", confidence = 0.72f, box = darkCandBox),
+            YoloBubbleDetector.YoloDetection(classId = 0, label = "bubble", confidence = 0.85f, box = whiteCandBox)
         )
-        val afterBubble = detector.detectDarkSpeechBubbles(page, listOf(existingBubble))
-        assertTrue("Existing YOLO bubble should prevent duplicate detection", afterBubble.isEmpty())
 
-        // Mislabelled text_free inside the dark bubble should NOT prevent adding the bubble container
-        val existingTextFree = YoloBubbleDetector.YoloDetection(
+        assertTrue(detector.hasDarkInterior(page, darkCandBox))
+        assertFalse(detector.hasDarkInterior(page, whiteCandBox))
+
+        // Without Pass-1 overlap: dark bubble survives, white bubble is filtered out
+        val rescued = detector.filterInvertedBubbleDetections(page, invertedCandidates, emptyList())
+        assertEquals(1, rescued.size)
+        assertEquals(darkCandBox, rescued.first().box)
+
+        // With Pass-1 bubble covering darkCandBox: must not duplicate
+        val primaryBubble = YoloBubbleDetector.YoloDetection(classId = 0, label = "bubble", confidence = 0.40f, box = darkCandBox)
+        val afterPrimaryOverlap = detector.filterInvertedBubbleDetections(page, invertedCandidates, listOf(primaryBubble))
+        assertTrue("Overlapping Pass-1 bubble must suppress duplicate", afterPrimaryOverlap.isEmpty())
+
+        // Non-bubble text_free in Pass-1 must not suppress rescued dark bubble
+        val primaryTextFree = YoloBubbleDetector.YoloDetection(
             classId = 2,
             label = "text_free",
             confidence = 0.55f,
-            box = RectF(195f / 480f, 280f / 720f, 285f / 480f, 325f / 720f)
+            box = RectF(195f / 480f, 240f / 720f, 285f / 480f, 285f / 720f)
         )
-        val afterTextFree = detector.detectDarkSpeechBubbles(page, listOf(existingTextFree))
-        assertEquals("Existing text_free should not suppress dark bubble detection", 1, afterTextFree.size)
-        assertEquals("bubble", afterTextFree.first().label)
+        val afterTextFree = detector.filterInvertedBubbleDetections(page, invertedCandidates, listOf(primaryTextFree))
+        assertEquals(1, afterTextFree.size)
     }
 
     @Test
-    fun `default detector model and confidence threshold are aligned for YOLO11N_SEG`() = runBlocking {
+    fun `default detector model and confidence threshold are aligned at 0_25f for YOLO11N_SEG`() = runBlocking {
+        assertEquals(0.25f, DetectorModel.YOLO11N_SEG.defaultConfidence, 0.001f)
+        assertEquals(0.25f, YoloBubbleDetector.DEFAULT_CONF_THRESHOLD, 0.001f)
+
         val context = ApplicationProvider.getApplicationContext<Context>()
         val prefs = MangaPreferences(context)
         assertEquals(DetectorModel.YOLO11N_SEG.id, prefs.detectorModelType.first())
-        assertEquals(0.20f, prefs.confidenceThreshold.first(), 0.001f)
+        assertEquals(0.25f, prefs.confidenceThreshold.first(), 0.001f)
 
         prefs.setDetectorModelType(DetectorModel.RTDETR_V2.id)
         assertEquals(0.35f, prefs.confidenceThreshold.first(), 0.001f)
 
         prefs.setDetectorModelType(DetectorModel.YOLO11N_SEG.id)
-        assertEquals(0.20f, prefs.confidenceThreshold.first(), 0.001f)
+        assertEquals(0.25f, prefs.confidenceThreshold.first(), 0.001f)
     }
 }

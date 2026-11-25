@@ -27,6 +27,7 @@ class PpOcrV5Detector(context: Context) {
         private const val MODEL_ASSET = "models/ppocrv5_det.onnx"
         private const val MODEL_FILE = "ppocrv5_det_v1.onnx"
         private const val MODEL_BYTES = 4_826_518L
+        private const val MIN_DETECT_SIDE = 480
         private const val LIMIT_SIDE = 960
         private const val DET_THRESHOLD = 0.3f
         private const val BOX_THRESHOLD = 0.6f
@@ -114,7 +115,8 @@ class PpOcrV5Detector(context: Context) {
                 val target = PpOcrV5DetPreprocess.scaledSize(
                     cropRect.width(),
                     cropRect.height(),
-                    LIMIT_SIDE
+                    LIMIT_SIDE,
+                    MIN_DETECT_SIDE
                 )
                 val buffer = ByteBuffer.allocateDirect(
                     target[0] * target[1] * 3 * Float.SIZE_BYTES
@@ -284,13 +286,18 @@ internal object PpOcrV5DetPreprocess {
     private val MEAN = floatArrayOf(0.485f, 0.456f, 0.406f)
     private val STD = floatArrayOf(0.229f, 0.224f, 0.225f)
 
-    fun scaledSize(width: Int, height: Int, limitSide: Int): IntArray {
+    fun scaledSize(width: Int, height: Int, limitSide: Int, minSide: Int = 0): IntArray {
         if (width <= 0 || height <= 0 || limitSide <= 0) {
             return intArrayOf(STRIDE, STRIDE)
         }
-        val ratio = min(1f, limitSide.toFloat() / max(width, height))
-        val resizedWidth = ((width * ratio) / STRIDE).roundToInt() * STRIDE
-        val resizedHeight = ((height * ratio) / STRIDE).roundToInt() * STRIDE
+        val maxSide = max(width, height)
+        val ratio = when {
+            maxSide > limitSide -> limitSide.toFloat() / maxSide
+            minSide > 0 && maxSide < minSide -> min(limitSide.toFloat() / maxSide, minSide.toFloat() / maxSide)
+            else -> 1f
+        }
+        val resizedWidth = (((width * ratio) / STRIDE).roundToInt() * STRIDE).coerceAtMost(limitSide)
+        val resizedHeight = (((height * ratio) / STRIDE).roundToInt() * STRIDE).coerceAtMost(limitSide)
         return intArrayOf(
             max(STRIDE, resizedWidth),
             max(STRIDE, resizedHeight)

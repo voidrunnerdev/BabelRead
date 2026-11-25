@@ -3415,7 +3415,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             val containingBubble = selectContainingBubble(cluster.rect)
                             val isDarkBubble = analysis.isDarkBubble || isBubbleInteriorDark(containingBubble)
                             val finalIsBubble = containingBubble != null || analysis.isBubble || isDarkBubble
-                            if (translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
+                            if (cleanedText.isNotBlank() && translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
                                 val refinedBox = when {
                                     containingBubble != null -> containingBubble
                                     analysis.isBubble || isDarkBubble -> translationService.refineBubbleBounds(bitmap, cluster.rect, isDarkBubble)

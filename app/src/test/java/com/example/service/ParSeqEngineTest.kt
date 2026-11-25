@@ -177,9 +177,111 @@ class ParSeqEngineTest {
     }
 
     @Test
-    fun `prepareInputBitmap preserves aspect ratio for wide crops and pads with docTR black`() {
+    fun `decodeParSeq rejects sequence when any character probability is below minCharProb`() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val engine = ParSeqEngine(context)
+
+        val eosIndex = vocab.length
+        val targetText = "1AP"
+        val timesteps = targetText.length + 1
+        val buffer = ByteBuffer.allocateDirect(timesteps * classCount * Float.SIZE_BYTES)
+            .order(ByteOrder.nativeOrder())
+            .asFloatBuffer()
+
+        for (t in 0 until timesteps) {
+            val base = t * classCount
+            val targetIdx = if (t < targetText.length) vocab.indexOf(targetText[t]) else eosIndex
+            for (c in 0 until classCount) {
+                val logit = when {
+                    t == 1 && c == targetIdx -> 0.5f // Weak probability (< 0.25) across 127 classes
+                    t == 1 -> 0.0f
+                    c == targetIdx -> 8.0f
+                    else -> -8.0f
+                }
+                buffer.put(base + c, logit)
+            }
+        }
+        buffer.position(0)
+
+        val result = engine.decodeParSeq(buffer, timesteps, classCount, vocab)
+        assertTrue("minCharConfidence (${result.minCharConfidence}) should be < 0.25f", result.minCharConfidence < 0.25f)
+        assertEquals("Overall confidence must be 0f when a character is below minCharProb", 0f, result.confidence, 0.0001f)
+    }
+
+    @Test
+    fun `parseVocabFromConfigJson preserves all 126 chars across escaped quotes`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val engine = ParSeqEngine(context)
+
+        val json = """
+            {
+              "mean": [0.694, 0.695, 0.693],
+              "std": [0.299, 0.296, 0.301],
+              "input_height": 32,
+              "input_width": 128,
+              "vocab": "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#${'$'}%&'()*+,-./:;<=>?@[\\]^_`{|}~°£€¥¢฿àâéèêëîïôùûüçÀÂÉÈÊËÎÏÔÙÛÜÇ"
+            }
+        """.trimIndent()
+
+        val parsed = engine.parseVocabFromConfigJson(json)
+        assertEquals(vocab, parsed)
+        assertEquals(126, parsed?.length)
+    }
+
+    @Test
+    fun `splitLineIntoWords keeps hyphenated and apostrophe words intact for B-BUT and COULDN'T`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val engine = ParSeqEngine(context)
+
+        val hyphenSingle = renderSyntheticLineBitmap(
+            words = listOf("B-BUT"),
+            bgColor = Color.WHITE,
+            inkColor = Color.BLACK
+        )
+        assertEquals(1, engine.splitLineIntoWords(hyphenSingle).size)
+
+        val hyphenPhrase = renderSyntheticLineBitmap(
+            words = listOf("B-BUT", "WHY"),
+            bgColor = Color.WHITE,
+            inkColor = Color.BLACK
+        )
+        assertEquals("B-BUT WHY should split into 2 words keeping B-BUT intact", 2, engine.splitLineIntoWords(hyphenPhrase).size)
+
+        val apostropheWord = renderSyntheticLineBitmap(
+            words = listOf("COULDN'T"),
+            bgColor = Color.WHITE,
+            inkColor = Color.BLACK
+        )
+        assertEquals("COULDN'T must stay a single word", 1, engine.splitLineIntoWords(apostropheWord).size)
+    }
+
+    @Test
+    fun `prepareInputBitmap uses Color WHITE symmetric_pad and 2x upscale without black wall`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val engine = ParSeqEngine(context)
+
+        // Small tight "I" crop (< 36px height -> triggers 2x upscale)
+        val narrowCrop = renderSyntheticLineBitmap(
+            words = listOf("I"),
+            bgColor = Color.WHITE,
+            inkColor = Color.BLACK
+        )
+        val preparedNarrow = engine.prepareInputBitmap(narrowCrop)
+        assertNotNull(preparedNarrow)
+        preparedNarrow!!
+        assertEquals(128, preparedNarrow.width)
+        assertEquals(32, preparedNarrow.height)
+        assertEquals("Left symmetric pad must be Color.WHITE", Color.WHITE, preparedNarrow.getPixel(0, 16))
+        assertEquals("Right symmetric pad must be Color.WHITE (no black wall)", Color.WHITE, preparedNarrow.getPixel(127, 16))
+        // Centered ink around x=64
+        var hasDarkCenter = false
+        for (x in 52..76) {
+            if (Color.red(preparedNarrow.getPixel(x, 16)) < 80) {
+                hasDarkCenter = true
+                break
+            }
+        }
+        assertTrue("Symmetric padding should center 'I' horizontally near x=64", hasDarkCenter)
 
         // Wide 240x24 crop (ratio = 10.0 > 4.0) with ink touching left & right edges
         val wideCrop = Bitmap.createBitmap(240, 24, Bitmap.Config.ARGB_8888)
@@ -194,13 +296,60 @@ class ParSeqEngineTest {
         assertEquals(128, prepared.width)
         assertEquals(32, prepared.height)
 
-        // Top-left (0, 0) is inside the added clean white margin
-        val marginCorner = prepared.getPixel(0, 0)
-        assertTrue("Top-left added paper margin should remain white", Color.red(marginCorner) >= 245)
+        assertTrue("Top-left margin should remain white", Color.red(prepared.getPixel(0, 0)) >= 245)
+        assertEquals("Bottom symmetric padding should be Color.WHITE", Color.WHITE, prepared.getPixel(64, 31))
+        assertEquals("Top symmetric padding should be Color.WHITE", Color.WHITE, prepared.getPixel(64, 0))
+    }
 
-        // Bottom region (y=30) must be black zero-padding matching docTR Resize(preserve_aspect_ratio=True)
-        val bottomPad = prepared.getPixel(64, 30)
-        assertEquals("Bottom padding should be Color.BLACK for docTR zero-padding", Color.BLACK, bottomPad)
+    @Test
+    fun `mergeMultiStrings joins overlapping split crop outputs cleanly`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val engine = ParSeqEngine(context)
+
+        assertEquals(
+            "CONGRATULATIONS",
+            engine.mergeMultiStrings(listOf("CONGRAT", "ATULATIONS"))
+        )
+        assertEquals(
+            "DON'T GO HOME UNTIL",
+            engine.mergeMultiStrings(listOf("DON'T GO HO", "HOME UNTIL"))
+        )
+    }
+
+    @Test
+    fun `hasValidTextStrokes rejects blank or thin border line and accepts real text`() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val engine = ParSeqEngine(context)
+
+        val blank = Bitmap.createBitmap(80, 30, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.WHITE)
+        }
+        assertFalse("Blank crop must be rejected", engine.hasValidTextStrokes(blank))
+
+        val thinBorder = Bitmap.createBitmap(100, 30, Bitmap.Config.ARGB_8888)
+        Canvas(thinBorder).apply {
+            drawColor(Color.WHITE)
+            drawRect(0f, 14f, 100f, 16f, Paint().apply { color = Color.BLACK })
+        }
+        assertFalse("Single 2px horizontal line must be rejected", engine.hasValidTextStrokes(thinBorder))
+
+        val validText = renderSyntheticLineBitmap(
+            words = listOf("I", "SAID"),
+            bgColor = Color.WHITE,
+            inkColor = Color.BLACK
+        )
+        assertTrue("Real text crop must pass stroke gate", engine.hasValidTextStrokes(validText))
+    }
+
+    @Test
+    fun `PpOcrV5DetPreprocess scaledSize upscales small crops when minSide is set`() {
+        val upscaled = PpOcrV5DetPreprocess.scaledSize(160, 80, 960, minSide = 480)
+        assertEquals(480, upscaled[0])
+        assertEquals(256, upscaled[1])
+
+        val legacySmall = PpOcrV5DetPreprocess.scaledSize(160, 80, 960)
+        assertEquals(160, legacySmall[0])
+        assertEquals(96, legacySmall[1])
     }
 
     @Test
@@ -252,7 +401,12 @@ class ParSeqEngineTest {
         val padX = 6
         val padY = 5
 
-        fun letterWidth(ch: Char): Int = if (ch == 'I') 3 else 12
+        fun letterWidth(ch: Char): Int = when (ch) {
+            'I' -> 3
+            '\'' -> 3
+            '-' -> 8
+            else -> 12
+        }
 
         var contentWidth = 0
         for ((wordIdx, word) in words.withIndex()) {
@@ -323,6 +477,38 @@ class ParSeqEngineTest {
                         canvas.drawRect(x, top, x + stroke, bottom, paint)
                         canvas.drawRect(x + w - stroke, top, x + w, bottom, paint)
                         canvas.drawRect(x, top, x + w, top + stroke, paint)
+                    }
+                    'C' -> {
+                        canvas.drawRect(x, top, x + stroke, bottom, paint)
+                        canvas.drawRect(x, top, x + w, top + stroke, paint)
+                        canvas.drawRect(x, bottom - stroke, x + w, bottom, paint)
+                    }
+                    'L' -> {
+                        canvas.drawRect(x, top, x + stroke, bottom, paint)
+                        canvas.drawRect(x, bottom - stroke, x + w, bottom, paint)
+                    }
+                    'W' -> {
+                        canvas.drawRect(x, top, x + stroke, bottom, paint)
+                        canvas.drawRect(x + w / 2f - stroke / 2f, midY, x + w / 2f + stroke / 2f, bottom, paint)
+                        canvas.drawRect(x + w - stroke, top, x + w, bottom, paint)
+                        canvas.drawRect(x, bottom - stroke, x + w, bottom, paint)
+                    }
+                    'H' -> {
+                        canvas.drawRect(x, top, x + stroke, bottom, paint)
+                        canvas.drawRect(x + w - stroke, top, x + w, bottom, paint)
+                        canvas.drawRect(x, midY - stroke / 2f, x + w, midY + stroke / 2f, paint)
+                    }
+                    'Y' -> {
+                        canvas.drawRect(x, top, x + stroke, midY, paint)
+                        canvas.drawRect(x + w - stroke, top, x + w, midY, paint)
+                        canvas.drawRect(x, midY, x + w, midY + stroke, paint)
+                        canvas.drawRect(x + w / 2f - stroke / 2f, midY, x + w / 2f + stroke / 2f, bottom, paint)
+                    }
+                    '-' -> {
+                        canvas.drawRect(x, midY - stroke / 2f, x + w, midY + stroke / 2f, paint)
+                    }
+                    '\'' -> {
+                        canvas.drawRect(x, top, x + w, top + stroke * 2f, paint)
                     }
                 }
                 cursorX += letterWidth(ch)
