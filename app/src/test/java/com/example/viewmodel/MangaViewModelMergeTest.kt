@@ -363,4 +363,77 @@ class MangaViewModelMergeTest {
 
         pageBitmap.recycle()
     }
+
+    @Test
+    fun `boundFallbackRefinedBox allows controlled 2_4x expansion inside uniform narrow dark pill`() {
+        val bmp = Bitmap.createBitmap(200, 300, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.WHITE)
+        }
+        val canvas = Canvas(bmp)
+        val darkPaint = Paint().apply { color = Color.rgb(20, 20, 24) }
+        canvas.drawRect(70f, 30f, 118f, 230f, darkPaint) // 48 x 200 narrow dark pill
+        val whiteTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 18f
+        }
+        canvas.drawText("HI", 84f, 130f, whiteTextPaint)
+
+        val textRect = Rect(76, 85, 112, 165) // 36 x 80
+        val pillRefined = Rect(72, 34, 116, 224) // 44 x 190 (1.22x wide, 2.375x tall <= 2.4x)
+        val bounded = FallbackBubbleSupport.boundFallbackRefinedBox(
+            bitmap = bmp,
+            textRect = textRect,
+            rawRefined = pillRefined,
+            isDarkBubble = true
+        )
+        assertEquals(pillRefined, bounded)
+        bmp.recycle()
+    }
+
+    @Test
+    fun `sortCandidatesByPanelReadingOrder orders manga RTL panels and webtoon LTR panels`() {
+        fun cand(label: String, rect: Rect) = BubbleCandidate(
+            targetBox = rect,
+            text = label,
+            textRect = rect,
+            isBubble = true,
+            isDark = false,
+            bubbleBounds = rect
+        )
+
+        // Tall right panel (P_R) + two stacked left panels (P_TL, P_BL)
+        val pRight = Rect(520, 20, 960, 620)
+        val pTopLeft = Rect(20, 20, 480, 300)
+        val pBotLeft = Rect(20, 320, 480, 620)
+        val panels = listOf(pTopLeft, pBotLeft, pRight)
+
+        val cTopLeft = cand("TL", Rect(120, 80, 300, 180))
+        val cBotLeft = cand("BL", Rect(120, 400, 300, 500))
+        val cRightTop = cand("RT", Rect(740, 60, 900, 160))
+        val cRightBot = cand("RB", Rect(560, 220, 720, 320))
+
+        val mangaOrdered = FallbackBubbleSupport.sortCandidatesByPanelReadingOrder(
+            candidates = listOf(cBotLeft, cRightBot, cTopLeft, cRightTop),
+            pagePanels = panels,
+            originLang = "Japonca"
+        )
+        assertEquals(listOf("RT", "RB", "TL", "BL"), mangaOrdered.map { it.text })
+
+        // Webtoon / English LTR order: top-to-bottom, left-to-right
+        val webtoonPanels = listOf(
+            Rect(40, 500, 960, 900),
+            Rect(40, 40, 480, 420),
+            Rect(500, 40, 960, 420)
+        )
+        val w1 = cand("W1", Rect(100, 100, 300, 200))
+        val w2 = cand("W2", Rect(580, 100, 780, 200))
+        val w3 = cand("W3", Rect(200, 600, 420, 720))
+
+        val webtoonOrdered = FallbackBubbleSupport.sortCandidatesByPanelReadingOrder(
+            candidates = listOf(w3, w2, w1),
+            pagePanels = webtoonPanels,
+            originLang = "İngilizce"
+        )
+        assertEquals(listOf("W1", "W2", "W3"), webtoonOrdered.map { it.text })
+    }
 }

@@ -63,6 +63,8 @@ object OverlayLayoutPolicy {
 
     /**
      * Detects uncontained micro-slivers below minimum readable font threshold.
+     * Tall vertical pill bubbles (`heightDp >= widthDp * 1.9f && widthDp >= 14f`)
+     * are valid vertical chambers and must not be widened into horizontal slivers.
      */
     fun isPathologicalSliver(
         widthDp: Float,
@@ -70,6 +72,8 @@ object OverlayLayoutPolicy {
         lineCount: Int = 0,
         textLength: Int = 0
     ): Boolean {
+        if (widthDp < 14f) return true
+        if (heightDp >= widthDp * 1.9f && widthDp >= 14f) return false
         return widthDp < 24f
     }
 

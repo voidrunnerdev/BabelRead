@@ -27,6 +27,11 @@ data class BubbleBox(
     }
 }
 
+data class BubbleDetectionOutput(
+    val bubbles: List<BubbleBox>,
+    val panels: List<RectF>
+)
+
 class BubbleDetector(context: Context) {
     val yoloDetector = YoloBubbleDetector(context)
 
@@ -45,7 +50,20 @@ class BubbleDetector(context: Context) {
         bitmap: Bitmap?,
         pageIndex: Int = 0,
         confidenceThreshold: Float = 0.25f
-    ): List<BubbleBox> = withContext(Dispatchers.Default) {
-        yoloDetector.detectSpeechBubbles(bitmap, confidenceThreshold)
+    ): List<BubbleBox> = detectBubblesWithPanels(bitmap, pageIndex, confidenceThreshold).bubbles
+
+    /**
+     * Sayfadaki konuşma balonları/metin bölgeleri ile okuma sırası için panel sınırlarını döndürür.
+     */
+    suspend fun detectBubblesWithPanels(
+        bitmap: Bitmap?,
+        pageIndex: Int = 0,
+        confidenceThreshold: Float = 0.25f
+    ): BubbleDetectionOutput = withContext(Dispatchers.Default) {
+        val result = yoloDetector.detectSpeechBubblesWithPanelsResult(bitmap, confidenceThreshold)
+        BubbleDetectionOutput(
+            bubbles = result.detections,
+            panels = result.panels
+        )
     }
 }

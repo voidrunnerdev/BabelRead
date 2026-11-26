@@ -314,12 +314,59 @@ class DarkBubbleDetectorTest {
         assertEquals(0, vertical.second % 32)
 
         val spread = detector.computeDynamicRectInputSize(2400, 1600, maxLongSide = 1024, stride = 32)
-        assertEquals(1024 to 672, spread)
+        assertEquals(1024 to 704, spread)
         assertEquals(0, spread.first % 32)
         assertEquals(0, spread.second % 32)
 
+        val ceiledPortrait = detector.computeDynamicRectInputSize(800, 1400, maxLongSide = 1024, stride = 32)
+        assertEquals(608 to 1024, ceiledPortrait)
+        assertEquals(0, ceiledPortrait.first % 32)
+        assertEquals(0, ceiledPortrait.second % 32)
+
         val extremeStrip = detector.computeDynamicRectInputSize(40, 4000, maxLongSide = 1024, stride = 32)
         assertEquals(32 to 1024, extremeStrip)
+    }
+
+    @Test
+    fun `extractSegmentationContourProfile uses bilinear interpolation for narrow vertical pills`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val detector = YoloBubbleDetector(context)
+
+        val inputW = 736
+        val inputH = 1024
+        val letterbox = detector.computeLetterboxTransform(1000, 1400, inputW, inputH)
+        val protoW = inputW / 4 // 184
+        val protoH = inputH / 4 // 256
+        val protoData = FloatArray(protoW * protoH) { -4f }
+
+        // Narrow vertical pill: ~6 proto pixels wide (x=50..55), ~32 proto pixels tall (y=80..111)
+        for (py in 80 until 112) {
+            for (px in 51..54) {
+                protoData[py * protoW + px] = 4f
+            }
+        }
+
+        val normBox = RectF(
+            (50f * 4f - letterbox.padLeft) / letterbox.contentW,
+            (80f * 4f - letterbox.padTop) / letterbox.contentH,
+            (56f * 4f - letterbox.padLeft) / letterbox.contentW,
+            (112f * 4f - letterbox.padTop) / letterbox.contentH
+        )
+        val profile = detector.extractSegmentationContourProfile(
+            normBox = normBox,
+            letterbox = letterbox,
+            protoData = protoData,
+            protoW = protoW,
+            protoH = protoH,
+            maskCoeffs = floatArrayOf(1f),
+            numMaskCoeffs = 1
+        )
+        assertNotNull("Narrow vertical pill (subW=6 >= 4) must produce bilinear contour profile", profile)
+        assertTrue("Expected usable bilinear contour profile", profile!!.isUsable)
+        assertTrue("Expected >= 8 upsampled rows", profile.rowCount >= 8)
+        val midRow = profile.rowCount / 2
+        assertTrue(profile.rowLeftFractions[midRow] < 0.35f)
+        assertTrue(profile.rowRightFractions[midRow] > 0.65f)
     }
 
     @Test
@@ -553,5 +600,153 @@ class DarkBubbleDetectorTest {
         assertEquals(1, rescuedTexts.size)
         assertEquals("text", rescuedTexts.first().label)
         assertEquals(darkTextNorm, rescuedTexts.first().box)
+
+        // 6. Single narrow dark vertical pill on an otherwise white page must trigger inverted pass
+        val narrowPillPage = createWhitePage(800, 1200)
+        val narrowCanvas = Canvas(narrowPillPage)
+        narrowCanvas.drawRoundRect(RectF(720f, 380f, 754f, 620f), 16f, 16f, blackPaint)
+        val smallWhiteText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.CENTER
+        }
+        for (i in 0 until 6) {
+            narrowCanvas.drawText("A", 737f, 420f + i * 32f, smallWhiteText)
+        }
+        assertTrue(
+            "Single narrow dark pill with white text must trigger inverted pass",
+            detector.shouldRunInvertedYoloPass(narrowPillPage)
+        )
+    }
+
+    @Test
+    fun `rescueTextBearingPanels promotes uniform rectangular text boxes while preserving real frame panels`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val detector = YoloBubbleDetector(context)
+        val page = createWhitePage(600, 900)
+        val canvas = Canvas(page)
+
+        // 1. Small white rectangular bubble mislabeled as panel, containing a text box
+        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            strokeWidth = 3f
+            style = Paint.Style.STROKE
+        }
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            textSize = 22f
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawRect(RectF(60f, 80f, 270f, 210f), borderPaint)
+        canvas.drawText("INSIDE", 165f, 150f, textPaint)
+
+        // 2. Large scenic manga frame panel with non-uniform artwork (must remain in remainingPanels)
+        val artPaint = Paint().apply { style = Paint.Style.FILL }
+        for (row in 0 until 8) {
+            artPaint.color = if (row % 2 == 0) Color.rgb(40, 40, 40) else Color.rgb(200, 200, 200)
+            canvas.drawRect(RectF(40f, 300f + row * 60f, 560f, 360f + row * 60f), artPaint)
+        }
+
+        val smallPanelBox = RectF(60f / 600f, 80f / 900f, 270f / 600f, 210f / 900f)
+        val smallTextBox = RectF(90f / 600f, 110f / 900f, 240f / 600f, 180f / 900f)
+        val largeFrameBox = RectF(40f / 600f, 300f / 900f, 560f / 600f, 780f / 900f)
+
+        val dummyProfile = com.example.util.ContourScanlineProfile(
+            FloatArray(10) { 0.05f },
+            FloatArray(10) { 0.95f },
+            0.5f,
+            0.5f
+        )
+        val textDet = YoloBubbleDetector.YoloDetection(3, "text", 0.85f, smallTextBox, dummyProfile)
+        val smallPanel = YoloBubbleDetector.YoloDetection(1, "panel", 0.72f, smallPanelBox, dummyProfile)
+        val largePanel = YoloBubbleDetector.YoloDetection(1, "panel", 0.93f, largeFrameBox, null)
+
+        val (rescued, remainingPanels) = detector.rescueTextBearingPanels(
+            bitmap = page,
+            detections = listOf(textDet),
+            panels = listOf(smallPanel, largePanel)
+        )
+
+        assertTrue(
+            "Uniform small text-bearing panel must be promoted to bubble with contour intact",
+            rescued.any { it.label == "bubble" && it.box == smallPanelBox && it.contourProfile == dummyProfile }
+        )
+        assertEquals(1, remainingPanels.size)
+        assertEquals(largeFrameBox, remainingPanels.first().box)
+    }
+
+    @Test
+    fun `fuseDetectionsWbf fuses overlapping bubbles preserving contour and maps missed RT-DETR detections`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val detector = YoloBubbleDetector(context)
+
+        val yoloContour = com.example.util.ContourScanlineProfile(
+            FloatArray(10) { 0.1f },
+            FloatArray(10) { 0.9f },
+            0.5f,
+            0.5f
+        )
+        val yoloBubble = YoloBubbleDetector.YoloDetection(
+            classId = 0,
+            label = "bubble",
+            confidence = 0.80f,
+            box = RectF(0.10f, 0.10f, 0.30f, 0.30f),
+            contourProfile = yoloContour
+        )
+        val orphanText = YoloBubbleDetector.YoloDetection(
+            classId = 3,
+            label = "text",
+            confidence = 0.75f,
+            box = RectF(0.55f, 0.55f, 0.75f, 0.75f),
+            contourProfile = null
+        )
+        assertTrue(detector.hasOrphanTextDetection(listOf(yoloBubble, orphanText)))
+
+        val rtMatchingBubble = YoloBubbleDetector.YoloDetection(
+            classId = 0,
+            label = "bubble",
+            confidence = 0.60f,
+            box = RectF(0.11f, 0.11f, 0.31f, 0.31f)
+        )
+        val rtInnerTextBubble = YoloBubbleDetector.YoloDetection(
+            classId = 1,
+            label = "text_bubble",
+            confidence = 0.70f,
+            box = RectF(0.14f, 0.14f, 0.26f, 0.26f)
+        )
+        val rtMissedBubble = YoloBubbleDetector.YoloDetection(
+            classId = 0,
+            label = "bubble",
+            confidence = 0.68f,
+            box = RectF(0.52f, 0.52f, 0.78f, 0.78f)
+        )
+        val rtTextFree = YoloBubbleDetector.YoloDetection(
+            classId = 2,
+            label = "text_free",
+            confidence = 0.66f,
+            box = RectF(0.80f, 0.10f, 0.92f, 0.22f)
+        )
+
+        val fused = detector.fuseDetectionsWbf(
+            yoloDetections = listOf(yoloBubble, orphanText),
+            rtDetrDetections = listOf(rtMatchingBubble, rtInnerTextBubble, rtMissedBubble, rtTextFree)
+        )
+
+        assertEquals(2, fused.count { it.label == "bubble" })
+        val fusedPrimary = fused.first { it.contourProfile != null }
+        assertEquals(yoloContour, fusedPrimary.contourProfile)
+        // Confidence-weighted average of 0.10 (w=0.8) and 0.11 (w=0.6) -> ~0.1043
+        assertEquals(0.1043f, fusedPrimary.box.left, 0.002f)
+        assertTrue("Inner text_bubble already covered by fused bubble must not duplicate", fused.none { it.label == "text_bubble" })
+        assertEquals(1, fused.count { it.label == "sfx" })
+        assertEquals(1, fused.count { it.label == "text" })
+
+        val output = BubbleDetectionOutput(
+            bubbles = listOf(BubbleBox(id = 1, bounds = fusedPrimary.box, confidence = 0.8f, label = "bubble")),
+            panels = listOf(RectF(0.05f, 0.05f, 0.95f, 0.95f))
+        )
+        assertEquals(1, output.bubbles.size)
+        assertEquals(1, output.panels.size)
     }
 }

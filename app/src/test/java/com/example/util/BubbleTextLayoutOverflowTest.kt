@@ -10,9 +10,13 @@ import android.graphics.Typeface
 import com.example.ui.screens.computeBubblePaddingDp
 import com.example.ui.screens.computeCanvasTextTransform
 import com.example.ui.screens.resolveDrawIsRectangularBox
+import com.example.ui.screens.resolveFloatingHaloStrokeColor
 import com.example.ui.screens.resolveIsRectangularBox
 import com.example.ui.screens.resolveOverlayBackgroundBoundsDp
+import com.example.ui.screens.resolveShouldDrawFloatingHaloText
+import com.example.ui.screens.shouldDrawNaturalBubbleBorder
 import com.example.ui.screens.shouldDrawRectangularBorder
+import com.example.ui.screens.shouldExpandMicroSliver
 import java.util.Locale
 import kotlin.math.sqrt
 import org.junit.Assert.assertEquals
@@ -423,5 +427,135 @@ class BubbleTextLayoutOverflowTest {
             assertTrue(line.leftPx >= span.leftPx - 0.5f)
             assertTrue(line.leftPx + line.widthPx <= span.rightPx + 0.5f)
         }
+    }
+
+    @Test
+    fun `natural bubble border is suppressed when real mask bitmap preserves artwork outline`() {
+        assertFalse(
+            "Masked normal bubble must rely on artist's real brush stroke instead of synthetic 1.5dp border",
+            shouldDrawNaturalBubbleBorder(
+                isSubtitleMode = false,
+                isBubble = true,
+                hasRealMaskBitmap = true,
+                isFallbackExpanded = false,
+                bubbleStyle = "Doğal Balon"
+            )
+        )
+        assertTrue(
+            "Unmasked bubble draws fallback border",
+            shouldDrawNaturalBubbleBorder(
+                isSubtitleMode = false,
+                isBubble = true,
+                hasRealMaskBitmap = false,
+                isFallbackExpanded = false,
+                bubbleStyle = "Doğal Balon"
+            )
+        )
+        assertTrue(
+            "Expanded fallback bubble draws protective border",
+            shouldDrawNaturalBubbleBorder(
+                isSubtitleMode = false,
+                isBubble = true,
+                hasRealMaskBitmap = true,
+                isFallbackExpanded = true,
+                bubbleStyle = "Doğal Balon"
+            )
+        )
+        assertTrue(
+            "Dark theme style keeps contrast border",
+            shouldDrawNaturalBubbleBorder(
+                isSubtitleMode = false,
+                isBubble = true,
+                hasRealMaskBitmap = true,
+                isFallbackExpanded = false,
+                bubbleStyle = "Koyu Zemin"
+            )
+        )
+        assertTrue(
+            "Classic box style keeps border",
+            shouldDrawNaturalBubbleBorder(
+                isSubtitleMode = false,
+                isBubble = true,
+                hasRealMaskBitmap = true,
+                isFallbackExpanded = false,
+                bubbleStyle = "Klasik Kutu"
+            )
+        )
+        assertFalse(
+            shouldDrawNaturalBubbleBorder(
+                isSubtitleMode = true,
+                isBubble = true,
+                hasRealMaskBitmap = false,
+                isFallbackExpanded = true
+            )
+        )
+    }
+
+    @Test
+    fun `floating free text without background color uses halo text instead of opaque box`() {
+        assertTrue(
+            resolveShouldDrawFloatingHaloText(
+                isBubble = false,
+                hasBackgroundColor = false,
+                bubbleStyle = "Doğal Balon"
+            )
+        )
+        assertFalse(
+            "Narration box with detected backgroundColor keeps opaque box",
+            resolveShouldDrawFloatingHaloText(
+                isBubble = false,
+                hasBackgroundColor = true,
+                bubbleStyle = "Doğal Balon"
+            )
+        )
+        assertFalse(
+            resolveShouldDrawFloatingHaloText(
+                isBubble = true,
+                hasBackgroundColor = false,
+                bubbleStyle = "Doğal Balon"
+            )
+        )
+        assertFalse(
+            resolveShouldDrawFloatingHaloText(
+                isBubble = false,
+                hasBackgroundColor = false,
+                bubbleStyle = "Alt Yazı (Şeffaf)"
+            )
+        )
+        assertEquals(
+            androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.92f),
+            resolveFloatingHaloStrokeColor(androidx.compose.ui.graphics.Color.White)
+        )
+        assertEquals(
+            androidx.compose.ui.graphics.Color.White.copy(alpha = 0.96f),
+            resolveFloatingHaloStrokeColor(androidx.compose.ui.graphics.Color.Black)
+        )
+    }
+
+    @Test
+    fun `rectangular bubble layout succeeds via rounded rectangle envelope and vertical pill resists horizontal widening`() {
+        assertFalse(shouldExpandMicroSliver(widthDp = 18f, heightDp = 90f, isSliver = true))
+        assertTrue(shouldExpandMicroSliver(widthDp = 10f, heightDp = 50f, isSliver = true))
+
+        val density = 2f
+        val rectResult = BubbleTextLayoutEngine.optimizeLayout(
+            text = "Bu dikdörtgen kutu metni sorunsuz yerleşmeli!",
+            bubbleBounds = RectF(0f, 0f, 120f, 64f),
+            horizontalPaddingDp = 5f,
+            verticalPaddingDp = 4f,
+            minSp = 6.0f,
+            maxSp = 20f,
+            density = density,
+            spToPx = { it * density },
+            layoutLocale = trLocale,
+            targetLanguage = "tr",
+            measureTypeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD),
+            isRectangular = true,
+            safeInsetRatio = BubbleTextLayoutEngine.READER_SAFE_INSET_RATIO,
+            minSafeInsetPx = BubbleTextLayoutEngine.READER_MIN_SAFE_INSET_PX,
+            maxSafeInsetPx = BubbleTextLayoutEngine.READER_MAX_SAFE_INSET_PX
+        )
+        assertNotNull(rectResult)
+        assertTrue("ROUNDED_RECTANGLE layout must fit cleanly", rectResult!!.fitsInside)
     }
 }

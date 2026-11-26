@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.Typeface
 import androidx.datastore.preferences.core.edit
 import androidx.test.core.app.ApplicationProvider
@@ -416,5 +417,130 @@ class PpOcrV5EngineTest {
 
         assertEquals("SPOT US", service.cleanOcrArtifacts("SPOT US", "İngilizce"))
         assertEquals("SPOT US", service.joinTextFragments("SPOT", "US", isFirstBeforeSecond = true))
+    }
+
+    @Test
+    fun `sharpenLineBitmapForOcr boosts contrast and separates blurred narrow gaps`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val engine = PpOcrV5Engine(context, PpOcrV5Engine.Variant.ENGLISH_ONLY)
+
+        // Low-contrast blurred line crop ("SPOT" [x=10..34] | gray blurred gap [x=35..38] | "US" [x=39..56])
+        val blurry = Bitmap.createBitmap(70, 22, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 22) {
+            for (x in 0 until 70) {
+                val lum = when {
+                    y in 5..16 && x in 10..34 -> 80
+                    y in 5..16 && x in 35..38 -> 150 // blurred gray inter-word space
+                    y in 5..16 && x in 39..56 -> 80
+                    else -> 180
+                }
+                blurry.setPixel(x, y, Color.rgb(lum, lum, lum))
+            }
+        }
+
+        val sharpened = engine.sharpenLineBitmapForOcr(blurry)
+        val strokeLum = Color.red(sharpened.getPixel(22, 10))
+        val gapLum = Color.red(sharpened.getPixel(36, 10))
+        val bgLum = Color.red(sharpened.getPixel(2, 2))
+        assertTrue("Expected stroke darkened ($strokeLum)", strokeLum < 60)
+        assertTrue("Expected background stretched bright ($bgLum)", bgLum >= 230)
+        assertTrue("Expected word gap brighter than strokes ($gapLum > $strokeLum + 100)", gapLum > strokeLum + 100)
+        if (sharpened !== blurry) sharpened.recycle()
+        blurry.recycle()
+    }
+
+    @Test
+    fun `narrow vertical pill detection triggers recovery only on tall narrow regions`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val engine = PpOcrV5Engine(context, PpOcrV5Engine.Variant.ENGLISH_ONLY)
+
+        val pill = Rect(10, 10, 54, 210) // 44 x 200
+        assertTrue(engine.isNarrowVerticalPill(pill))
+        assertTrue(engine.needsNarrowVerticalRecovery(pill, emptyList()))
+        assertTrue(
+            engine.needsNarrowVerticalRecovery(
+                pill,
+                listOf(PpOcrV5Detector.DetectedLine(Rect(20, 40, 42, 65), 0.7f))
+            )
+        )
+        assertFalse(
+            engine.needsNarrowVerticalRecovery(
+                pill,
+                listOf(
+                    PpOcrV5Detector.DetectedLine(Rect(14, 20, 50, 70), 0.8f),
+                    PpOcrV5Detector.DetectedLine(Rect(14, 80, 50, 140), 0.8f)
+                )
+            )
+        )
+
+        val normalBubble = Rect(0, 0, 180, 120)
+        assertFalse(engine.isNarrowVerticalPill(normalBubble))
+        assertFalse(engine.needsNarrowVerticalRecovery(normalBubble, emptyList()))
+    }
+
+    @Test
+    fun `maskOriginalTextOnBitmap uses gradient-matched fill on colored gradient bubbles`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val service = TranslationService(
+            correctionDao = object : TranslationCorrectionDao {
+                override suspend fun getCorrectionForText(originalText: String, targetLang: String): TranslationCorrectionEntity? = null
+                override suspend fun insertCorrection(correction: TranslationCorrectionEntity) {}
+                override suspend fun deleteCorrection(id: Int) {}
+                override suspend fun deleteCorrectionByText(originalText: String) {}
+                override fun getAllCorrections(): Flow<List<TranslationCorrectionEntity>> = flowOf(emptyList())
+                override suspend fun clearAll() {}
+            },
+            context = context
+        )
+
+        val bmp = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 200) {
+            val t = y / 199f
+            val r = (120 + 90 * t).toInt()
+            val g = (170 + 60 * t).toInt()
+            val b = (230 + 20 * t).toInt()
+            for (x in 0 until 200) {
+                bmp.setPixel(x, y, Color.rgb(r, g, b))
+            }
+        }
+        // Draw dark text inside the gradient bubble
+        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.BLACK
+            textSize = 24f
+        }
+        Canvas(bmp).drawText("GRADIENT", 44f, 105f, textPaint)
+
+        val textRect = Rect(40, 76, 160, 114)
+        val bubbleRect = Rect(20, 20, 180, 180)
+        assertTrue(
+            service.isColoredOrGradientRegion(
+                bitmap = bmp,
+                maskRect = RectF(textRect),
+                maskColor = Color.rgb(165, 200, 240),
+                isDarkBubble = false
+            )
+        )
+
+        val block = TextBlockObj(
+            originalText = "GRADIENT",
+            translatedText = "GRADYAN",
+            boundingBox = textRect,
+            bubbleBox = bubbleRect,
+            isBubble = true,
+            isDarkBubble = false,
+            backgroundColor = Color.rgb(165, 200, 240)
+        )
+        val maskedResult = service.maskOriginalTextOnBitmap(bmp, listOf(block))
+        val masked = maskedResult.bitmap
+        val topMaskedPx = masked.getPixel(100, textRect.top)
+        val botMaskedPx = masked.getPixel(100, textRect.bottom - 1)
+        assertTrue(
+            "Top masked region should follow cooler upper gradient (${Color.red(topMaskedPx)} < ${Color.red(botMaskedPx)})",
+            Color.red(topMaskedPx) + 12 < Color.red(botMaskedPx)
+        )
+        assertTrue("Text strokes inside masked area should be erased", Color.red(masked.getPixel(100, 95)) > 120)
+
+        if (masked !== bmp) masked.recycle()
+        bmp.recycle()
     }
 }

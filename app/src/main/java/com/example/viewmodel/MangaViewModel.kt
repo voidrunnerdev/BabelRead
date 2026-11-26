@@ -38,6 +38,7 @@ import com.example.extensions.ExtensionMangaSource
 import com.example.i18n.TranslationLanguages
 import eu.kanade.tachiyomi.source.model.FilterList
 import com.example.service.BubbleBox
+import com.example.service.BubbleDetectionOutput
 import com.example.service.BubbleDetector
 import com.example.service.DetectorModel
 import com.example.service.BulkLocalImportResult
@@ -906,6 +907,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         _readerLoading.value = false
         _translatedPagesMap.value = emptyMap()
         _detectedBubblesMap.value = emptyMap()
+        _detectedPanelsMap.value = emptyMap()
         _maskedPagesMap.value = emptyMap()
         _translationActive.value = false
         translationPipelineCursor = 0
@@ -1267,6 +1269,9 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private val _detectedBubblesMap = MutableStateFlow<Map<Int, List<BubbleBox>>>(emptyMap())
     val detectedBubblesMap = _detectedBubblesMap.asStateFlow()
 
+    private val _detectedPanelsMap = MutableStateFlow<Map<Int, List<RectF>>>(emptyMap())
+    private val foregroundDetectingPages = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+
     private val _maskedPagesMap = MutableStateFlow<Map<Int, Bitmap>>(emptyMap())
     val maskedPagesMap = _maskedPagesMap.asStateFlow()
 
@@ -1463,6 +1468,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             _readerError.value = null
             _translatedPagesMap.value = emptyMap()
             _detectedBubblesMap.value = emptyMap()
+            _detectedPanelsMap.value = emptyMap()
             _maskedPagesMap.value = emptyMap()
             _currentPageIndex.value = 0
             evictReaderBitmapCaches()
@@ -1728,21 +1734,42 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     ) {
                         delay(250)
                     }
+                    // Yield to active foreground translation pages so background prefetch
+                    // never locks ONNX Runtime behind a future page.
+                    var yieldCount = 0
+                    while (readerGeneration.get() == generation &&
+                        _translationActive.value &&
+                        (foregroundDetectingPages.isNotEmpty() ||
+                            (pageIndex != _currentPageIndex.value &&
+                                !_detectedBubblesMap.value.containsKey(_currentPageIndex.value) &&
+                                inProgressPages.contains("$generation:${_currentPageIndex.value}"))) &&
+                        yieldCount < 25
+                    ) {
+                        delay(60)
+                        yieldCount++
+                    }
                     if (readerGeneration.get() != generation || !_translationActive.value) break
                     if (_detectedBubblesMap.value.containsKey(pageIndex)) continue
 
                     val bitmap = getPageBitmap(pageIndex, fullRes = true) ?: getPageBitmap(pageIndex) ?: continue
                     val confThreshold = preferences.confidenceThreshold.first()
-                    val detections: List<BubbleBox> = try {
-                        bubbleDetector.detectBubbles(bitmap, pageIndex, confThreshold)
+                    val output: BubbleDetectionOutput = try {
+                        bubbleDetector.detectBubblesWithPanels(bitmap, pageIndex, confThreshold)
                     } catch (e: CancellationException) {
                         throw e
                     } catch (t: Throwable) {
-                        emptyList()
+                        BubbleDetectionOutput(emptyList(), emptyList())
                     }
                     _detectedBubblesMap.update { current ->
                         if (readerGeneration.get() == generation && !current.containsKey(pageIndex)) {
-                            current + (pageIndex to detections)
+                            current + (pageIndex to output.bubbles)
+                        } else {
+                            current
+                        }
+                    }
+                    _detectedPanelsMap.update { current ->
+                        if (readerGeneration.get() == generation && !current.containsKey(pageIndex)) {
+                            current + (pageIndex to output.panels)
                         } else {
                             current
                         }
@@ -2062,6 +2089,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
             detectionPrefetchJob?.cancel()
             detectionPrefetchJob = null
             _detectedBubblesMap.value = emptyMap()
+            _detectedPanelsMap.value = emptyMap()
         }
         _isTranslationLoading.value = false
 
@@ -2759,21 +2787,39 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
                     // 1. YOLO açıksa balon/metin kutularını önce topla: bölge OCR
                     // bu kutuların içinde çalışır, tüm sayfa taranmaz.
-                    val yoloBubbles = if (yoloEnabled) {
+                    val detectionOutput = if (yoloEnabled) {
                         val prefetchedBubbles = _detectedBubblesMap.value[pageIdx]
                         if (prefetchedBubbles != null) {
                             Log.d("TR", "Sayfa $pageIdx balon tespiti ön-taramadan alındı (${prefetchedBubbles.size} kutu)")
-                            prefetchedBubbles
+                            BubbleDetectionOutput(
+                                bubbles = prefetchedBubbles,
+                                panels = _detectedPanelsMap.value[pageIdx].orEmpty()
+                            )
                         } else {
+                            foregroundDetectingPages.add(pageIdx)
                             try {
-                                bubbleDetector.detectBubbles(bitmap, pageIdx, confThreshold)
+                                bubbleDetector.detectBubblesWithPanels(bitmap, pageIdx, confThreshold).also { output ->
+                                    _detectedPanelsMap.update { current ->
+                                        if (readerGeneration.get() == generation) current + (pageIdx to output.panels) else current
+                                    }
+                                }
                             } catch (e: CancellationException) {
                                 throw e
                             } catch (t: Throwable) {
-                                emptyList()
+                                BubbleDetectionOutput(emptyList(), emptyList())
+                            } finally {
+                                foregroundDetectingPages.remove(pageIdx)
                             }
                         }
-                    } else emptyList()
+                    } else BubbleDetectionOutput(emptyList(), emptyList())
+                    val yoloBubbles = detectionOutput.bubbles
+                    val pagePanels = detectionOutput.panels.mapNotNull { norm ->
+                        val left = (norm.left * bmpW).toInt().coerceIn(0, bitmap.width - 1)
+                        val top = (norm.top * bmpH).toInt().coerceIn(0, bitmap.height - 1)
+                        val right = (norm.right * bmpW).toInt().coerceIn(left + 1, bitmap.width)
+                        val bottom = (norm.bottom * bmpH).toInt().coerceIn(top + 1, bitmap.height)
+                        Rect(left, top, right, bottom).takeIf { !it.isEmpty }
+                    }
                     val timingAfterDetect = System.currentTimeMillis()
 
                     // 2. Bölge OCR: yalnızca balon kutuları okunur. Balon dışı
@@ -3293,9 +3339,24 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
                     // Metinleri çevir
                     if (mergedCandidates.isNotEmpty()) {
+                        val detectedLang = if (forcedSourceCode != null) {
+                            originLang
+                        } else {
+                            val ocrDefaultLang = if (isPpOcrAny) {
+                                ppOriginLang ?: originLang
+                            } else {
+                                originLang
+                            }
+                            translationService.detectRealLanguage(ocrBlocks, ocrDefaultLang)
+                        }
+                        val orderedCandidates = FallbackBubbleSupport.sortCandidatesByPanelReadingOrder(
+                            candidates = mergedCandidates,
+                            pagePanels = pagePanels,
+                            originLang = detectedLang
+                        )
                         val pageWidthPx = bitmap.width.coerceAtLeast(1)
                         val dpPerPx = 380f / pageWidthPx.toFloat()
-                        val candidateRequests = mergedCandidates.map { cand ->
+                        val candidateRequests = orderedCandidates.map { cand ->
                             val r = cand.textRect
                             val id = "$pageIdx:${r.left},${r.top},${r.right},${r.bottom}:${cand.text.hashCode()}"
                             if (cand.isBubble) {
@@ -3317,16 +3378,6 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             } else {
                                 TranslationRequest(id, cand.text)
                             }
-                        }
-                        val detectedLang = if (forcedSourceCode != null) {
-                            originLang
-                        } else {
-                            val ocrDefaultLang = if (isPpOcrAny) {
-                                ppOriginLang ?: originLang
-                            } else {
-                                originLang
-                            }
-                            translationService.detectRealLanguage(ocrBlocks, ocrDefaultLang)
                         }
                         val gemModel = preferences.geminiModel.first()
                         val engineIsMlKit = prefEngine.trim().let {
@@ -3356,7 +3407,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             emitTranslationNotice("Çeviri başarısız (motor: $prefEngine). İnternet bağlantısını ve API anahtarını kontrol edin.")
                         }
 
-                        mergedCandidates.forEachIndexed { idx, cand ->
+                        orderedCandidates.forEachIndexed { idx, cand ->
                             val request = candidateRequests[idx]
                             val result = resultsById[request.id]
                             if (result == null) {
@@ -3397,7 +3448,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 )
                             )
                         }
-                        translationCanBeCached = finalBlocks.size == mergedCandidates.size &&
+                        translationCanBeCached = finalBlocks.size == orderedCandidates.size &&
                             finalBlocks.all { it.translationSucceeded }
                     } else {
                         Log.d("TR", "Çevrilecek aday bulunamadı (candidates=0).")
@@ -5310,17 +5361,195 @@ internal object FallbackBubbleSupport {
             rawRefined.right.coerceIn(innerRight, safeClamp.right),
             rawRefined.bottom.coerceIn(innerBottom, safeClamp.bottom)
         )
+        val withinControlledExpansion = rawRefined.width() <= (textRect.width() * 2.4f).toInt() &&
+            rawRefined.height() <= (textRect.height() * 2.4f).toInt()
         if (shouldTightClamp) {
+            if (withinControlledExpansion &&
+                isMostlyUniformBubbleFill(bitmap, rawRefined, isDarkBubble, rimMedian)
+            ) {
+                return rawRefined
+            }
             return clampedRefined
         }
 
         // For light bubbles, reject runaway expansion when the expanded area isn't uniform light paper.
-        val overExpanded = rawRefined.width() > textRect.width() * 2.4f ||
-            rawRefined.height() > textRect.height() * 2.4f
-        if (overExpanded && !isMostlyUniformLightFill(bitmap, rawRefined)) {
+        if (!withinControlledExpansion && !isMostlyUniformLightFill(bitmap, rawRefined)) {
             return clampedRefined
         }
         return rawRefined
+    }
+
+    /**
+     * Orders translated candidates by panel-aware manga (RTL) or webtoon/English (LTR)
+     * reading order so batched LLM translation sees coherent dialogue flow.
+     */
+    fun sortCandidatesByPanelReadingOrder(
+        candidates: List<BubbleCandidate>,
+        pagePanels: List<Rect>,
+        originLang: String
+    ): List<BubbleCandidate> {
+        if (candidates.size <= 1) return candidates
+        val isRtl = originLang.equals("Japonca", ignoreCase = true) ||
+            originLang.equals("Japanese", ignoreCase = true)
+
+        fun <T> orderByTierAndColumn(items: List<Pair<T, Rect>>): List<T> {
+            if (items.size <= 1) return items.map { it.first }
+            val byTop = items.sortedWith(compareBy<Pair<T, Rect>> { it.second.top }.thenBy { it.second.left })
+            val tiers = ArrayList<MutableList<Pair<T, Rect>>>()
+            var tierTop = byTop[0].second.top
+            var tierBottom = byTop[0].second.bottom
+            var currentTier = mutableListOf(byTop[0])
+            for (i in 1 until byTop.size) {
+                val item = byTop[i]
+                val rect = item.second
+                val minH = minOf(rect.height(), (tierBottom - tierTop).coerceAtLeast(1))
+                val overlapsTierVertically = rect.top < tierBottom - (minH * 0.20f).toInt()
+                if (overlapsTierVertically) {
+                    currentTier.add(item)
+                    if (rect.bottom > tierBottom) tierBottom = rect.bottom
+                } else {
+                    tiers.add(currentTier)
+                    currentTier = mutableListOf(item)
+                    tierTop = rect.top
+                    tierBottom = rect.bottom
+                }
+            }
+            tiers.add(currentTier)
+
+            val ordered = ArrayList<T>(items.size)
+            for (tier in tiers) {
+                if (tier.size <= 1) {
+                    ordered.add(tier[0].first)
+                    continue
+                }
+                val sortedTier = if (isRtl) {
+                    tier.sortedWith(compareByDescending<Pair<T, Rect>> { it.second.right }.thenBy { it.second.top })
+                } else {
+                    tier.sortedWith(compareBy<Pair<T, Rect>> { it.second.left }.thenBy { it.second.top })
+                }
+                val columns = ArrayList<MutableList<Pair<T, Rect>>>()
+                var colLeft = sortedTier[0].second.left
+                var colRight = sortedTier[0].second.right
+                var currentCol = mutableListOf(sortedTier[0])
+                for (i in 1 until sortedTier.size) {
+                    val item = sortedTier[i]
+                    val rect = item.second
+                    val minW = minOf(rect.width(), (colRight - colLeft).coerceAtLeast(1))
+                    val overlapsColumn = if (isRtl) {
+                        rect.right > colLeft + (minW * 0.25f).toInt()
+                    } else {
+                        rect.left < colRight - (minW * 0.25f).toInt()
+                    }
+                    if (overlapsColumn) {
+                        currentCol.add(item)
+                        if (rect.left < colLeft) colLeft = rect.left
+                        if (rect.right > colRight) colRight = rect.right
+                    } else {
+                        columns.add(currentCol)
+                        currentCol = mutableListOf(item)
+                        colLeft = rect.left
+                        colRight = rect.right
+                    }
+                }
+                columns.add(currentCol)
+
+                for (col in columns) {
+                    col.sortWith(
+                        compareBy<Pair<T, Rect>> { it.second.top }
+                            .thenBy { if (isRtl) -it.second.right else it.second.left }
+                    )
+                    for (entry in col) ordered.add(entry.first)
+                }
+            }
+            return ordered
+        }
+
+        val validPanels = pagePanels.filter { !it.isEmpty }
+        if (validPanels.isEmpty()) {
+            return orderByTierAndColumn(
+                candidates.map { cand ->
+                    val box = cand.bubbleBounds.takeUnless { it.isEmpty } ?: cand.textRect
+                    cand to box
+                }
+            )
+        }
+
+        val groupedByPanel = HashMap<Int, MutableList<BubbleCandidate>>()
+        val unassigned = ArrayList<Pair<List<BubbleCandidate>, Rect>>()
+        for (cand in candidates) {
+            val box = cand.textRect.takeUnless { it.isEmpty } ?: cand.bubbleBounds
+            val boxArea = BubbleCandidateMerger.areaOf(box).coerceAtLeast(1L)
+            var bestPanelIdx = -1
+            var bestScore = 0f
+            var bestPanelArea = Long.MAX_VALUE
+            for ((pIdx, panel) in validPanels.withIndex()) {
+                val inter = BubbleCandidateMerger.overlapArea(box, panel)
+                val coverage = inter.toFloat() / boxArea
+                val containsCenter = panel.contains(box.centerX(), box.centerY())
+                val score = coverage + if (containsCenter) 0.08f else 0f
+                val panelArea = BubbleCandidateMerger.areaOf(panel)
+                if (score >= 0.20f &&
+                    (score > bestScore || (score == bestScore && panelArea < bestPanelArea))
+                ) {
+                    bestScore = score
+                    bestPanelIdx = pIdx
+                    bestPanelArea = panelArea
+                }
+            }
+            if (bestPanelIdx >= 0) {
+                groupedByPanel.getOrPut(bestPanelIdx) { ArrayList() }.add(cand)
+            } else {
+                unassigned.add(listOf(cand) to box)
+            }
+        }
+
+        val readingUnits = ArrayList<Pair<List<BubbleCandidate>, Rect>>(groupedByPanel.size + unassigned.size)
+        for ((pIdx, panelCands) in groupedByPanel) {
+            val orderedInsidePanel = orderByTierAndColumn(
+                panelCands.map { cand ->
+                    val box = cand.bubbleBounds.takeUnless { it.isEmpty } ?: cand.textRect
+                    cand to box
+                }
+            )
+            readingUnits.add(orderedInsidePanel to validPanels[pIdx])
+        }
+        readingUnits.addAll(unassigned)
+        return orderByTierAndColumn(readingUnits).flatten()
+    }
+
+    private fun isMostlyUniformBubbleFill(
+        bitmap: Bitmap,
+        rect: Rect,
+        isDarkBubble: Boolean,
+        targetLum: Float
+    ): Boolean {
+        if (targetLum >= 195f && !isDarkBubble) {
+            return isMostlyUniformLightFill(bitmap, rect)
+        }
+        val left = rect.left.coerceIn(0, bitmap.width - 1)
+        val right = (rect.right - 1).coerceIn(left, bitmap.width - 1)
+        val top = rect.top.coerceIn(0, bitmap.height - 1)
+        val bottom = (rect.bottom - 1).coerceIn(top, bitmap.height - 1)
+        val stepX = maxOf(1, (right - left) / 8)
+        val stepY = maxOf(1, (bottom - top) / 8)
+        var total = 0
+        var matching = 0
+        var whitePaper = 0
+        for (sy in top..bottom step stepY) {
+            for (sx in left..right step stepX) {
+                val lum = pixelLuma(bitmap.getPixel(sx, sy))
+                total++
+                if (isDarkBubble && targetLum < 95f) {
+                    if (lum < 105f) matching++
+                    if (lum >= 210f) whitePaper++
+                } else {
+                    if (kotlin.math.abs(lum - targetLum) <= 35f || lum >= 205f) matching++
+                    if (lum >= 235f) whitePaper++
+                }
+            }
+        }
+        if (total <= 0) return false
+        return matching * 100 >= total * 68 && whitePaper * 100 <= total * 25
     }
 
     private fun sampleRimMedianLuma(bitmap: Bitmap, rect: Rect): Float? {

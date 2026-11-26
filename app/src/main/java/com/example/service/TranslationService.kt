@@ -10,10 +10,12 @@ import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.BlurMaskFilter
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
 import android.util.Log
 import com.example.data.db.TranslationCorrectionDao
 import com.example.i18n.TranslationLanguages
@@ -63,8 +65,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 data class TextBlockObj(
     val originalText: String,
@@ -1848,6 +1852,12 @@ class TranslationService(
                     interArea > maskArea * 0.25f || interArea > otherArea * 0.35f
                 }
                 if (!coversText) {
+                    val useGradientMask = isColoredOrGradientRegion(
+                        bitmap = sourceBitmap,
+                        maskRect = maskRect,
+                        maskColor = maskColor,
+                        isDarkBubble = block.isDarkBubble
+                    )
                     // For real speech bubbles, paint the EDT-extracted safe interior polygon first
                     // so stray edge glyphs (e.g. "NED", "EEL LIKE" extending outside the OCR box)
                     // are cleanly erased without touching the inked bubble border.
@@ -1904,18 +1914,41 @@ class TranslationService(
                                     contourPath.lineTo(clampedBubble.left + cleanContour.rowLeftFractions[r] * bW, y)
                                 }
                                 contourPath.close()
-                                val featheredPaint = Paint(paint).apply {
-                                    maskFilter = BlurMaskFilter(1.5f, BlurMaskFilter.Blur.NORMAL)
+                                if (useGradientMask) {
+                                    paintGradientMatchedInterior(
+                                        canvas = canvas,
+                                        sourceBitmap = sourceBitmap,
+                                        maskRect = contourBounds,
+                                        bubbleBox = clampedBubble,
+                                        isDarkBubble = block.isDarkBubble,
+                                        fallbackColor = maskColor,
+                                        contourPath = contourPath
+                                    )
+                                } else {
+                                    val featheredPaint = Paint(paint).apply {
+                                        maskFilter = BlurMaskFilter(1.5f, BlurMaskFilter.Blur.NORMAL)
+                                    }
+                                    canvas.drawPath(contourPath, featheredPaint)
                                 }
-                                canvas.drawPath(contourPath, featheredPaint)
                                 val paintedContourRect = Rect()
                                 contourBounds.round(paintedContourRect)
                                 paintedRects.add(paintedContourRect)
                             }
                         }
                     }
-                    val cornerRadius = (min(maskRect.width(), maskRect.height()) * 0.35f).coerceIn(4f, 24f)
-                    canvas.drawRoundRect(maskRect, cornerRadius, cornerRadius, paint)
+                    if (useGradientMask) {
+                        paintGradientMatchedInterior(
+                            canvas = canvas,
+                            sourceBitmap = sourceBitmap,
+                            maskRect = maskRect,
+                            bubbleBox = if (hasDistinctBubbleBounds) bubbleBox else Rect(),
+                            isDarkBubble = block.isDarkBubble,
+                            fallbackColor = maskColor
+                        )
+                    } else {
+                        val cornerRadius = (min(maskRect.width(), maskRect.height()) * 0.35f).coerceIn(4f, 24f)
+                        canvas.drawRoundRect(maskRect, cornerRadius, cornerRadius, paint)
+                    }
                     val paintedRect = Rect()
                     maskRect.round(paintedRect)
                     paintedRects.add(paintedRect)
@@ -1991,6 +2024,157 @@ class TranslationService(
             }
         }
         return MaskedTextResult(resultBitmap, paintedRects, skippedAuxBoxes)
+    }
+
+    internal fun isColoredOrGradientRegion(
+        bitmap: Bitmap,
+        maskRect: RectF,
+        maskColor: Int,
+        isDarkBubble: Boolean
+    ): Boolean {
+        if (bitmap.isRecycled || bitmap.width < 4 || bitmap.height < 4) return false
+        val r = Color.red(maskColor)
+        val g = Color.green(maskColor)
+        val b = Color.blue(maskColor)
+        val chroma = max(r, max(g, b)) - min(r, min(g, b))
+        val lum = r * 0.299f + g * 0.587f + b * 0.114f
+        if (chroma >= 16) return true
+        if (!isDarkBubble && lum < 236f) return true
+        if (isDarkBubble && lum > 35f) return true
+
+        val left = maskRect.left.roundToInt().coerceIn(0, bitmap.width - 1)
+        val right = maskRect.right.roundToInt().coerceIn(left, bitmap.width - 1)
+        val top = maskRect.top.roundToInt().coerceIn(0, bitmap.height - 1)
+        val bottom = maskRect.bottom.roundToInt().coerceIn(top, bitmap.height - 1)
+
+        fun edgeMedianLumaAndMaxChroma(xs: IntProgression, ys: IntProgression): Pair<Float, Int> {
+            val lums = ArrayList<Float>(16)
+            var maxC = 0
+            for (y in ys) {
+                for (x in xs) {
+                    val px = bitmap.getPixel(x, y)
+                    val pr = Color.red(px)
+                    val pg = Color.green(px)
+                    val pb = Color.blue(px)
+                    val c = max(pr, max(pg, pb)) - min(pr, min(pg, pb))
+                    if (c > maxC) maxC = c
+                    lums.add(pr * 0.299f + pg * 0.587f + pb * 0.114f)
+                }
+            }
+            if (lums.isEmpty()) return lum to 0
+            lums.sort()
+            return lums[lums.size / 2] to maxC
+        }
+
+        val stepX = max(1, (right - left) / 6)
+        val stepY = max(1, (bottom - top) / 6)
+        val (topLum, topChroma) = edgeMedianLumaAndMaxChroma(left..right step stepX, top..top)
+        val (botLum, botChroma) = edgeMedianLumaAndMaxChroma(left..right step stepX, bottom..bottom)
+        val (leftLum, leftChroma) = edgeMedianLumaAndMaxChroma(left..left, top..bottom step stepY)
+        val (rightLum, rightChroma) = edgeMedianLumaAndMaxChroma(right..right, top..bottom step stepY)
+
+        val maxEdgeChroma = max(max(topChroma, botChroma), max(leftChroma, rightChroma))
+        return maxEdgeChroma >= 16 ||
+            abs(topLum - botLum) >= 14f ||
+            abs(leftLum - rightLum) >= 14f
+    }
+
+    /**
+     * Paints a row-by-row horizontal gradient matched to the left and right outer edge
+     * background colors inside [maskRect] (or [contourPath]) so colored or gradient
+     * webtoon speech bubbles are erased seamlessly without leaving a flat rectangular patch.
+     */
+    internal fun paintGradientMatchedInterior(
+        canvas: Canvas,
+        sourceBitmap: Bitmap,
+        maskRect: RectF,
+        bubbleBox: Rect,
+        isDarkBubble: Boolean,
+        fallbackColor: Int,
+        contourPath: Path? = null
+    ) {
+        if (sourceBitmap.isRecycled || sourceBitmap.width <= 0 || sourceBitmap.height <= 0) return
+        if (maskRect.width() <= 0f || maskRect.height() <= 0f) return
+
+        val clipShape = contourPath ?: Path().apply {
+            val radius = (min(maskRect.width(), maskRect.height()) * 0.35f).coerceIn(4f, 24f)
+            addRoundRect(maskRect, radius, radius, Path.Direction.CW)
+        }
+
+        val hasBubbleClamp = !bubbleBox.isEmpty
+        val minSampleX = if (hasBubbleClamp) bubbleBox.left.coerceIn(0, sourceBitmap.width - 1) else 0
+        val maxSampleX = if (hasBubbleClamp) (bubbleBox.right - 1).coerceIn(minSampleX, sourceBitmap.width - 1) else sourceBitmap.width - 1
+        val topY = maskRect.top.toInt().coerceIn(0, sourceBitmap.height - 1)
+        val botY = ceil(maskRect.bottom.toDouble()).toInt().coerceIn(topY + 1, sourceBitmap.height)
+        val stripH = ((botY - topY) / 40).coerceIn(2, 4)
+
+        val fallbackLum = Color.red(fallbackColor) * 0.299f +
+            Color.green(fallbackColor) * 0.587f +
+            Color.blue(fallbackColor) * 0.114f
+
+        fun sampleSideColor(anchorX: Int, y: Int): Int? {
+            val candidates = ArrayList<Pair<Int, Float>>(7)
+            for (dx in -3..3) {
+                val sx = (anchorX + dx).coerceIn(minSampleX, maxSampleX)
+                val px = sourceBitmap.getPixel(sx, y)
+                val lum = Color.red(px) * 0.299f + Color.green(px) * 0.587f + Color.blue(px) * 0.114f
+                val isOppositeTextStroke = when {
+                    isDarkBubble && fallbackLum < 120f -> lum > 185f
+                    !isDarkBubble && fallbackLum > 140f -> lum < 90f
+                    else -> false
+                }
+                if (!isOppositeTextStroke) {
+                    candidates.add(px to lum)
+                }
+            }
+            if (candidates.isEmpty()) return null
+            candidates.sortBy { it.second }
+            return candidates[candidates.size / 2].first
+        }
+
+        val stripPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.FILL
+        }
+        var prevLeft = fallbackColor
+        var prevRight = fallbackColor
+
+        canvas.save()
+        canvas.clipPath(clipShape)
+        try {
+            var y0 = topY
+            while (y0 < botY) {
+                val y1 = min(botY, y0 + stripH)
+                val sampleY = ((y0 + y1) / 2).coerceIn(0, sourceBitmap.height - 1)
+                val leftAnchorX = (maskRect.left - 2f).roundToInt().coerceIn(minSampleX, maxSampleX)
+                val rightAnchorX = (maskRect.right + 2f).roundToInt().coerceIn(minSampleX, maxSampleX)
+
+                val sampledL = sampleSideColor(leftAnchorX, sampleY)
+                val sampledR = sampleSideColor(rightAnchorX, sampleY)
+                val cL = sampledL ?: sampledR ?: prevLeft
+                val cR = sampledR ?: sampledL ?: prevRight
+                prevLeft = cL
+                prevRight = cR
+
+                if (cL == cR) {
+                    stripPaint.shader = null
+                    stripPaint.color = cL
+                } else {
+                    stripPaint.shader = LinearGradient(
+                        maskRect.left,
+                        sampleY.toFloat(),
+                        maskRect.right,
+                        sampleY.toFloat(),
+                        cL,
+                        cR,
+                        Shader.TileMode.CLAMP
+                    )
+                }
+                canvas.drawRect(maskRect.left - 1f, y0.toFloat(), maskRect.right + 1f, y1.toFloat(), stripPaint)
+                y0 = y1
+            }
+        } finally {
+            canvas.restore()
+        }
     }
 
     fun sampleSpeechBubbleColor(bitmap: Bitmap, rect: Rect, isDarkBubble: Boolean): Int {

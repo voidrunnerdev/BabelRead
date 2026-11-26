@@ -451,6 +451,43 @@ internal fun shouldDrawRectangularBorder(
     isBubble: Boolean
 ): Boolean = !isSubtitleMode && isRectangularBox && isBubble
 
+internal fun shouldExpandMicroSliver(
+    widthDp: Float,
+    heightDp: Float,
+    isSliver: Boolean
+): Boolean {
+    if (!isSliver) return false
+    if (heightDp >= widthDp * 1.9f && widthDp >= 14f) return false
+    return widthDp < 14f
+}
+
+internal fun shouldDrawNaturalBubbleBorder(
+    isSubtitleMode: Boolean,
+    isBubble: Boolean,
+    hasRealMaskBitmap: Boolean,
+    isFallbackExpanded: Boolean,
+    bubbleStyle: String = "Doğal Balon"
+): Boolean {
+    if (isSubtitleMode || !isBubble) return false
+    if (hasRealMaskBitmap &&
+        !isFallbackExpanded &&
+        bubbleStyle != "Klasik Kutu" &&
+        bubbleStyle != "Koyu Zemin"
+    ) {
+        return false
+    }
+    return true
+}
+
+internal fun resolveShouldDrawFloatingHaloText(
+    isBubble: Boolean,
+    hasBackgroundColor: Boolean,
+    bubbleStyle: String
+): Boolean = !isBubble && !hasBackgroundColor && bubbleStyle != "Alt Yazı (Şeffaf)"
+
+internal fun resolveFloatingHaloStrokeColor(textColor: Color): Color =
+    if (textColor == Color.White) Color.Black.copy(alpha = 0.92f) else Color.White.copy(alpha = 0.96f)
+
 internal data class DrawBoxRectDp(
     val left: Float,
     val top: Float,
@@ -2301,7 +2338,12 @@ fun ReaderPageContainer(
                                                     boldBoost = boldBoost,
                                                     contourProfile = contourProfile
                                                 )
-                                            } else if (isSliver) {
+                                            } else if (shouldExpandMicroSliver(
+                                                    widthDp = geo.widthDp.value,
+                                                    heightDp = geo.heightDp.value,
+                                                    isSliver = isSliver
+                                                )
+                                            ) {
                                                 val targetWidthDp = maxOf(geo.widthDp, 48.dp)
                                                 val shiftLeftDp = ((targetWidthDp - geo.widthDp) / 2f).coerceAtLeast(0.dp)
                                                 val recoveredLeftDp = (geo.leftDp - shiftLeftDp).coerceAtLeast(2.dp)
@@ -2442,6 +2484,11 @@ fun ReaderPageContainer(
                             return@forEach
                         }
                         val isSubtitleMode = bubbleStyle == "Alt Yazı (Şeffaf)"
+                        val isFloatingHaloText = resolveShouldDrawFloatingHaloText(
+                            isBubble = block.isBubble,
+                            hasBackgroundColor = block.backgroundColor != null,
+                            bubbleStyle = bubbleStyle
+                        )
                         val contour = (placed.layoutResult.bubbleTextLayout?.contourProfile
                             ?: placed.contourProfile
                             ?: block.contourProfile)?.takeIf { it.isUsable }
@@ -2481,8 +2528,27 @@ fun ReaderPageContainer(
                         val placedRightDp = placed.leftDp + placed.widthDp
                         val placedBottomDp = placed.topDp + placed.heightDp
 
+                        val hasRealMaskBitmap = validMasked != null
+                        val isPlacedExpanded = placed.fallbackSourceBounds != null ||
+                            !hasValidBubble ||
+                            placedLeftDp < bubbleLeftDp - 2.dp ||
+                            placedTopDp < bubbleTopDp - 2.dp ||
+                            placedRightDp > bubbleRightDp + 2.dp ||
+                            placedBottomDp > bubbleBottomDp + 2.dp
+
                         val isOvalFallback = !isSubtitleMode && !isRectangularBox &&
                             (contour == null || !contour.isUsable)
+                        val baseMarginDp = if (hasRealMaskBitmap &&
+                            hasValidBubble &&
+                            block.isBubble &&
+                            !isPlacedExpanded &&
+                            bubbleStyle != "Klasik Kutu" &&
+                            bubbleStyle != "Koyu Zemin"
+                        ) {
+                            0f
+                        } else {
+                            2f
+                        }
                         val resolvedBoundsDp = resolveOverlayBackgroundBoundsDp(
                             isSubtitleMode = isSubtitleMode,
                             isOvalFallback = isOvalFallback,
@@ -2498,7 +2564,19 @@ fun ReaderPageContainer(
                             placedTopDp = placedTopDp.value,
                             placedRightDp = placedRightDp.value,
                             placedBottomDp = placedBottomDp.value,
-                            marginDp = 2f
+                            marginDp = baseMarginDp
+                        )
+                        val didOvalExpand = isOvalFallback && hasValidBubble && (
+                            resolvedBoundsDp.width > (bubbleRightDp - bubbleLeftDp).value + 4f ||
+                                resolvedBoundsDp.height > (bubbleBottomDp - bubbleTopDp).value + 4f
+                            )
+                        val isFallbackExpanded = isPlacedExpanded || didOvalExpand
+                        val drawBubbleBorder = shouldDrawNaturalBubbleBorder(
+                            isSubtitleMode = isSubtitleMode,
+                            isBubble = block.isBubble,
+                            hasRealMaskBitmap = hasRealMaskBitmap,
+                            isFallbackExpanded = isFallbackExpanded,
+                            bubbleStyle = bubbleStyle
                         )
                         val boxLeft = resolvedBoundsDp.left.dp
                         val boxTop = resolvedBoundsDp.top.dp
@@ -2510,12 +2588,13 @@ fun ReaderPageContainer(
                             contour,
                             isRectangularBox,
                             isSubtitleMode,
+                            isFloatingHaloText,
                             boxWidth,
                             boxHeight,
                             coordinateScaleX,
                             coordinateScaleY
                         ) {
-                            if (contour != null && contour.isUsable && !isRectangularBox && !isSubtitleMode) {
+                            if (!isFloatingHaloText && contour != null && contour.isUsable && !isRectangularBox && !isSubtitleMode) {
                                 val bubbleRect = if (hasValidBubble) {
                                     val left = with(density) { (bubbleLeftDp - boxLeft).toPx() }
                                     val top = with(density) { (bubbleTopDp - boxTop).toPx() }
@@ -2537,7 +2616,7 @@ fun ReaderPageContainer(
                                 .width(boxWidth)
                                 .height(boxHeight)
                                 .drawBehind {
-                                    if (size.width <= 0f || size.height <= 0f) return@drawBehind
+                                    if (isFloatingHaloText || size.width <= 0f || size.height <= 0f) return@drawBehind
                                     val isDark = block.isDarkBubble || bubbleStyle == "Koyu Zemin"
                                     val borderColor = if (isDark) {
                                         Color.White.copy(alpha = 0.85f)
@@ -2546,38 +2625,39 @@ fun ReaderPageContainer(
                                     }
 
                                     if (cachedBackgroundPath != null) {
-                                        // 1. Zemin dolgusu
+                                        // 1. Yumuşak iç kontur zemin dolgusu
                                         drawPath(
                                             path = cachedBackgroundPath,
                                             color = boxBackground
                                         )
-                                        // 2. Mürekkep sızıntısını örten zemin genişletmesi
-                                        drawPath(
-                                            path = cachedBackgroundPath,
-                                            color = boxBackground,
-                                            style = Stroke(
-                                                width = with(density) { 2.dp.toPx() },
-                                                cap = StrokeCap.Round,
-                                                join = StrokeJoin.Round
+                                        if (drawBubbleBorder) {
+                                            // 2. Maske yoksa/genişletilmişse mürekkep sızıntısını örten dolgu ve yapay çerçeve
+                                            drawPath(
+                                                path = cachedBackgroundPath,
+                                                color = boxBackground,
+                                                style = Stroke(
+                                                    width = with(density) { 2.dp.toPx() },
+                                                    cap = StrokeCap.Round,
+                                                    join = StrokeJoin.Round
+                                                )
                                             )
-                                        )
-                                        // 3. Orijinal manga kontur çizgisi (Border)
-                                        drawPath(
-                                            path = cachedBackgroundPath,
-                                            color = borderColor,
-                                            style = Stroke(
-                                                width = with(density) { 1.5.dp.toPx() },
-                                                cap = StrokeCap.Round,
-                                                join = StrokeJoin.Round
+                                            drawPath(
+                                                path = cachedBackgroundPath,
+                                                color = borderColor,
+                                                style = Stroke(
+                                                    width = with(density) { 1.5.dp.toPx() },
+                                                    cap = StrokeCap.Round,
+                                                    join = StrokeJoin.Round
+                                                )
                                             )
-                                        )
+                                        }
                                     } else if (isRectangularBox || isSubtitleMode) {
                                         drawRoundRect(
                                             color = boxBackground,
                                             size = size,
                                             cornerRadius = CornerRadius(6.dp.toPx())
                                         )
-                                        if (shouldDrawRectangularBorder(
+                                        if (drawBubbleBorder && shouldDrawRectangularBorder(
                                                 isSubtitleMode = isSubtitleMode,
                                                 isRectangularBox = isRectangularBox,
                                                 isBubble = block.isBubble
@@ -2595,11 +2675,13 @@ fun ReaderPageContainer(
                                             color = boxBackground,
                                             size = size
                                         )
-                                        drawOval(
-                                            color = borderColor,
-                                            size = size,
-                                            style = Stroke(width = with(density) { 1.5.dp.toPx() })
-                                        )
+                                        if (drawBubbleBorder) {
+                                            drawOval(
+                                                color = borderColor,
+                                                size = size,
+                                                style = Stroke(width = with(density) { 1.5.dp.toPx() })
+                                            )
+                                        }
                                     }
                                 }
                                 .combinedClickable(
@@ -2765,11 +2847,19 @@ fun ReaderPageContainer(
                                 }
                             }
                         } else if (canRenderOverlayBox(placed)) {
+                            val isFloatingHaloText = resolveShouldDrawFloatingHaloText(
+                                isBubble = block.isBubble,
+                                hasBackgroundColor = block.backgroundColor != null,
+                                bubbleStyle = bubbleStyle
+                            )
                             val textColor = when {
                                 isSubtitleMode || bubbleStyle == "Koyu Zemin" || block.isDarkBubble -> Color.White
                                 block.backgroundColor != null -> contrastingTextColor(block.backgroundColor)
                                 else -> Color.Black
                             }
+                            val haloStrokeColor = if (isFloatingHaloText) {
+                                resolveFloatingHaloStrokeColor(textColor)
+                            } else null
                             val textShadowColor = if (isSubtitleMode) Color.Black.copy(alpha = 0.55f) else null
                             val drawContour = (layoutResult.bubbleTextLayout?.contourProfile
                                 ?: placed.contourProfile
@@ -2892,6 +2982,35 @@ fun ReaderPageContainer(
                                         transform.translateY
                                     )
                                     nativeCanvas.scale(transform.scale, transform.scale)
+                                    if (isFloatingHaloText && haloStrokeColor != null) {
+                                        val prevStyle = textPaint.style
+                                        val prevStrokeWidth = textPaint.strokeWidth
+                                        val prevStrokeJoin = textPaint.strokeJoin
+                                        val prevStrokeCap = textPaint.strokeCap
+                                        textPaint.clearShadowLayer()
+                                        textPaint.style = android.graphics.Paint.Style.STROKE
+                                        textPaint.strokeWidth = with(density) { 3.5.dp.toPx() } /
+                                            transform.scale.coerceAtLeast(0.5f)
+                                        textPaint.strokeJoin = android.graphics.Paint.Join.ROUND
+                                        textPaint.strokeCap = android.graphics.Paint.Cap.ROUND
+                                        textPaint.color = haloStrokeColor.toArgb()
+                                        if (bubbleLayout != null) {
+                                            bubbleLayout.lines.forEach { line ->
+                                                nativeCanvas.drawText(
+                                                    line.text,
+                                                    line.leftPx,
+                                                    line.baselinePx,
+                                                    textPaint
+                                                )
+                                            }
+                                        } else {
+                                            staticLayout?.draw(nativeCanvas)
+                                        }
+                                        textPaint.style = prevStyle
+                                        textPaint.strokeWidth = prevStrokeWidth
+                                        textPaint.strokeJoin = prevStrokeJoin
+                                        textPaint.strokeCap = prevStrokeCap
+                                    }
                                     textPaint.style = android.graphics.Paint.Style.FILL
                                     textPaint.color = textColor.toArgb()
                                     if (textShadowColor != null) {

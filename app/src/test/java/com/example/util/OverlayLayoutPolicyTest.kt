@@ -136,4 +136,27 @@ class OverlayLayoutPolicyTest {
         assertFalse(OverlayLayoutPolicy.canForceTextToFit(fontSizeSp = 5.9f, drawScale = 0.8f))
         assertFalse(OverlayLayoutPolicy.canForceTextToFit(fontSizeSp = 10f, drawScale = 0.69f))
     }
+
+    @Test
+    fun `tall narrow vertical pill bubbles are not classified as pathological slivers`() {
+        assertFalse(
+            "Tall vertical pill (18x90dp) must keep vertical shape instead of horizontal expansion",
+            OverlayLayoutPolicy.isPathologicalSliver(widthDp = 18f, heightDp = 90f)
+        )
+        assertFalse(
+            "Boundary 14dp tall vertical pill (14x27dp) is valid vertical chamber",
+            OverlayLayoutPolicy.isPathologicalSliver(widthDp = 14f, heightDp = 27f)
+        )
+        assertTrue(
+            "Micro sliver < 14dp remains pathological",
+            OverlayLayoutPolicy.isPathologicalSliver(widthDp = 10f, heightDp = 60f)
+        )
+        assertTrue(
+            "Narrow non-tall box < 24dp remains pathological",
+            OverlayLayoutPolicy.isPathologicalSliver(widthDp = 18f, heightDp = 20f)
+        )
+        assertFalse(
+            OverlayLayoutPolicy.isPathologicalSliver(widthDp = 36f, heightDp = 40f)
+        )
+    }
 }

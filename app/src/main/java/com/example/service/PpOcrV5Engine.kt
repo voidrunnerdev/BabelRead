@@ -214,33 +214,49 @@ class PpOcrV5Engine(
                 return regionHasValidComponents
             }
 
+            val narrowVerticalPill = isNarrowVerticalPill(workRegion)
+
             suspend fun recognize(
                 language: String,
                 forceVertical: Boolean = false,
                 forceHorizontal: Boolean = false
             ): BlockAttempt {
-                val effectiveHorizontal = forceHorizontal || variant.englishOnly
-                val effectiveVertical = forceVertical && !variant.englishOnly
+                val effectiveHorizontal = forceHorizontal || (variant.englishOnly && !forceVertical)
+                val effectiveVertical = forceVertical && (!variant.englishOnly || narrowVerticalPill)
                 val detected = if (!effectiveVertical && !forceHorizontal) {
                     detector.detect(workBitmap, workRegion)
                 } else {
                     emptyList()
                 }
-                val lines = if (detected.isNotEmpty()) {
-                    detectedToLines(detected, language, effectiveVertical, effectiveHorizontal)
-                } else if (ensureValidComponents()) {
-                    lineSegmenter.segment(
-                        workBitmap,
-                        workRegion,
-                        language,
-                        forceVertical = effectiveVertical,
-                        forceHorizontal = effectiveHorizontal
-                    )
-                } else {
-                    emptyList()
+                val lines = when {
+                    detected.isNotEmpty() && !needsNarrowVerticalRecovery(workRegion, detected) -> {
+                        detectedToLines(detected, language, effectiveVertical, effectiveHorizontal)
+                    }
+                    ensureValidComponents() -> {
+                        val segmented = lineSegmenter.segment(
+                            workBitmap,
+                            workRegion,
+                            language,
+                            forceVertical = effectiveVertical,
+                            forceHorizontal = effectiveHorizontal
+                        )
+                        if (detected.isEmpty()) {
+                            segmented
+                        } else {
+                            mergeDetectedAndSegmentedLines(
+                                detectedToLines(detected, language, effectiveVertical, effectiveHorizontal),
+                                segmented
+                            )
+                        }
+                    }
+                    detected.isNotEmpty() -> {
+                        detectedToLines(detected, language, effectiveVertical, effectiveHorizontal)
+                    }
+                    else -> emptyList()
                 }
                 val vertical = if (lines.isEmpty()) {
-                    !variant.englishOnly && isJapanese(primaryLanguage) && workRegion.height() > workRegion.width() * 1.8f
+                    (!variant.englishOnly && isJapanese(primaryLanguage) && workRegion.height() > workRegion.width() * 1.8f) ||
+                        (narrowVerticalPill && forceVertical)
                 } else {
                     lines.count { it.vertical } * 2 >= lines.size
                 }
@@ -263,13 +279,15 @@ class PpOcrV5Engine(
             }
 
             val primary = recognize(primaryLanguage)
-            if (variant.englishOnly || (primary.lineCount > 0 && primary.results.size >= primary.lineCount)) {
+            val shouldRetryOpposite = (narrowVerticalPill && primary.results.isEmpty()) ||
+                (!variant.englishOnly && (primary.lineCount == 0 || primary.results.size < primary.lineCount))
+            if (!shouldRetryOpposite) {
                 return@withContext primary.results
             }
 
             // Some lines may be rejected in the detected direction. Retry the same
             // language in the opposite direction and keep the successful lines.
-            val retryVertical = !primary.vertical
+            val retryVertical = if (narrowVerticalPill && variant.englishOnly) true else !primary.vertical
             val fallback = recognize(
                 primaryLanguage,
                 forceVertical = retryVertical,
@@ -324,6 +342,47 @@ class PpOcrV5Engine(
         } else {
             lines.sortedWith(compareBy<SegmentedTextLine> { it.rect.top }.thenBy { it.rect.left })
         }
+    }
+
+    internal fun isNarrowVerticalPill(region: Rect): Boolean =
+        region.width() in 1 until 90 && region.height() > region.width() * 2.2f
+
+    internal fun needsNarrowVerticalRecovery(
+        region: Rect,
+        detected: List<PpOcrV5Detector.DetectedLine>
+    ): Boolean {
+        if (!isNarrowVerticalPill(region)) return false
+        if (detected.isEmpty()) return true
+        if (detected.size == 1) {
+            val box = detected[0].rect
+            val regionArea = region.width().toLong() * region.height().toLong()
+            val boxArea = box.width().toLong() * box.height().toLong()
+            return (box.height() < region.height() * 0.30f && box.width() < region.width() * 0.75f) ||
+                (regionArea > 0L && boxArea * 100L < regionArea * 12L)
+        }
+        return false
+    }
+
+    private fun mergeDetectedAndSegmentedLines(
+        detected: List<SegmentedTextLine>,
+        segmented: List<SegmentedTextLine>
+    ): List<SegmentedTextLine> {
+        if (segmented.isEmpty()) return detected
+        if (detected.isEmpty()) return segmented
+        val merged = ArrayList<SegmentedTextLine>(segmented)
+        for (det in detected) {
+            val detArea = det.rect.width().toLong() * det.rect.height().toLong()
+            if (detArea <= 0L) continue
+            val overlaps = merged.any { existing ->
+                val inter = Rect(det.rect)
+                if (!inter.intersect(existing.rect)) return@any false
+                val interArea = inter.width().toLong() * inter.height().toLong()
+                val existArea = (existing.rect.width().toLong() * existing.rect.height().toLong()).coerceAtLeast(1L)
+                interArea * 2L >= detArea || interArea * 2L >= existArea
+            }
+            if (!overlaps) merged.add(det)
+        }
+        return merged.sortedWith(compareBy<SegmentedTextLine> { it.rect.top }.thenBy { it.rect.left })
     }
 
     private fun overlapsExisting(
@@ -523,19 +582,119 @@ class PpOcrV5Engine(
         val addLeft = (desiredPadX - minInkX).coerceAtLeast(0)
         val addRight = (desiredPadX - (w - 1 - maxInkX)).coerceAtLeast(0)
 
-        if (addLeft == 0 && addRight == 0 && addTop == 0 && addBottom == 0 && trimTop == 0 && trimBottom == h) {
-            return crop
+        val baseBitmap = if (addLeft == 0 && addRight == 0 && addTop == 0 && addBottom == 0 && trimTop == 0 && trimBottom == h) {
+            crop
+        } else {
+            val outW = w + addLeft + addRight
+            val outPixels = IntArray(outW * outH) { bgColor }
+            for (y in 0 until sliceH) {
+                val srcOffset = (trimTop + y) * w
+                val dstOffset = (addTop + y) * outW + addLeft
+                System.arraycopy(pixels, srcOffset, outPixels, dstOffset, w)
+            }
+            Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888).apply {
+                setPixels(outPixels, 0, outW, 0, 0, outW, outH)
+            }
         }
 
-        val outW = w + addLeft + addRight
-        val outPixels = IntArray(outW * outH) { bgColor }
-        for (y in 0 until sliceH) {
-            val srcOffset = (trimTop + y) * w
-            val dstOffset = (addTop + y) * outW + addLeft
-            System.arraycopy(pixels, srcOffset, outPixels, dstOffset, w)
+        val needsSharpen = crop.height < 44 || crop.width < 120 ||
+            baseBitmap.height < 44 || baseBitmap.width < 120
+        if (!needsSharpen) return baseBitmap
+
+        val sharpened = sharpenLineBitmapForOcr(baseBitmap)
+        if (baseBitmap !== crop && sharpened !== baseBitmap && !baseBitmap.isRecycled) {
+            baseBitmap.recycle()
         }
-        return Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888).apply {
-            setPixels(outPixels, 0, outW, 0, 0, outW, outH)
+        return sharpened
+    }
+
+    /**
+     * Applies gentle adaptive contrast stretching and a 3x3 unsharp mask on small or
+     * compressed line crops so narrow word spaces (e.g. "SPOT US") remain distinct.
+     */
+    internal fun sharpenLineBitmapForOcr(source: Bitmap): Bitmap {
+        if (source.isRecycled || source.width < 4 || source.height < 4) return source
+        val w = source.width
+        val h = source.height
+        val pixels = IntArray(w * h)
+        source.getPixels(pixels, 0, w, 0, 0, w, h)
+        if (pixels.isEmpty()) return source
+
+        val histogram = IntArray(256)
+        for (px in pixels) {
+            histogram[pixelLumaInt(px).coerceIn(0, 255)]++
+        }
+        val total = pixels.size
+        fun percentile(p: Int): Int {
+            val target = ((total - 1) * p) / 100
+            var cumulative = 0
+            for (lum in 0 until 256) {
+                cumulative += histogram[lum]
+                if (cumulative > target) return lum
+            }
+            return 255
+        }
+
+        val lowLum = percentile(2)
+        val highLum = percentile(98)
+        val span = highLum - lowLum
+        val stretch = span in 16..245
+        val stretched = if (stretch) {
+            val scale = 255f / span.toFloat()
+            IntArray(pixels.size) { idx ->
+                val px = pixels[idx]
+                val r = ((((px shr 16) and 0xFF) - lowLum) * scale).roundToInt().coerceIn(0, 255)
+                val g = ((((px shr 8) and 0xFF) - lowLum) * scale).roundToInt().coerceIn(0, 255)
+                val b = (((px and 0xFF) - lowLum) * scale).roundToInt().coerceIn(0, 255)
+                (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+            }
+        } else {
+            pixels
+        }
+
+        val amount = 0.65f
+        val outPixels = IntArray(w * h)
+        for (y in 0 until h) {
+            val y0 = max(0, y - 1) * w
+            val y1 = y * w
+            val y2 = min(h - 1, y + 1) * w
+            for (x in 0 until w) {
+                val x0 = max(0, x - 1)
+                val x1 = x
+                val x2 = min(w - 1, x + 1)
+
+                val p00 = stretched[y0 + x0]
+                val p01 = stretched[y0 + x1]
+                val p02 = stretched[y0 + x2]
+                val p10 = stretched[y1 + x0]
+                val p11 = stretched[y1 + x1]
+                val p12 = stretched[y1 + x2]
+                val p20 = stretched[y2 + x0]
+                val p21 = stretched[y2 + x1]
+                val p22 = stretched[y2 + x2]
+
+                val blurR = (((p00 shr 16) and 0xFF) + 2 * ((p01 shr 16) and 0xFF) + ((p02 shr 16) and 0xFF) +
+                    2 * ((p10 shr 16) and 0xFF) + 4 * ((p11 shr 16) and 0xFF) + 2 * ((p12 shr 16) and 0xFF) +
+                    ((p20 shr 16) and 0xFF) + 2 * ((p21 shr 16) and 0xFF) + ((p22 shr 16) and 0xFF)) / 16f
+                val blurG = (((p00 shr 8) and 0xFF) + 2 * ((p01 shr 8) and 0xFF) + ((p02 shr 8) and 0xFF) +
+                    2 * ((p10 shr 8) and 0xFF) + 4 * ((p11 shr 8) and 0xFF) + 2 * ((p12 shr 8) and 0xFF) +
+                    ((p20 shr 8) and 0xFF) + 2 * ((p21 shr 8) and 0xFF) + ((p22 shr 8) and 0xFF)) / 16f
+                val blurB = ((p00 and 0xFF) + 2 * (p01 and 0xFF) + (p02 and 0xFF) +
+                    2 * (p10 and 0xFF) + 4 * (p11 and 0xFF) + 2 * (p12 and 0xFF) +
+                    (p20 and 0xFF) + 2 * (p21 and 0xFF) + (p22 and 0xFF)) / 16f
+
+                val cR = (p11 shr 16) and 0xFF
+                val cG = (p11 shr 8) and 0xFF
+                val cB = p11 and 0xFF
+
+                val outR = (cR + amount * (cR - blurR)).roundToInt().coerceIn(0, 255)
+                val outG = (cG + amount * (cG - blurG)).roundToInt().coerceIn(0, 255)
+                val outB = (cB + amount * (cB - blurB)).roundToInt().coerceIn(0, 255)
+                outPixels[y1 + x1] = (0xFF shl 24) or (outR shl 16) or (outG shl 8) or outB
+            }
+        }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
+            setPixels(outPixels, 0, w, 0, 0, w, h)
         }
     }
 
@@ -972,8 +1131,12 @@ class PpOcrV5Engine(
                     return false
                 }
                 val env = OrtEnvironment.getEnvironment()
+                val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
                 val options = OrtSession.SessionOptions().apply {
-                    setIntraOpNumThreads(2)
+                    setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                    setMemoryPatternOptimization(true)
+                    setIntraOpNumThreads(threads)
+                    runCatching { addXnnpack(mapOf("intra_op_num_threads" to threads.toString())) }
                 }
                 val loaded = try {
                     env.createSession(modelFile.absolutePath, options)

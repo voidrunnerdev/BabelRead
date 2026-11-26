@@ -87,6 +87,22 @@ class PpOcrV5DetectorHelpersTest {
         assertTrue("Horizontal aspect must be preserved", wideLine[0] > wideLine[1] * 4)
     }
 
+    @Test
+    fun `scaledSize and detectBoxes preserve stacked lines in narrow vertical strip`() {
+        val stripSize = PpOcrV5DetPreprocess.scaledSize(48, 180, limitSide = 960, minSide = 480)
+        assertTrue("Narrow strip should upscale cleanly", stripSize[1] >= 480)
+        assertEquals(0, stripSize[0] % 32)
+        assertEquals(0, stripSize[1] % 32)
+
+        val w = 32
+        val h = 120
+        val prob = FloatArray(w * h)
+        for (y in 12 until 24) for (x in 6 until 26) prob[y * w + x] = 0.92f
+        for (y in 70 until 82) for (x in 6 until 26) prob[y * w + x] = 0.90f
+        val boxes = PpOcrV5DetPostProcess.detectBoxes(prob, w, h)
+        assertEquals(2, boxes.size)
+    }
+
     private fun assertClose(expected: Float, actual: Float) {
         assertTrue("expected=$expected actual=$actual", abs(expected - actual) < 1e-5f)
     }

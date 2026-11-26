@@ -196,9 +196,8 @@ fun buildContourPath(profile: ContourScanlineProfile, bounds: RectF): Path {
  * Coordinates are in the same space as the caller; the fitter uses local
  * canvas coordinates so no bitmap/dp conversion happens here.
  *
- * Supports analytical [EnvelopeShapeKind.ELLIPSE] and pixel-extracted
- * [EnvelopeShapeKind.CONTOUR_SCANLINE]. [EnvelopeShapeKind.ROUNDED_RECTANGLE]
- * remains metadata-only.
+ * Supports analytical [EnvelopeShapeKind.ELLIPSE], [EnvelopeShapeKind.ROUNDED_RECTANGLE],
+ * and pixel-extracted [EnvelopeShapeKind.CONTOUR_SCANLINE].
  */
 data class BubbleLineEnvelope(
     val bounds: EnvelopeBounds,
@@ -246,6 +245,7 @@ data class BubbleLineEnvelope(
 
     val isSupportedShape: Boolean
         get() = shape.kind == EnvelopeShapeKind.ELLIPSE ||
+            shape.kind == EnvelopeShapeKind.ROUNDED_RECTANGLE ||
             (shape.kind == EnvelopeShapeKind.CONTOUR_SCANLINE && contourProfile?.isUsable == true)
 
     val isUsable: Boolean
