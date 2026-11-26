@@ -13,6 +13,9 @@ object BubbleTextLayoutEngine {
     private const val SAFE_INSET_RATIO = 0.01f
     private const val MIN_SAFE_INSET_PX = 0.5f
     private const val MAX_SAFE_INSET_PX = 4f
+    const val READER_SAFE_INSET_RATIO = 0.03f
+    const val READER_MIN_SAFE_INSET_PX = 2.5f
+    const val READER_MAX_SAFE_INSET_PX = 8f
 
     fun envelopeForBubble(
         bubbleBounds: RectF,
@@ -20,7 +23,10 @@ object BubbleTextLayoutEngine {
         verticalPaddingDp: Float,
         density: Float,
         contourProfile: ContourScanlineProfile? = null,
-        isRectangular: Boolean = false
+        isRectangular: Boolean = false,
+        safeInsetRatio: Float = SAFE_INSET_RATIO,
+        minSafeInsetPx: Float = MIN_SAFE_INSET_PX,
+        maxSafeInsetPx: Float = MAX_SAFE_INSET_PX
     ): BubbleLineEnvelope? {
         if (!density.isFinite() || density <= 0f) return null
         if (bubbleBounds.width() <= 0f || bubbleBounds.height() <= 0f) return null
@@ -34,8 +40,23 @@ object BubbleTextLayoutEngine {
             return null
         }
 
-        val inset = (minOf(bubbleWidthPx, bubbleHeightPx) * SAFE_INSET_RATIO)
-            .coerceIn(MIN_SAFE_INSET_PX, MAX_SAFE_INSET_PX)
+        val resolvedRatio = if (safeInsetRatio.isFinite()) {
+            safeInsetRatio.coerceAtLeast(0f)
+        } else {
+            SAFE_INSET_RATIO
+        }
+        val resolvedMin = if (minSafeInsetPx.isFinite()) {
+            minSafeInsetPx.coerceAtLeast(0f)
+        } else {
+            MIN_SAFE_INSET_PX
+        }
+        val resolvedMax = if (maxSafeInsetPx.isFinite()) {
+            maxSafeInsetPx.coerceAtLeast(resolvedMin)
+        } else {
+            maxOf(resolvedMin, MAX_SAFE_INSET_PX)
+        }
+        val inset = (minOf(bubbleWidthPx, bubbleHeightPx) * resolvedRatio)
+            .coerceIn(resolvedMin, resolvedMax)
         return BubbleTextEnvelopeGeometry.forBubble(
             bubbleWidthPx = bubbleWidthPx,
             bubbleHeightPx = bubbleHeightPx,
@@ -62,7 +83,10 @@ object BubbleTextLayoutEngine {
         allowBrokenWords: Boolean = false,
         textScaleX: Float = 1.0f,
         contourProfile: ContourScanlineProfile? = null,
-        isRectangular: Boolean = false
+        isRectangular: Boolean = false,
+        safeInsetRatio: Float = SAFE_INSET_RATIO,
+        minSafeInsetPx: Float = MIN_SAFE_INSET_PX,
+        maxSafeInsetPx: Float = MAX_SAFE_INSET_PX
     ): StaticTextLayoutOptimizer.OptimizedLayoutResult? {
         if (!BubbleTextScriptPolicy.isSafe(targetLanguage, text)) return null
         val envelope = envelopeForBubble(
@@ -71,7 +95,10 @@ object BubbleTextLayoutEngine {
             verticalPaddingDp = verticalPaddingDp,
             density = density,
             contourProfile = contourProfile,
-            isRectangular = isRectangular
+            isRectangular = isRectangular,
+            safeInsetRatio = safeInsetRatio,
+            minSafeInsetPx = minSafeInsetPx,
+            maxSafeInsetPx = maxSafeInsetPx
         ) ?: return null
 
         val safeScaleX = if (textScaleX.isFinite()) textScaleX.coerceIn(0.75f, 1.0f) else 1.0f

@@ -217,6 +217,98 @@ class PpOcrV5EngineTest {
     }
 
     @Test
+    fun `isDarkBackgroundRegion accepts purple bubble with white text and rejects gray hair shadow`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val engine = PpOcrV5Engine(context, PpOcrV5Engine.Variant.ENGLISH_ONLY)
+        val region = Rect(10, 10, 190, 110)
+
+        val purpleBubble = Bitmap.createBitmap(200, 120, Bitmap.Config.ARGB_8888)
+        Canvas(purpleBubble).apply {
+            drawColor(Color.rgb(167, 144, 200))
+            val whitePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.WHITE
+                textSize = 28f
+                typeface = Typeface.DEFAULT_BOLD
+                textAlign = Paint.Align.CENTER
+            }
+            drawText("WE MET", 100f, 56f, whitePaint)
+            drawText("AGAIN", 100f, 90f, whitePaint)
+        }
+        assertTrue(
+            "Purple bubble with white text should be detected as dark/colored light-text region",
+            engine.isDarkBackgroundRegion(purpleBubble, region)
+        )
+        assertTrue(
+            "Direct component check should recognize light text on purple background",
+            engine.hasValidTextRegionComponents(purpleBubble, region)
+        )
+
+        val inverted = engine.invertHighContrastBitmap(purpleBubble)
+        assertTrue(
+            "Inverted purple background corner should stretch to bright white",
+            Color.red(inverted.getPixel(2, 2)) >= 240
+        )
+        assertFalse(
+            "Inverted purple bubble must no longer be classified as dark background",
+            engine.isDarkBackgroundRegion(inverted, region)
+        )
+        assertTrue(
+            "Inverted purple bubble should preserve valid text components",
+            engine.hasValidTextRegionComponents(inverted, region)
+        )
+
+        val hairTexture = Bitmap.createBitmap(200, 120, Bitmap.Config.ARGB_8888)
+        Canvas(hairTexture).apply {
+            drawColor(Color.rgb(110, 112, 118))
+            val streakPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.rgb(155, 155, 160)
+                strokeWidth = 4f
+            }
+            for (x in 15..185 step 14) {
+                drawLine(x.toFloat(), 5f, (x + 10).toFloat(), 115f, streakPaint)
+            }
+        }
+        assertFalse(
+            "Gray hair/shadow texture without bright white text must be rejected",
+            engine.isDarkBackgroundRegion(hairTexture, region)
+        )
+    }
+
+    @Test
+    fun `PpOcrV5Detector page scan helpers tile, gate inverted pass, exclude, and dedupe lines`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val detector = PpOcrV5Detector(context)
+
+        val starts = detector.computeTileStarts(totalSize = 2000, tileSize = 960, stepSize = 768)
+        assertEquals(listOf(0, 768, 1040), starts)
+
+        val whitePixels = IntArray(100 * 100) { Color.WHITE }
+        assertFalse(detector.shouldRunInvertedPass(whitePixels, 100, 100))
+
+        val purpleWithWhiteText = IntArray(100 * 100) { idx ->
+            val x = idx % 100
+            val y = idx / 100
+            if (x in 25..75 && y in 40..55) Color.WHITE else Color.rgb(167, 144, 200)
+        }
+        assertTrue(detector.shouldRunInvertedPass(purpleWithWhiteText, 100, 100))
+
+        val excluded = listOf(Rect(20, 20, 180, 100))
+        assertTrue(detector.isExcludedLine(Rect(30, 30, 170, 90), excluded))
+        assertFalse(detector.isExcludedLine(Rect(200, 200, 340, 240), excluded))
+
+        val deduped = detector.dedupeDetectedLines(
+            listOf(
+                PpOcrV5Detector.DetectedLine(Rect(10, 50, 110, 80), 0.90f),
+                PpOcrV5Detector.DetectedLine(Rect(10, 50, 180, 80), 0.84f),
+                PpOcrV5Detector.DetectedLine(Rect(15, 100, 140, 130), 0.88f)
+            )
+        )
+        assertEquals(2, deduped.size)
+        assertEquals(Rect(10, 50, 180, 80), deduped[0].rect)
+        assertEquals(Rect(15, 100, 140, 130), deduped[1].rect)
+    }
+
+    @Test
     fun `PpOcrV5DetPreprocess scaledSize upscales small crops when minSide is set`() {
         val upscaled = PpOcrV5DetPreprocess.scaledSize(160, 80, 960, minSide = 480)
         assertEquals(480, upscaled[0])

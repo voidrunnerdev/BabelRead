@@ -217,6 +217,67 @@ class DarkBubbleDetectorTest {
     }
 
     @Test
+    fun `hasDarkInterior accepts purple pastel bubble with white text and rejects gray hair shadow texture`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val detector = YoloBubbleDetector(context)
+        val page = createWhitePage(480, 720)
+        val canvas = Canvas(page)
+
+        // 1. Purple pastel bubble (RGB [167, 144, 200], luma ~157) with white text
+        val purpleFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(167, 144, 200)
+            style = Paint.Style.FILL
+        }
+        val purpleRect = RectF(120f, 120f, 340f, 250f)
+        canvas.drawOval(purpleRect, purpleFill)
+        val whiteText = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE
+            textSize = 30f
+            typeface = Typeface.DEFAULT_BOLD
+            textAlign = Paint.Align.CENTER
+        }
+        canvas.drawText("I MISSED", 230f, 178f, whiteText)
+        canvas.drawText("YOU...", 230f, 214f, whiteText)
+
+        // 2. Gray hair / shadow texture without bright white text peaks
+        val hairBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(112, 112, 118)
+            style = Paint.Style.FILL
+        }
+        val hairRect = RectF(120f, 360f, 340f, 490f)
+        canvas.drawRect(hairRect, hairBg)
+        val hairHighlight = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(156, 156, 162)
+            strokeWidth = 5f
+            style = Paint.Style.STROKE
+        }
+        for (i in 0..8) {
+            val x = 135f + i * 22f
+            canvas.drawLine(x, 370f, x + 12f, 480f, hairHighlight)
+        }
+
+        val purpleNorm = RectF(120f / 480f, 120f / 720f, 340f / 480f, 250f / 720f)
+        val hairNorm = RectF(120f / 480f, 360f / 720f, 340f / 480f, 490f / 720f)
+
+        assertTrue(
+            "Purple pastel bubble with white text must pass hasDarkInterior",
+            detector.hasDarkInterior(page, purpleNorm)
+        )
+        assertFalse(
+            "Gray hair/shadow texture without white text peaks must be rejected",
+            detector.hasDarkInterior(page, hairNorm)
+        )
+
+        val candidates = listOf(
+            YoloBubbleDetector.YoloDetection(classId = 0, label = "bubble", confidence = 0.68f, box = purpleNorm),
+            YoloBubbleDetector.YoloDetection(classId = 0, label = "bubble", confidence = 0.80f, box = hairNorm)
+        )
+        val rescued = detector.filterInvertedBubbleDetections(page, candidates, emptyList())
+        assertEquals(1, rescued.size)
+        assertEquals(purpleNorm, rescued.first().box)
+    }
+
+    @Test
     fun `default detector model and confidence threshold are aligned at 0_25f for YOLO11N_SEG`() = runBlocking {
         assertEquals(0.25f, DetectorModel.YOLO11N_SEG.defaultConfidence, 0.001f)
         assertEquals(0.25f, YoloBubbleDetector.DEFAULT_CONF_THRESHOLD, 0.001f)

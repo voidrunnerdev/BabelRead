@@ -8,6 +8,8 @@ import android.graphics.Bitmap
 import android.graphics.Rect
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -36,6 +38,10 @@ class PpOcrV5Detector(context: Context) {
         private const val MAX_CANDIDATES = 1000
         private const val NMS_THRESHOLD = 0.5f
         private const val MAX_REGION_PIXELS = 4_000_000L
+        private const val PAGE_SCAN_TILE_MAX_WIDTH = 1280
+        private const val PAGE_SCAN_TILE_MAX_HEIGHT = 1152
+        private const val PAGE_SCAN_NON_WHITE_LUMA = 185
+        private const val PAGE_SCAN_BRIGHT_LUMA = 195
     }
 
     data class DetectedLine(
@@ -111,48 +117,277 @@ class PpOcrV5Detector(context: Context) {
                 } finally {
                     if (crop !== bitmap && !crop.isRecycled) crop.recycle()
                 }
-
-                val target = PpOcrV5DetPreprocess.scaledSize(
-                    cropRect.width(),
-                    cropRect.height(),
-                    LIMIT_SIDE,
-                    MIN_DETECT_SIDE
-                )
-                val buffer = ByteBuffer.allocateDirect(
-                    target[0] * target[1] * 3 * Float.SIZE_BYTES
-                ).order(ByteOrder.nativeOrder()).asFloatBuffer()
-                PpOcrV5DetPreprocess.writeTensor(
-                    pixels,
-                    cropRect.width(),
-                    cropRect.height(),
-                    target[0],
-                    target[1],
-                    buffer
-                )
-                buffer.position(0)
-                val detection = runDetection(buffer, target[0], target[1])
-                if (detection.boxes.isEmpty()) return@withContext emptyList()
-
-                val scaleX = cropRect.width().toFloat() / detection.width
-                val scaleY = cropRect.height().toFloat() / detection.height
-                detection.boxes.mapNotNull { box ->
-                    val left = (cropRect.left + box.left * scaleX).roundToInt()
-                        .coerceIn(0, bitmap.width - 1)
-                    val top = (cropRect.top + box.top * scaleY).roundToInt()
-                        .coerceIn(0, bitmap.height - 1)
-                    val right = (cropRect.left + (box.right + 1f) * scaleX).roundToInt()
-                        .coerceIn(left + 1, bitmap.width)
-                    val bottom = (cropRect.top + (box.bottom + 1f) * scaleY).roundToInt()
-                        .coerceIn(top + 1, bitmap.height)
-                    if (right - left < 4 || bottom - top < 4) return@mapNotNull null
-                    DetectedLine(Rect(left, top, right, bottom), box.score)
-                }
+                detectFromCropPixels(pixels, cropRect, bitmap.width, bitmap.height)
             } catch (t: Throwable) {
                 if (t is kotlinx.coroutines.CancellationException) throw t
                 Log.w(TAG, "PP-OCRv5 detector inference failed: ${t.message}")
                 emptyList()
             }
         }
+
+    /**
+     * Scans the full page using overlapping tiles (to stay within [MAX_REGION_PIXELS]
+     * and preserve text resolution on tall webtoon strips) for lines missed by bubble
+     * detection, including an inverted-contrast pass on dark/colored strips.
+     */
+    suspend fun detectMissingPageLines(
+        bitmap: Bitmap,
+        excludeRegions: List<Rect>,
+        includeInvertedPass: Boolean = true
+    ): List<DetectedLine> = withContext(Dispatchers.Default) {
+        if (bitmap.isRecycled || bitmap.width < 8 || bitmap.height < 8) {
+            return@withContext emptyList()
+        }
+        if (!ensureInitialized()) return@withContext emptyList()
+
+        val pageW = bitmap.width
+        val pageH = bitmap.height
+        val tileW = if (pageW > 1440) {
+            min(PAGE_SCAN_TILE_MAX_WIDTH, (pageW + 1) / 2 + 120)
+        } else {
+            pageW
+        }
+        val maxHeightByPixels = (MAX_REGION_PIXELS / max(1, tileW).toLong()).toInt().coerceAtLeast(LIMIT_SIDE)
+        val tileH = min(
+            pageH,
+            min(
+                maxHeightByPixels,
+                max(LIMIT_SIDE, min(PAGE_SCAN_TILE_MAX_HEIGHT, (tileW * 1.25f).roundToInt()))
+            )
+        )
+        val overlapX = if (tileW < pageW) (tileW * 0.15f).roundToInt().coerceIn(48, 160) else 0
+        val overlapY = if (tileH < pageH) (tileH * 0.20f).roundToInt().coerceIn(80, 220) else 0
+        val stepX = max(1, tileW - overlapX)
+        val stepY = max(1, tileH - overlapY)
+
+        val xStarts = computeTileStarts(pageW, tileW, stepX)
+        val yStarts = computeTileStarts(pageH, tileH, stepY)
+        val collected = ArrayList<DetectedLine>()
+
+        for (yStart in yStarts) {
+            for (xStart in xStarts) {
+                currentCoroutineContext().ensureActive()
+                val tileRect = Rect(
+                    xStart,
+                    yStart,
+                    (xStart + tileW).coerceAtMost(pageW),
+                    (yStart + tileH).coerceAtMost(pageH)
+                )
+                if (tileRect.width() < 8 || tileRect.height() < 8) continue
+                if (tileRect.width().toLong() * tileRect.height() > MAX_REGION_PIXELS) continue
+                if (excludeRegions.any { !it.isEmpty && it.contains(tileRect) }) continue
+
+                val pixels = try {
+                    IntArray(tileRect.width() * tileRect.height()).also {
+                        bitmap.getPixels(
+                            it,
+                            0,
+                            tileRect.width(),
+                            tileRect.left,
+                            tileRect.top,
+                            tileRect.width(),
+                            tileRect.height()
+                        )
+                    }
+                } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) throw t
+                    Log.w(TAG, "PP-OCRv5 page tile pixel read failed: ${t.message}")
+                    continue
+                }
+
+                try {
+                    val normalDetections = detectFromCropPixels(pixels, tileRect, pageW, pageH)
+                    for (line in normalDetections) {
+                        if (!isExcludedLine(line.rect, excludeRegions)) {
+                            collected.add(line)
+                        }
+                    }
+
+                    if (includeInvertedPass && shouldRunInvertedPass(pixels, tileRect.width(), tileRect.height())) {
+                        val invertedPixels = buildInvertedContrastPixels(pixels)
+                        val invertedDetections = detectFromCropPixels(invertedPixels, tileRect, pageW, pageH)
+                        for (line in invertedDetections) {
+                            if (!isExcludedLine(line.rect, excludeRegions)) {
+                                collected.add(line)
+                            }
+                        }
+                    }
+                } catch (t: Throwable) {
+                    if (t is kotlinx.coroutines.CancellationException) throw t
+                    Log.w(TAG, "PP-OCRv5 page tile detection failed: ${t.message}")
+                }
+            }
+        }
+
+        dedupeDetectedLines(collected)
+    }
+
+    private suspend fun detectFromCropPixels(
+        pixels: IntArray,
+        cropRect: Rect,
+        pageWidth: Int,
+        pageHeight: Int
+    ): List<DetectedLine> {
+        val target = PpOcrV5DetPreprocess.scaledSize(
+            cropRect.width(),
+            cropRect.height(),
+            LIMIT_SIDE,
+            MIN_DETECT_SIDE
+        )
+        val buffer = ByteBuffer.allocateDirect(
+            target[0] * target[1] * 3 * Float.SIZE_BYTES
+        ).order(ByteOrder.nativeOrder()).asFloatBuffer()
+        PpOcrV5DetPreprocess.writeTensor(
+            pixels,
+            cropRect.width(),
+            cropRect.height(),
+            target[0],
+            target[1],
+            buffer
+        )
+        buffer.position(0)
+        val detection = runDetection(buffer, target[0], target[1])
+        if (detection.boxes.isEmpty()) return emptyList()
+
+        val scaleX = cropRect.width().toFloat() / detection.width
+        val scaleY = cropRect.height().toFloat() / detection.height
+        return detection.boxes.mapNotNull { box ->
+            val left = (cropRect.left + box.left * scaleX).roundToInt()
+                .coerceIn(0, pageWidth - 1)
+            val top = (cropRect.top + box.top * scaleY).roundToInt()
+                .coerceIn(0, pageHeight - 1)
+            val right = (cropRect.left + (box.right + 1f) * scaleX).roundToInt()
+                .coerceIn(left + 1, pageWidth)
+            val bottom = (cropRect.top + (box.bottom + 1f) * scaleY).roundToInt()
+                .coerceIn(top + 1, pageHeight)
+            if (right - left < 4 || bottom - top < 4) return@mapNotNull null
+            DetectedLine(Rect(left, top, right, bottom), box.score)
+        }
+    }
+
+    internal fun computeTileStarts(totalSize: Int, tileSize: Int, stepSize: Int): List<Int> {
+        if (totalSize <= tileSize || tileSize <= 0) return listOf(0)
+        val safeStep = max(1, stepSize)
+        val starts = ArrayList<Int>()
+        var pos = 0
+        while (pos + tileSize < totalSize) {
+            starts.add(pos)
+            pos += safeStep
+        }
+        val lastStart = (totalSize - tileSize).coerceAtLeast(0)
+        if (starts.isEmpty() || starts.last() != lastStart) {
+            starts.add(lastStart)
+        }
+        return starts
+    }
+
+    internal fun shouldRunInvertedPass(pixels: IntArray, width: Int, height: Int): Boolean {
+        if (width <= 0 || height <= 0 || pixels.size < width * height) return false
+        val stride = max(2, min(8, min(width, height) / 48))
+        var total = 0
+        var nonWhiteCount = 0
+        var brightCount = 0
+        var y = 0
+        while (y < height) {
+            val rowOffset = y * width
+            var x = 0
+            while (x < width) {
+                val color = pixels[rowOffset + x]
+                val r = (color shr 16) and 0xFF
+                val g = (color shr 8) and 0xFF
+                val b = color and 0xFF
+                val luma = (r * 299 + g * 587 + b * 114) / 1000
+                if (luma < PAGE_SCAN_NON_WHITE_LUMA) nonWhiteCount++
+                if (luma >= PAGE_SCAN_BRIGHT_LUMA) brightCount++
+                total++
+                x += stride
+            }
+            y += stride
+        }
+        return total > 0 && nonWhiteCount.toFloat() / total >= 0.02f && brightCount >= 4
+    }
+
+    internal fun buildInvertedContrastPixels(pixels: IntArray): IntArray {
+        val inverted = IntArray(pixels.size)
+        for (i in pixels.indices) {
+            val color = pixels[i]
+            val r = (color shr 16) and 0xFF
+            val g = (color shr 8) and 0xFF
+            val b = color and 0xFF
+            val luma = (r * 299 + g * 587 + b * 114) / 1000f
+            val out = ((185f - luma) * 2.0f + 145f).roundToInt().coerceIn(0, 255)
+            inverted[i] = (0xFF shl 24) or (out shl 16) or (out shl 8) or out
+        }
+        return inverted
+    }
+
+    internal fun isExcludedLine(rect: Rect, excludeRegions: List<Rect>): Boolean {
+        if (excludeRegions.isEmpty()) return false
+        val lineArea = rect.width().toLong() * rect.height()
+        if (lineArea <= 0L) return true
+        for (exclude in excludeRegions) {
+            if (exclude.isEmpty) continue
+            val interLeft = max(rect.left, exclude.left)
+            val interTop = max(rect.top, exclude.top)
+            val interRight = min(rect.right, exclude.right)
+            val interBottom = min(rect.bottom, exclude.bottom)
+            if (interRight <= interLeft || interBottom <= interTop) continue
+            val interArea = (interRight - interLeft).toLong() * (interBottom - interTop)
+            val excludeArea = exclude.width().toLong() * exclude.height()
+            val unionArea = lineArea + excludeArea - interArea
+            val iou = if (unionArea > 0L) interArea.toFloat() / unionArea else 0f
+            val coverage = interArea.toFloat() / lineArea
+            if (iou > 0.30f || coverage > 0.45f) return true
+        }
+        return false
+    }
+
+    internal fun dedupeDetectedLines(lines: List<DetectedLine>): List<DetectedLine> {
+        if (lines.size <= 1) return lines
+        val sorted = lines.sortedByDescending { it.confidence }
+        val kept = ArrayList<DetectedLine>(sorted.size)
+        for (candidate in sorted) {
+            val candRect = candidate.rect
+            val candArea = candRect.width().toLong() * candRect.height()
+            if (candArea <= 0L) continue
+            var mergedOrSuppressed = false
+            for (i in kept.indices) {
+                val existing = kept[i]
+                val existRect = existing.rect
+                val interLeft = max(candRect.left, existRect.left)
+                val interTop = max(candRect.top, existRect.top)
+                val interRight = min(candRect.right, existRect.right)
+                val interBottom = min(candRect.bottom, existRect.bottom)
+                if (interRight <= interLeft || interBottom <= interTop) continue
+                val interH = interBottom - interTop
+                val interArea = (interRight - interLeft).toLong() * interH
+                val existArea = existRect.width().toLong() * existRect.height()
+                val unionArea = candArea + existArea - interArea
+                val iou = if (unionArea > 0L) interArea.toFloat() / unionArea else 0f
+                val minArea = min(candArea, existArea).coerceAtLeast(1L)
+                val overlapMin = interArea.toFloat() / minArea
+                if (iou > 0.30f || overlapMin > 0.55f) {
+                    val minH = min(candRect.height(), existRect.height()).coerceAtLeast(1)
+                    val maxH = max(candRect.height(), existRect.height())
+                    if (interH.toFloat() / minH >= 0.60f && maxH <= minH * 1.40f) {
+                        val mergedRect = Rect(
+                            min(existRect.left, candRect.left),
+                            min(existRect.top, candRect.top),
+                            max(existRect.right, candRect.right),
+                            max(existRect.bottom, candRect.bottom)
+                        )
+                        kept[i] = DetectedLine(mergedRect, max(existing.confidence, candidate.confidence))
+                    }
+                    mergedOrSuppressed = true
+                    break
+                }
+            }
+            if (!mergedOrSuppressed) {
+                kept.add(DetectedLine(Rect(candRect), candidate.confidence))
+            }
+        }
+        return kept.sortedWith(compareBy<DetectedLine> { it.rect.top }.thenBy { it.rect.left })
+    }
 
     private suspend fun runDetection(
         tensor: FloatBuffer,

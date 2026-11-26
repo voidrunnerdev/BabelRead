@@ -2776,6 +2776,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     // 2. Bölge OCR: yalnızca balon kutuları okunur. Balon dışı
                     // (text_free) yazılar şimdilik çevrilmez ve maskelenmez.
                     val regionMode = yoloEnabled && bubbleDetector.isAiModelReady()
+                    val sfxBoxes = if (yoloBubbles.isNotEmpty()) {
+                        yoloBubbles.filter {
+                            it.label in setOf("text_free", "onomatopoeia_text")
+                        }.map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
+                    } else {
+                        emptyList()
+                    }
                     val bubbleOcrRegions = if (regionMode) {
                         if (isPpOcrAny) {
                             buildPpOcrV5Regions(yoloBubbles, bitmap.width, bitmap.height)
@@ -2797,15 +2804,16 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
 
                     var ocrTimeoutMs = 120000L
                     val ocrResult: List<TranslationService.RectAndText>? = if (regionMode) {
-                        if (bubbleOcrRegions.isEmpty()) {
-                            Log.d("TR", "Bölge OCR: sayfa=$pageIdx için balon kutusu yok; metin yok sayılıyor")
+                        var primaryTimedOut = false
+                        val primaryBlocks: List<TranslationService.RectAndText> = if (bubbleOcrRegions.isEmpty()) {
+                            Log.d("TR", "Bölge OCR: sayfa=$pageIdx için balon kutusu yok; kurtarma taramasına geçiliyor")
                             emptyList()
                         } else {
                             val regionArea = bubbleOcrRegions.sumOf { it.width().toLong() * it.height() }
                             val pageArea = (bitmap.width.toLong() * bitmap.height).coerceAtLeast(1L)
                             ocrTimeoutMs = (6000L + bubbleOcrRegions.size * 2000L).coerceAtMost(120000L)
                             Log.d("TR", "Bölge OCR başladı: sayfa=$pageIdx, ${bubbleOcrRegions.size} bölge (sayfa alanının %${regionArea * 100 / pageArea}'si)")
-                            ocrExecutionMutex.withLock {
+                            val regionResult = ocrExecutionMutex.withLock {
                                 withTimeoutOrNull(ocrTimeoutMs) {
                                     translationService.performRegionOcr(
                                         bitmap,
@@ -2815,6 +2823,45 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     )
                                 }
                             }
+                            if (regionResult == null) {
+                                primaryTimedOut = true
+                                emptyList()
+                            } else {
+                                regionResult
+                            }
+                        }
+                        if (primaryTimedOut) {
+                            null
+                        } else if (isPpOcrAny) {
+                            val fallbackTimeoutMs = (20000L + ((bitmap.height / 1400).coerceAtLeast(1) * 10000L))
+                                .coerceAtMost(120000L)
+                            val fallbackBlocks = ocrExecutionMutex.withLock {
+                                withTimeoutOrNull(fallbackTimeoutMs) {
+                                    translationService.performFallbackLineScanAndOcr(
+                                        bitmap = bitmap,
+                                        existingBubbleRects = bubbleOcrRegions,
+                                        excludeSfx = sfxBoxes,
+                                        originLanguage = ppOriginLang ?: originLang,
+                                        ocrEngine = ocrEngine
+                                    )
+                                }
+                            }
+                            if (fallbackBlocks == null) {
+                                Log.w("TR", "Fallback satır OCR zaman aşımına uğradı: sayfa=$pageIdx, süre=${fallbackTimeoutMs}ms")
+                                if (bubbleOcrRegions.isEmpty()) {
+                                    ocrTimeoutMs = fallbackTimeoutMs
+                                    null
+                                } else {
+                                    primaryBlocks
+                                }
+                            } else {
+                                if (fallbackBlocks.isNotEmpty()) {
+                                    Log.d("TR", "Fallback satır taraması ${fallbackBlocks.size} ek blok buldu (sayfa=$pageIdx)")
+                                }
+                                FallbackBubbleSupport.mergeOcrBlocksWithFallback(primaryBlocks, fallbackBlocks)
+                            }
+                        } else {
+                            primaryBlocks
                         }
                     } else {
                         Log.d("TR", "OCR başladı: sayfa=$pageIdx")
@@ -2857,15 +2904,6 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     val finalBlocks = mutableListOf<TextBlockObj>()
                     var translationCanBeCached = false
 
-                    data class BubbleCandidate(
-                        val targetBox: Rect,
-                        val text: String,
-                        val textRect: Rect,
-                        val isBubble: Boolean,
-                        val isDark: Boolean,
-                        val bubbleBounds: Rect = targetBox,
-                        val contourProfile: ContourScanlineProfile? = null
-                    )
                     val candidates = mutableListOf<BubbleCandidate>()
                     // Modelin ham text_free/onomatopeya kutuları. Bunlar yalnızca
                     // maskeleme kapsamını genişletmek için kullanılır; balonun
@@ -2873,239 +2911,19 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     val pageAuxBoxes = mutableListOf<Rect>()
 
                     // Safety net: when OCR splits one balloon into several blocks,
-                    // join vertically adjacent fragments that share the same balloon
-                    // so they are translated as a single unit.
-                    fun mergeSameBubbleFragments(input: List<BubbleCandidate>): List<BubbleCandidate> {
-                        if (input.size <= 1) return input
-                        fun areaOf(r: Rect): Long = r.width().toLong() * r.height().toLong()
-                        fun sameBalloon(a: Rect, b: Rect): Boolean {
-                            if (a.isEmpty || b.isEmpty) return false
-                            if (a == b) return true
-                            val interW = (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0)
-                            val interH = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0)
-                            val inter = interW.toLong() * interH
-                            val areaA = areaOf(a)
-                            val areaB = areaOf(b)
-                            val maxArea = maxOf(areaA, areaB).coerceAtLeast(1L)
-                            val unionArea = (areaA + areaB - inter).coerceAtLeast(1L)
-                            val iou = inter.toFloat() / unionArea
-                            return iou >= 0.55f || inter.toFloat() / maxArea >= 0.85f
-                        }
-                        val verticalCjkMode = (ppOriginLang ?: originLang).equals("Japonca", ignoreCase = true) &&
-                            input.count { it.textRect.height() > it.textRect.width() * 1.3f } * 2 >= input.size
-                        fun tryMerge(a: BubbleCandidate, b: BubbleCandidate): BubbleCandidate? {
-                            if (!sameBalloon(a.bubbleBounds, b.bubbleBounds)) return null
-                            val lineHeight = minOf(a.textRect.height(), b.textRect.height())
-                                .coerceAtLeast(1).toFloat()
-
-                            fun buildMerged(
-                                first: BubbleCandidate,
-                                second: BubbleCandidate,
-                                joinedText: String
-                            ): BubbleCandidate = BubbleCandidate(
-                                targetBox = Rect(
-                                    minOf(first.targetBox.left, second.targetBox.left),
-                                    minOf(first.targetBox.top, second.targetBox.top),
-                                    maxOf(first.targetBox.right, second.targetBox.right),
-                                    maxOf(first.targetBox.bottom, second.targetBox.bottom)
-                                ),
-                                text = joinedText,
-                                textRect = Rect(
-                                    minOf(first.textRect.left, second.textRect.left),
-                                    minOf(first.textRect.top, second.textRect.top),
-                                    maxOf(first.textRect.right, second.textRect.right),
-                                    maxOf(first.textRect.bottom, second.textRect.bottom)
-                                ),
-                                isBubble = first.isBubble || second.isBubble,
-                                isDark = first.isDark,
-                                bubbleBounds = if (areaOf(first.bubbleBounds) >= areaOf(second.bubbleBounds)) {
-                                    first.bubbleBounds
-                                } else {
-                                    second.bubbleBounds
-                                },
-                                contourProfile = first.contourProfile ?: second.contourProfile
-                            )
-
-                            fun joinFragmentText(firstText: String, secondText: String): String {
-                                if (firstText.length >= 3 && secondText.length >= 3 &&
-                                    (firstText.contains(secondText, ignoreCase = true) ||
-                                        secondText.contains(firstText, ignoreCase = true))
-                                ) {
-                                    return if (firstText.length >= secondText.length) firstText else secondText
-                                }
-                                return translationService.joinTextFragments(firstText, secondText, true)
+                    // join fragments that share the same balloon and prevent any
+                    // remaining lobes from claiming the exact same bubble bounds.
+                    fun mergeSameBubbleFragments(input: List<BubbleCandidate>): List<BubbleCandidate> =
+                        BubbleCandidateMerger.mergeSameBubbleFragments(
+                            input = input,
+                            isJapanese = (ppOriginLang ?: originLang).equals("Japonca", ignoreCase = true),
+                            joinText = { firstText, secondText, firstBeforeSecond ->
+                                translationService.joinTextFragments(firstText, secondText, firstBeforeSecond)
                             }
-
-                            if (verticalCjkMode) {
-                                val minW = minOf(a.textRect.width(), b.textRect.width())
-                                    .coerceAtLeast(1).toFloat()
-                                val sameColumn = kotlin.math.abs(
-                                    a.textRect.exactCenterX() - b.textRect.exactCenterX()
-                                ) < minW * 0.6f
-                                if (sameColumn) {
-                                    val upper = if (a.textRect.top <= b.textRect.top) a else b
-                                    val lower = if (upper === a) b else a
-                                    val gap = (lower.textRect.top - upper.textRect.bottom).toFloat()
-                                    if (gap <= lineHeight * 2.0f) {
-                                        return buildMerged(
-                                            upper,
-                                            lower,
-                                            joinFragmentText(upper.text.trim(), lower.text.trim())
-                                        )
-                                    }
-                                }
-                            }
-
-                            // Aynı satırda sol/sağ bölünmüş parçalar önce denenir;
-                            // kutular yatayda komşu ve dikeyde büyük ölçüde
-                            // örtüşüyorsa tek metin olarak soldan sağa birleştirilir.
-                            val left = if (a.textRect.left <= b.textRect.left) a else b
-                            val right = if (left === a) b else a
-                            val vOverlap = minOf(left.textRect.bottom, right.textRect.bottom) -
-                                maxOf(left.textRect.top, right.textRect.top)
-                            val minH = minOf(left.textRect.height(), right.textRect.height())
-                                .coerceAtLeast(1)
-                            val hGap = (right.textRect.left - left.textRect.right).toFloat()
-                            val vOverlapThreshold = if (verticalCjkMode) 0.35f else 0.5f
-                            val hGapLimit = if (verticalCjkMode) 1.5f else 1.0f
-                            if (vOverlap >= minH * vOverlapThreshold &&
-                                hGap <= lineHeight * hGapLimit &&
-                                hGap > -lineHeight * 0.5f
-                            ) {
-                                val first = if (verticalCjkMode) right else left
-                                val second = if (verticalCjkMode) left else right
-                                return buildMerged(
-                                    first,
-                                    second,
-                                    joinFragmentText(first.text.trim(), second.text.trim())
-                                )
-                            }
-
-                            if (!verticalCjkMode) {
-                                val upper = if (a.textRect.top <= b.textRect.top) a else b
-                                val lower = if (upper === a) b else a
-                                val gap = (lower.textRect.top - upper.textRect.bottom).toFloat()
-                                if (gap > lineHeight * 2.0f) return null
-                                val interW = minOf(upper.textRect.right, lower.textRect.right) -
-                                    maxOf(upper.textRect.left, lower.textRect.left)
-                                if (interW < minOf(upper.textRect.width(), lower.textRect.width()) * 0.30f) return null
-                                return buildMerged(
-                                    upper,
-                                    lower,
-                                    joinFragmentText(upper.text.trim(), lower.text.trim())
-                                )
-                            }
-                            return null
-                        }
-                        val working = if (verticalCjkMode) {
-                            input.sortedWith(
-                                compareByDescending<BubbleCandidate> { it.textRect.right }
-                                    .thenBy { it.textRect.top }
-                            )
-                        } else {
-                            input.sortedWith(
-                                compareBy({ it.textRect.top }, { it.textRect.left })
-                            )
-                        }.toMutableList()
-                        var changed = true
-                        while (changed) {
-                            changed = false
-                            mergeLoop@ for (i in working.indices) {
-                                for (j in i + 1 until working.size) {
-                                    val mergedPair = tryMerge(working[i], working[j]) ?: continue
-                                    working[i] = mergedPair
-                                    working.removeAt(j)
-                                    changed = true
-                                    break@mergeLoop
-                                }
-                            }
-                        }
-
-                        // A balloon can still end up with two OCR candidates when their
-                        // geometry does not look like adjacent fragments, yet both are
-                        // centered on the same safe layout box. Merge those candidates
-                        // before translation; otherwise both translations are drawn in
-                        // the same rectangle and overlap each other.
-                        val consolidated = mutableListOf<BubbleCandidate>()
-                        for (candidate in working) {
-                            val sameTargetIndex = consolidated.indexOfFirst { existing ->
-                                if (!sameBalloon(existing.bubbleBounds, candidate.bubbleBounds)) {
-                                    return@indexOfFirst false
-                                }
-
-                                val bubbleH = existing.bubbleBounds.height().toFloat()
-                                val bubbleW = existing.bubbleBounds.width().toFloat()
-                                val isTallTwinBubble = bubbleH > bubbleW * 1.30f
-
-                                val gapY = if (candidate.textRect.top > existing.textRect.bottom) {
-                                    candidate.textRect.top - existing.textRect.bottom
-                                } else if (existing.textRect.top > candidate.textRect.bottom) {
-                                    existing.textRect.top - candidate.textRect.bottom
-                                } else 0
-
-                                val verticalCenterDist = kotlin.math.abs(existing.textRect.centerY() - candidate.textRect.centerY())
-
-                                // DİKEY AYRIK İKİZ BALON KORUMASI:
-                                // Balon belirgin şekilde uzunsa ve iki metin arasında dikey lob ayrımı varsa
-                                // ASLA tek metin olarak birleştirilmez.
-                                if (isTallTwinBubble && (gapY > 8 || verticalCenterDist > bubbleH * 0.28f)) {
-                                    return@indexOfFirst false
-                                }
-
-                                val interW = (minOf(existing.targetBox.right, candidate.targetBox.right) -
-                                    maxOf(existing.targetBox.left, candidate.targetBox.left))
-                                    .coerceAtLeast(0)
-                                val interH = (minOf(existing.targetBox.bottom, candidate.targetBox.bottom) -
-                                    maxOf(existing.targetBox.top, candidate.targetBox.top))
-                                    .coerceAtLeast(0)
-                                val intersection = interW.toLong() * interH
-                                val minArea = minOf(
-                                    areaOf(existing.targetBox),
-                                    areaOf(candidate.targetBox)
-                                ).coerceAtLeast(1L)
-                                intersection.toFloat() / minArea >= 0.55f
-                            }
-                            if (sameTargetIndex < 0) {
-                                consolidated.add(candidate)
-                                continue
-                            }
-                            val existing = consolidated[sameTargetIndex]
-                            val joinedText = when {
-                                existing.text.contains(candidate.text, ignoreCase = true) -> existing.text
-                                candidate.text.contains(existing.text, ignoreCase = true) -> candidate.text
-                                else -> translationService.joinTextFragments(
-                                    existing.text,
-                                    candidate.text,
-                                    true
-                                )
-                            }
-                            consolidated[sameTargetIndex] = BubbleCandidate(
-                                targetBox = Rect(existing.targetBox).apply {
-                                    union(candidate.targetBox)
-                                },
-                                text = joinedText,
-                                textRect = Rect(existing.textRect).apply {
-                                    union(candidate.textRect)
-                                },
-                                isBubble = existing.isBubble || candidate.isBubble,
-                                isDark = existing.isDark || candidate.isDark,
-                                bubbleBounds = if (areaOf(existing.bubbleBounds) >= areaOf(candidate.bubbleBounds)) {
-                                    existing.bubbleBounds
-                                } else {
-                                    candidate.bubbleBounds
-                                },
-                                contourProfile = existing.contourProfile ?: candidate.contourProfile
-                            )
-                        }
-                        return consolidated
-                    }
+                        )
 
                     // 3. Eşleştirme ve Çeviri Akışı
                     if (yoloBubbles.isNotEmpty()) {
-                        val sfxBoxes = yoloBubbles.filter {
-                            it.label in setOf("text_free", "onomatopoeia_text")
-                        }
-                            .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
                         pageAuxBoxes.addAll(sfxBoxes)
                         val balloonBoxes = dedupeRegions(
                             yoloBubbles.filter { it.label in setOf("bubble", "balloon") }
@@ -3192,30 +3010,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 sfx.contains(textRect.centerX(), textRect.centerY())
                         }
 
-                        fun isBubbleInteriorDark(bubbleRect: Rect?): Boolean {
-                            if (bubbleRect == null || bubbleRect.width() < 8 || bubbleRect.height() < 8) {
-                                return false
-                            }
-                            val insetX = (bubbleRect.width() * 0.12f).toInt().coerceAtLeast(1)
-                            val insetY = (bubbleRect.height() * 0.12f).toInt().coerceAtLeast(1)
-                            val sLeft = (bubbleRect.left + insetX).coerceIn(0, bitmap.width - 1)
-                            val sRight = (bubbleRect.right - insetX).coerceIn(sLeft, bitmap.width - 1)
-                            val sTop = (bubbleRect.top + insetY).coerceIn(0, bitmap.height - 1)
-                            val sBottom = (bubbleRect.bottom - insetY).coerceIn(sTop, bitmap.height - 1)
-                            val stepX = maxOf(1, (sRight - sLeft) / 6)
-                            val stepY = maxOf(1, (sBottom - sTop) / 6)
-                            var total = 0
-                            var dark = 0
-                            for (sy in sTop..sBottom step stepY) {
-                                for (sx in sLeft..sRight step stepX) {
-                                    val px = bitmap.getPixel(sx, sy)
-                                    val lum = Color.red(px) * 0.299f + Color.green(px) * 0.587f + Color.blue(px) * 0.114f
-                                    total++
-                                    if (lum < 65f) dark++
-                                }
-                            }
-                            return total > 0 && dark * 100 >= total * 55
-                        }
+                        fun isBubbleInteriorDark(bubbleRect: Rect?): Boolean =
+                            FallbackBubbleSupport.isBubbleInteriorDark(bitmap, bubbleRect)
 
                         val ocrAssignments = mutableMapOf<Int, Int>()
                         for ((ocrIdx, ocr) in ocrBlocks.withIndex()) {
@@ -3302,6 +3098,58 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
 
+                        fun buildYoloBubbleCandidate(
+                            textBounds: Rect,
+                            rawText: String
+                        ): BubbleCandidate? {
+                            val cleanedText = translationService.cleanOcrArtifacts(rawText, ppOriginLang ?: originLang)
+                            val analysis = translationService.analyzeBubble(bitmap, textBounds)
+                            val containingBubble = selectContainingBubble(textBounds)
+                            val isDarkBubble = analysis.isDarkBubble ||
+                                isBubbleInteriorDark(containingBubble) ||
+                                (containingBubble == null && FallbackBubbleSupport.isColoredOrDarkWithLightText(bitmap, textBounds))
+                            val finalIsBubble = containingBubble != null || analysis.isBubble || isDarkBubble
+                            if (cleanedText.isBlank() || !translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
+                                return null
+                            }
+                            val bubbleBounds = when {
+                                containingBubble != null -> containingBubble
+                                finalIsBubble -> FallbackBubbleSupport.boundFallbackRefinedBox(
+                                    bitmap = bitmap,
+                                    textRect = textBounds,
+                                    rawRefined = translationService.refineBubbleBounds(bitmap, textBounds, isDarkBubble),
+                                    isDarkBubble = isDarkBubble
+                                )
+                                else -> textBounds
+                            }
+                            val candidateContour = yoloBubbles.firstOrNull { yb ->
+                                yb.toPixelRect(bitmap.width, bitmap.height) == bubbleBounds
+                            }?.contourProfile ?: yoloBubbles.firstOrNull { yb ->
+                                yb.toPixelRect(bitmap.width, bitmap.height).contains(textBounds.centerX(), textBounds.centerY())
+                            }?.contourProfile
+                            // Size bubble text from the balloon interior. The tight
+                            // text_bubble detection remains a fallback anchor, but
+                            // fitting to it left longer translations needlessly tiny.
+                            val isRectangularBox = !finalIsBubble || (candidateContour?.isRectangularLike == true) ||
+                                (containingBubble == null && bubbleBounds.width() > 0 && bubbleBounds.height() > 0)
+                            val targetBox = (if (finalIsBubble) {
+                                BubbleLayoutGeometry.centeredLayoutBox(textBounds, bubbleBounds, isRectangular = isRectangularBox)
+                            } else {
+                                null
+                            })
+                                ?: matchingTextDetection(textBounds)
+                                ?: Rect(textBounds)
+                            return BubbleCandidate(
+                                targetBox = targetBox,
+                                text = cleanedText,
+                                textRect = textBounds,
+                                isBubble = finalIsBubble,
+                                isDark = isDarkBubble,
+                                bubbleBounds = bubbleBounds,
+                                contourProfile = candidateContour
+                            )
+                        }
+
                         val matchedOcrIndices = mutableSetOf<Int>()
                         val isJapanese = (ppOriginLang ?: originLang).equals("Japonca", ignoreCase = true)
                         for ((yoloIdx, yoloBox) in yoloBoxes.withIndex()) {
@@ -3348,48 +3196,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                     detectedBubbles = balloonBoxes
                                 )
                                 for (textGroup in textGroups) {
-                                    val cleanedText = translationService.cleanOcrArtifacts(textGroup.text, ppOriginLang ?: originLang)
-                                    val textBounds = Rect(textGroup.rect)
-                                    val analysis = translationService.analyzeBubble(bitmap, textBounds)
-                                    val containingBubble = selectContainingBubble(textBounds)
-                                    val isDarkBubble = analysis.isDarkBubble || isBubbleInteriorDark(containingBubble)
-                                    val finalIsBubble = containingBubble != null || analysis.isBubble || isDarkBubble
-
-                                    if (cleanedText.isNotBlank() && translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
-                                        val bubbleBounds = when {
-                                            containingBubble != null -> containingBubble
-                                            analysis.isBubble || isDarkBubble -> translationService.refineBubbleBounds(bitmap, textBounds, isDarkBubble)
-                                            else -> textBounds
-                                        }
-                                        val candidateContour = yoloBubbles.firstOrNull { yb ->
-                                            yb.toPixelRect(bitmap.width, bitmap.height) == bubbleBounds
-                                        }?.contourProfile ?: yoloBubbles.firstOrNull { yb ->
-                                            yb.toPixelRect(bitmap.width, bitmap.height).contains(textBounds.centerX(), textBounds.centerY())
-                                        }?.contourProfile
-                                        // Size bubble text from the balloon interior. The tight
-                                        // text_bubble detection remains a fallback anchor, but
-                                        // fitting to it left longer translations needlessly tiny.
-                                        val isRectangularBox = !finalIsBubble || (candidateContour?.isRectangularLike == true) ||
-                                            (containingBubble == null && bubbleBounds.width() > 0 && bubbleBounds.height() > 0)
-                                        val targetBox = (if (finalIsBubble) {
-                                            BubbleLayoutGeometry.centeredLayoutBox(textBounds, bubbleBounds, isRectangular = isRectangularBox)
-                                        } else {
-                                            null
-                                        })
-                                            ?: matchingTextDetection(textBounds)
-                                            ?: Rect(textBounds)
-                                        candidates.add(
-                                            BubbleCandidate(
-                                                targetBox = targetBox,
-                                                text = cleanedText,
-                                                textRect = textBounds,
-                                                isBubble = finalIsBubble,
-                                                isDark = isDarkBubble,
-                                                bubbleBounds = bubbleBounds,
-                                                contourProfile = candidateContour
-                                            )
-                                        )
-                                    }
+                                    buildYoloBubbleCandidate(Rect(textGroup.rect), textGroup.text)?.let(candidates::add)
                                 }
                             }
                         }
@@ -3407,43 +3214,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             detectedBubbles = balloonBoxes
                         )
                         clusteredUnmatched.forEach { cluster ->
-                            val cleanedText = translationService.cleanOcrArtifacts(cluster.text, ppOriginLang ?: originLang)
-                            val analysis = translationService.analyzeBubble(bitmap, cluster.rect)
-                            val containingBubble = selectContainingBubble(cluster.rect)
-                            val isDarkBubble = analysis.isDarkBubble || isBubbleInteriorDark(containingBubble)
-                            val finalIsBubble = containingBubble != null || analysis.isBubble || isDarkBubble
-                            if (cleanedText.isNotBlank() && translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
-                                val refinedBox = when {
-                                    containingBubble != null -> containingBubble
-                                    analysis.isBubble || isDarkBubble -> translationService.refineBubbleBounds(bitmap, cluster.rect, isDarkBubble)
-                                    else -> cluster.rect
-                                }
-                                val unmatchedContour = yoloBubbles.firstOrNull { yb ->
-                                    yb.toPixelRect(bitmap.width, bitmap.height) == refinedBox
-                                }?.contourProfile ?: yoloBubbles.firstOrNull { yb ->
-                                    yb.toPixelRect(bitmap.width, bitmap.height).contains(cluster.rect.centerX(), cluster.rect.centerY())
-                                }?.contourProfile
-                                val isRectangularBox = !finalIsBubble || (unmatchedContour?.isRectangularLike == true) ||
-                                    (containingBubble == null && refinedBox.width() > 0 && refinedBox.height() > 0)
-                                val targetBox = (if (finalIsBubble) {
-                                    BubbleLayoutGeometry.centeredLayoutBox(cluster.rect, refinedBox, isRectangular = isRectangularBox)
-                                } else {
-                                    null
-                                })
-                                    ?: matchingTextDetection(cluster.rect)
-                                    ?: Rect(cluster.rect)
-                                candidates.add(
-                                    BubbleCandidate(
-                                        targetBox = targetBox,
-                                        text = cleanedText,
-                                        textRect = cluster.rect,
-                                        isBubble = finalIsBubble,
-                                        isDark = isDarkBubble,
-                                        bubbleBounds = refinedBox,
-                                        contourProfile = unmatchedContour
-                                    )
-                                )
-                            }
+                            buildYoloBubbleCandidate(Rect(cluster.rect), cluster.text)?.let(candidates::add)
                         }
 
                         _detectedBubblesMap.update { current ->
@@ -3455,10 +3226,23 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         clusteredBlocks.forEach { raw ->
                             val cleanedText = translationService.cleanOcrArtifacts(raw.text, ppOriginLang ?: originLang)
                             val analysis = translationService.analyzeBubble(bitmap, raw.rect)
-                            if (translationService.isValidDialogueText(cleanedText, isBubble = analysis.isBubble)) {
-                                val refinedBox = if (analysis.isBubble) translationService.refineBubbleBounds(bitmap, raw.rect, analysis.isDarkBubble) else raw.rect
-                                val targetBox = (if (analysis.isBubble) {
-                                    BubbleLayoutGeometry.centeredLayoutBox(raw.rect, refinedBox)
+                            val isDarkBubble = analysis.isDarkBubble ||
+                                FallbackBubbleSupport.isColoredOrDarkWithLightText(bitmap, raw.rect)
+                            val finalIsBubble = analysis.isBubble || isDarkBubble
+                            if (cleanedText.isNotBlank() && translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
+                                val refinedBox = if (finalIsBubble) {
+                                    FallbackBubbleSupport.boundFallbackRefinedBox(
+                                        bitmap = bitmap,
+                                        textRect = raw.rect,
+                                        rawRefined = translationService.refineBubbleBounds(bitmap, raw.rect, isDarkBubble),
+                                        isDarkBubble = isDarkBubble
+                                    )
+                                } else {
+                                    raw.rect
+                                }
+                                val isRectangularBox = !finalIsBubble || (regionMode && isPpOcrAny) || isDarkBubble
+                                val targetBox = (if (finalIsBubble) {
+                                    BubbleLayoutGeometry.centeredLayoutBox(raw.rect, refinedBox, isRectangular = isRectangularBox)
                                 } else {
                                     null
                                 }) ?: raw.rect
@@ -3467,8 +3251,8 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                         targetBox = targetBox,
                                         text = cleanedText,
                                         textRect = raw.rect,
-                                        isBubble = analysis.isBubble,
-                                        isDark = analysis.isDarkBubble,
+                                        isBubble = finalIsBubble,
+                                        isDark = isDarkBubble,
                                         bubbleBounds = refinedBox
                                     )
                                 )
@@ -4790,4 +4574,714 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
         runCatching { translationService.closeAllTranslators() }
         super.onCleared()
     }
+}
+
+internal data class BubbleCandidate(
+    val targetBox: Rect,
+    val text: String,
+    val textRect: Rect,
+    val isBubble: Boolean,
+    val isDark: Boolean,
+    val bubbleBounds: Rect = targetBox,
+    val contourProfile: ContourScanlineProfile? = null
+)
+
+internal object BubbleCandidateMerger {
+
+    private data class WorkingCandidate(
+        val candidate: BubbleCandidate,
+        val lineHeightPx: Float
+    )
+
+    fun areaOf(r: Rect): Long = if (r.isEmpty) 0L else r.width().toLong() * r.height().toLong()
+
+    fun overlapArea(a: Rect, b: Rect): Long {
+        val interW = (minOf(a.right, b.right) - maxOf(a.left, b.left)).coerceAtLeast(0)
+        val interH = (minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)).coerceAtLeast(0)
+        return interW.toLong() * interH
+    }
+
+    fun sameBalloon(a: Rect, b: Rect): Boolean {
+        if (a.isEmpty || b.isEmpty) return false
+        if (a == b) return true
+        val inter = overlapArea(a, b)
+        val areaA = areaOf(a)
+        val areaB = areaOf(b)
+        val maxArea = maxOf(areaA, areaB).coerceAtLeast(1L)
+        val unionArea = (areaA + areaB - inter).coerceAtLeast(1L)
+        val iou = inter.toFloat() / unionArea
+        return iou >= 0.55f || inter.toFloat() / maxArea >= 0.85f
+    }
+
+    fun defaultJoinTextFragments(t1: String, t2: String, isFirstBeforeSecond: Boolean): String {
+        val first = if (isFirstBeforeSecond) t1.trim() else t2.trim()
+        val second = if (isFirstBeforeSecond) t2.trim() else t1.trim()
+        if (first.isEmpty()) return second
+        if (second.isEmpty()) return first
+        if (first.equals(second, ignoreCase = true)) return first
+        return if (first.endsWith("-") && first.length > 1 && first[first.length - 2].isLetter()) {
+            first.dropLast(1) + second
+        } else {
+            "$first $second"
+        }.replace("\\s+".toRegex(), " ")
+    }
+
+    /**
+     * Drops stray 1-character ASCII artifacts (such as an isolated "O" from sweatdrops
+     * or bubble borders) when the same balloon already contains a substantially longer
+     * valid dialogue block. Preserves legitimate inline "I" / "A" words on the same row.
+     */
+    fun filterGhostSingleCharFragments(input: List<BubbleCandidate>): List<BubbleCandidate> {
+        if (input.size <= 1) return input
+        return input.filterIndexed { idx, cand ->
+            val cleaned = cand.text.trim()
+            val alnumCount = cleaned.count { it.isLetterOrDigit() }
+            val isAsciiOnly = cleaned.all { it.code < 128 }
+            if (!isAsciiOnly || alnumCount > 1) return@filterIndexed true
+
+            val candArea = areaOf(cand.textRect)
+            val bubbleArea = areaOf(cand.bubbleBounds).coerceAtLeast(1L)
+            val isGhost = input.indices.any { otherIdx ->
+                if (otherIdx == idx) return@any false
+                val other = input[otherIdx]
+                if (!sameBalloon(cand.bubbleBounds, other.bubbleBounds)) return@any false
+                val otherAlnum = other.text.trim().count { it.isLetterOrDigit() }
+                if (otherAlnum < 3) return@any false
+
+                val inter = overlapArea(cand.textRect, other.textRect)
+                if (inter > 0L) return@any true
+
+                // Preserve legitimate inline "I" / "A" words that sit horizontally next to a word on the same line.
+                val isInlineEnglishToken = cleaned == "I" || cleaned.equals("A", ignoreCase = true)
+                if (isInlineEnglishToken) {
+                    val vOverlap = minOf(cand.textRect.bottom, other.textRect.bottom) -
+                        maxOf(cand.textRect.top, other.textRect.top)
+                    val minH = minOf(cand.textRect.height(), other.textRect.height()).coerceAtLeast(1)
+                    val maxH = maxOf(cand.textRect.height(), other.textRect.height()).coerceAtLeast(1)
+                    val hGap = maxOf(
+                        cand.textRect.left - other.textRect.right,
+                        other.textRect.left - cand.textRect.right
+                    ).toFloat()
+                    if (vOverlap >= minH * 0.50f &&
+                        minH >= maxH * 0.55f &&
+                        hGap in (-minH * 0.5f)..(minH * 1.2f)
+                    ) {
+                        return@any false
+                    }
+                }
+
+                val otherArea = areaOf(other.textRect).coerceAtLeast(1L)
+                candArea <= otherArea * 0.65f || candArea <= bubbleArea * 0.30f
+            }
+            !isGhost
+        }
+    }
+
+    fun mergeSameBubbleFragments(
+        input: List<BubbleCandidate>,
+        isJapanese: Boolean = false,
+        joinText: (String, String, Boolean) -> String = ::defaultJoinTextFragments
+    ): List<BubbleCandidate> {
+        val filtered = filterGhostSingleCharFragments(input)
+        if (filtered.size <= 1) return filtered
+
+        val verticalCjkMode = isJapanese &&
+            filtered.count { it.textRect.height() > it.textRect.width() * 1.3f } * 2 >= filtered.size
+
+        fun joinFragmentText(firstText: String, secondText: String): String {
+            if (firstText.length >= 3 && secondText.length >= 3 &&
+                (firstText.contains(secondText, ignoreCase = true) ||
+                    secondText.contains(firstText, ignoreCase = true))
+            ) {
+                return if (firstText.length >= secondText.length) firstText else secondText
+            }
+            return joinText(firstText, secondText, true)
+        }
+
+        fun buildMerged(
+            first: WorkingCandidate,
+            second: WorkingCandidate,
+            joinedText: String
+        ): WorkingCandidate {
+            val a = first.candidate
+            val b = second.candidate
+            return WorkingCandidate(
+                candidate = BubbleCandidate(
+                    targetBox = Rect(
+                        minOf(a.targetBox.left, b.targetBox.left),
+                        minOf(a.targetBox.top, b.targetBox.top),
+                        maxOf(a.targetBox.right, b.targetBox.right),
+                        maxOf(a.targetBox.bottom, b.targetBox.bottom)
+                    ),
+                    text = joinedText,
+                    textRect = Rect(
+                        minOf(a.textRect.left, b.textRect.left),
+                        minOf(a.textRect.top, b.textRect.top),
+                        maxOf(a.textRect.right, b.textRect.right),
+                        maxOf(a.textRect.bottom, b.textRect.bottom)
+                    ),
+                    isBubble = a.isBubble || b.isBubble,
+                    isDark = a.isDark || b.isDark,
+                    bubbleBounds = if (areaOf(a.bubbleBounds) >= areaOf(b.bubbleBounds)) {
+                        a.bubbleBounds
+                    } else {
+                        b.bubbleBounds
+                    },
+                    contourProfile = a.contourProfile ?: b.contourProfile
+                ),
+                lineHeightPx = minOf(first.lineHeightPx, second.lineHeightPx).coerceAtLeast(1f)
+            )
+        }
+
+        fun tryMerge(firstW: WorkingCandidate, secondW: WorkingCandidate): WorkingCandidate? {
+            val a = firstW.candidate
+            val b = secondW.candidate
+            if (!sameBalloon(a.bubbleBounds, b.bubbleBounds)) return null
+            val lineHeight = minOf(firstW.lineHeightPx, secondW.lineHeightPx).coerceAtLeast(1f)
+
+            if (verticalCjkMode) {
+                val minW = minOf(a.textRect.width(), b.textRect.width()).coerceAtLeast(1).toFloat()
+                val sameColumn = kotlin.math.abs(a.textRect.exactCenterX() - b.textRect.exactCenterX()) < minW * 0.6f
+                if (sameColumn) {
+                    val upper = if (a.textRect.top <= b.textRect.top) firstW else secondW
+                    val lower = if (upper === firstW) secondW else firstW
+                    val gap = (lower.candidate.textRect.top - upper.candidate.textRect.bottom).toFloat()
+                    if (gap <= lineHeight * 2.0f) {
+                        return buildMerged(
+                            upper,
+                            lower,
+                            joinFragmentText(upper.candidate.text.trim(), lower.candidate.text.trim())
+                        )
+                    }
+                }
+            }
+
+            val left = if (a.textRect.left <= b.textRect.left) firstW else secondW
+            val right = if (left === firstW) secondW else firstW
+            val leftRect = left.candidate.textRect
+            val rightRect = right.candidate.textRect
+            val vOverlap = minOf(leftRect.bottom, rightRect.bottom) - maxOf(leftRect.top, rightRect.top)
+            val minH = minOf(leftRect.height(), rightRect.height()).coerceAtLeast(1)
+            val hGap = (rightRect.left - leftRect.right).toFloat()
+            val vOverlapThreshold = if (verticalCjkMode) 0.35f else 0.5f
+            val hGapLimit = if (verticalCjkMode) 1.5f else 1.0f
+            if (vOverlap >= minH * vOverlapThreshold &&
+                hGap <= lineHeight * hGapLimit &&
+                hGap > -lineHeight * 0.5f
+            ) {
+                val first = if (verticalCjkMode) right else left
+                val second = if (verticalCjkMode) left else right
+                return buildMerged(
+                    first,
+                    second,
+                    joinFragmentText(first.candidate.text.trim(), second.candidate.text.trim())
+                )
+            }
+
+            if (!verticalCjkMode) {
+                val upper = if (a.textRect.top <= b.textRect.top) firstW else secondW
+                val lower = if (upper === firstW) secondW else firstW
+                val gap = (lower.candidate.textRect.top - upper.candidate.textRect.bottom).toFloat()
+                if (gap > lineHeight * 2.0f) return null
+                val interW = minOf(upper.candidate.textRect.right, lower.candidate.textRect.right) -
+                    maxOf(upper.candidate.textRect.left, lower.candidate.textRect.left)
+                if (interW < minOf(upper.candidate.textRect.width(), lower.candidate.textRect.width()) * 0.30f) {
+                    return null
+                }
+                return buildMerged(
+                    upper,
+                    lower,
+                    joinFragmentText(upper.candidate.text.trim(), lower.candidate.text.trim())
+                )
+            }
+            return null
+        }
+
+        val sortedInput = if (verticalCjkMode) {
+            filtered.sortedWith(
+                compareByDescending<BubbleCandidate> { it.textRect.right }
+                    .thenBy { it.textRect.top }
+            )
+        } else {
+            filtered.sortedWith(
+                compareBy({ it.textRect.top }, { it.textRect.left })
+            )
+        }
+        val working = sortedInput.map {
+            WorkingCandidate(it, it.textRect.height().coerceAtLeast(1).toFloat())
+        }.toMutableList()
+
+        var changed = true
+        while (changed) {
+            changed = false
+            mergeLoop@ for (i in working.indices) {
+                for (j in i + 1 until working.size) {
+                    val mergedPair = tryMerge(working[i], working[j]) ?: continue
+                    working[i] = mergedPair
+                    working.removeAt(j)
+                    changed = true
+                    break@mergeLoop
+                }
+            }
+        }
+
+        val consolidated = mutableListOf<WorkingCandidate>()
+        for (item in working) {
+            val candidate = item.candidate
+            val sameTargetIndex = consolidated.indexOfFirst { existingW ->
+                val existing = existingW.candidate
+                if (!sameBalloon(existing.bubbleBounds, candidate.bubbleBounds)) {
+                    return@indexOfFirst false
+                }
+
+                val lineHeight = minOf(existingW.lineHeightPx, item.lineHeightPx).coerceAtLeast(1f)
+                val gapY = if (candidate.textRect.top > existing.textRect.bottom) {
+                    (candidate.textRect.top - existing.textRect.bottom).toFloat()
+                } else if (existing.textRect.top > candidate.textRect.bottom) {
+                    (existing.textRect.top - candidate.textRect.bottom).toFloat()
+                } else 0f
+
+                val gapX = if (candidate.textRect.left > existing.textRect.right) {
+                    (candidate.textRect.left - existing.textRect.right).toFloat()
+                } else if (existing.textRect.left > candidate.textRect.right) {
+                    (existing.textRect.left - candidate.textRect.right).toFloat()
+                } else 0f
+
+                val bubbleH = existing.bubbleBounds.height().toFloat()
+                val bubbleW = existing.bubbleBounds.width().toFloat()
+                val isTallTwinBubble = bubbleH > bubbleW * 1.30f
+
+                // DİKEY AYRIK İKİZ BALON KORUMASI:
+                // İki metin bloğu arasındaki boşluk normal satır aralığını (> 2.5 * lineHeight) aşıyorsa
+                // ayrı loblar olarak korunur; aşağıda bubbleBounds bölünerek çakışma engellenir.
+                if (isTallTwinBubble && gapY > lineHeight * 2.5f) {
+                    return@indexOfFirst false
+                }
+
+                val horizThreshold = if (verticalCjkMode) {
+                    minOf(existing.textRect.width(), candidate.textRect.width()).coerceAtLeast(1).toFloat() * 2.5f
+                } else {
+                    lineHeight * 2.5f
+                }
+                if (gapY <= lineHeight * 2.5f && gapX <= horizThreshold) {
+                    return@indexOfFirst true
+                }
+
+                val inter = overlapArea(existing.targetBox, candidate.targetBox)
+                val minArea = minOf(areaOf(existing.targetBox), areaOf(candidate.targetBox)).coerceAtLeast(1L)
+                inter.toFloat() / minArea >= 0.55f &&
+                    gapY <= lineHeight * 2.5f &&
+                    gapX <= horizThreshold
+            }
+            if (sameTargetIndex < 0) {
+                consolidated.add(item)
+                continue
+            }
+            val existingW = consolidated[sameTargetIndex]
+            val existing = existingW.candidate
+            val firstBeforeSecond = if (verticalCjkMode) {
+                existing.textRect.right >= candidate.textRect.right
+            } else {
+                existing.textRect.top < candidate.textRect.top ||
+                    (existing.textRect.top == candidate.textRect.top && existing.textRect.left <= candidate.textRect.left)
+            }
+            val joinedText = when {
+                existing.text.contains(candidate.text, ignoreCase = true) -> existing.text
+                candidate.text.contains(existing.text, ignoreCase = true) -> candidate.text
+                else -> joinText(existing.text, candidate.text, firstBeforeSecond)
+            }
+            consolidated[sameTargetIndex] = buildMerged(existingW, item, joinedText)
+        }
+
+        val cleaned = filterGhostSingleCharFragments(consolidated.map { it.candidate })
+        return ensureNonOverlappingBubbleOwners(cleaned)
+    }
+
+    /**
+     * Guarantees that two surviving candidates never share the same full `bubbleBounds`.
+     * Twin-lobe balloons are split cleanly at the midpoint (`splitY` or `splitX`) so
+     * ReaderScreen lays out and centers each translation inside its own half.
+     */
+    fun ensureNonOverlappingBubbleOwners(input: List<BubbleCandidate>): List<BubbleCandidate> {
+        if (input.size <= 1) return input
+
+        val parent = IntArray(input.size) { it }
+        fun find(x: Int): Int {
+            var cur = x
+            while (parent[cur] != cur) {
+                parent[cur] = parent[parent[cur]]
+                cur = parent[cur]
+            }
+            return cur
+        }
+        fun union(a: Int, b: Int) {
+            val ra = find(a)
+            val rb = find(b)
+            if (ra != rb) parent[rb] = ra
+        }
+
+        for (i in input.indices) {
+            for (j in i + 1 until input.size) {
+                if (sameBalloon(input[i].bubbleBounds, input[j].bubbleBounds)) {
+                    union(i, j)
+                }
+            }
+        }
+
+        val groups = input.indices.groupBy { find(it) }
+        val result = input.toMutableList()
+
+        for ((_, memberIndices) in groups) {
+            if (memberIndices.size <= 1) continue
+
+            val canonicalEnvelope = memberIndices
+                .map { input[it].bubbleBounds }
+                .maxByOrNull { areaOf(it) }
+                ?.let(::Rect) ?: continue
+            if (canonicalEnvelope.isEmpty) continue
+
+            val verticalSorted = memberIndices.sortedWith(
+                compareBy<Int> { input[it].textRect.top }.thenBy { input[it].textRect.left }
+            )
+            val cleanlyVerticallySeparated = verticalSorted.zipWithNext().all { (aIdx, bIdx) ->
+                input[aIdx].textRect.bottom <= input[bIdx].textRect.top
+            }
+
+            val horizontalSorted = memberIndices.sortedWith(
+                compareBy<Int> { input[it].textRect.left }.thenBy { input[it].textRect.top }
+            )
+            val cleanlyHorizontallySeparated = horizontalSorted.zipWithNext().all { (aIdx, bIdx) ->
+                input[aIdx].textRect.right <= input[bIdx].textRect.left
+            }
+
+            if (cleanlyVerticallySeparated || !cleanlyHorizontallySeparated) {
+                val splitYs = IntArray(verticalSorted.size - 1)
+                for (k in 0 until verticalSorted.size - 1) {
+                    val prev = input[verticalSorted[k]].textRect
+                    val next = input[verticalSorted[k + 1]].textRect
+                    val rawSplit = if (prev.bottom <= next.top) {
+                        (prev.bottom + next.top) / 2
+                    } else {
+                        (prev.centerY() + next.centerY()) / 2
+                    }
+                    val minSplit = if (k == 0) canonicalEnvelope.top + 1 else splitYs[k - 1] + 1
+                    val maxSplit = (canonicalEnvelope.bottom - 1).coerceAtLeast(minSplit)
+                    splitYs[k] = rawSplit.coerceIn(minSplit, maxSplit)
+                }
+
+                for (k in verticalSorted.indices) {
+                    val idx = verticalSorted[k]
+                    val cand = input[idx]
+                    val segTop = if (k == 0) minOf(canonicalEnvelope.top, cand.textRect.top) else splitYs[k - 1]
+                    val segBottom = if (k == verticalSorted.lastIndex) {
+                        maxOf(canonicalEnvelope.bottom, cand.textRect.bottom)
+                    } else {
+                        splitYs[k]
+                    }
+                    val segLeft = minOf(canonicalEnvelope.left, cand.textRect.left)
+                    val segRight = maxOf(canonicalEnvelope.right, cand.textRect.right)
+                    val splitBounds = Rect(
+                        segLeft,
+                        segTop,
+                        segRight.coerceAtLeast(segLeft + 1),
+                        segBottom.coerceAtLeast(segTop + 1)
+                    )
+                    val slicedContour = sliceContourVertically(cand.contourProfile, canonicalEnvelope, splitBounds)
+                    val updatedTarget = computeSplitTargetBox(cand, splitBounds, slicedContour)
+                    result[idx] = cand.copy(
+                        targetBox = updatedTarget,
+                        bubbleBounds = splitBounds,
+                        contourProfile = slicedContour
+                    )
+                }
+            } else {
+                val splitXs = IntArray(horizontalSorted.size - 1)
+                for (k in 0 until horizontalSorted.size - 1) {
+                    val prev = input[horizontalSorted[k]].textRect
+                    val next = input[horizontalSorted[k + 1]].textRect
+                    val rawSplit = (prev.right + next.left) / 2
+                    val minSplit = if (k == 0) canonicalEnvelope.left + 1 else splitXs[k - 1] + 1
+                    val maxSplit = (canonicalEnvelope.right - 1).coerceAtLeast(minSplit)
+                    splitXs[k] = rawSplit.coerceIn(minSplit, maxSplit)
+                }
+
+                for (k in horizontalSorted.indices) {
+                    val idx = horizontalSorted[k]
+                    val cand = input[idx]
+                    val segLeft = if (k == 0) minOf(canonicalEnvelope.left, cand.textRect.left) else splitXs[k - 1]
+                    val segRight = if (k == horizontalSorted.lastIndex) {
+                        maxOf(canonicalEnvelope.right, cand.textRect.right)
+                    } else {
+                        splitXs[k]
+                    }
+                    val segTop = minOf(canonicalEnvelope.top, cand.textRect.top)
+                    val segBottom = maxOf(canonicalEnvelope.bottom, cand.textRect.bottom)
+                    val splitBounds = Rect(
+                        segLeft,
+                        segTop,
+                        segRight.coerceAtLeast(segLeft + 1),
+                        segBottom.coerceAtLeast(segTop + 1)
+                    )
+                    val updatedTarget = computeSplitTargetBox(cand, splitBounds, null)
+                    result[idx] = cand.copy(
+                        targetBox = updatedTarget,
+                        bubbleBounds = splitBounds,
+                        contourProfile = null
+                    )
+                }
+            }
+        }
+        return result
+    }
+
+    private fun computeSplitTargetBox(
+        cand: BubbleCandidate,
+        splitBounds: Rect,
+        contourProfile: ContourScanlineProfile?
+    ): Rect {
+        val isRect = !cand.isBubble || (contourProfile?.isRectangularLike == true)
+        val laidOut = if (cand.isBubble) {
+            BubbleLayoutGeometry.centeredLayoutBox(cand.textRect, splitBounds, isRectangular = isRect)
+        } else {
+            null
+        }
+        if (laidOut != null && !laidOut.isEmpty) {
+            val clamped = Rect(laidOut)
+            if (clamped.intersect(splitBounds) && !clamped.isEmpty) {
+                return clamped
+            }
+        }
+        val textClamped = Rect(cand.textRect)
+        if (textClamped.intersect(splitBounds) && !textClamped.isEmpty) {
+            return textClamped
+        }
+        return Rect(splitBounds)
+    }
+
+    private fun sliceContourVertically(
+        profile: ContourScanlineProfile?,
+        origBounds: Rect,
+        subBounds: Rect
+    ): ContourScanlineProfile? {
+        if (profile == null || !profile.isUsable) return null
+        val origH = origBounds.height().toFloat()
+        val subH = subBounds.height().toFloat()
+        if (origH <= 0f || subH <= 0f || profile.rowCount <= 0) return null
+
+        val outRows = profile.rowCount.coerceAtLeast(16)
+        val lefts = FloatArray(outRows)
+        val rights = FloatArray(outRows)
+        var validCount = 0
+        var centerSumX = 0f
+        var centerSumY = 0f
+        for (r in 0 until outRows) {
+            val subFrac = (r + 0.5f) / outRows.toFloat()
+            val y = subBounds.top + subFrac * subH
+            val origFrac = ((y - origBounds.top) / origH).coerceIn(0f, 0.9999f)
+            val srcRow = (origFrac * profile.rowCount).toInt().coerceIn(0, profile.rowCount - 1)
+            val l = profile.rowLeftFractions[srcRow]
+            val rFrac = profile.rowRightFractions[srcRow]
+            lefts[r] = l
+            rights[r] = rFrac
+            if (rFrac > l) {
+                validCount++
+                centerSumX += (l + rFrac) * 0.5f
+                centerSumY += subFrac
+            }
+        }
+        if (validCount < 2) return null
+        return ContourScanlineProfile(
+            rowLeftFractions = lefts,
+            rowRightFractions = rights,
+            opticalCenterX = (centerSumX / validCount).coerceIn(0.1f, 0.9f),
+            opticalCenterY = (centerSumY / validCount).coerceIn(0.1f, 0.9f)
+        ).takeIf { it.isUsable }
+    }
+}
+
+internal object FallbackBubbleSupport {
+
+    fun mergeOcrBlocksWithFallback(
+        primary: List<TranslationService.RectAndText>,
+        fallback: List<TranslationService.RectAndText>
+    ): List<TranslationService.RectAndText> {
+        val merged = primary.filter { !it.rect.isEmpty && it.text.isNotBlank() }.toMutableList()
+        if (fallback.isEmpty()) return merged
+
+        for (fb in fallback) {
+            if (fb.rect.isEmpty || fb.text.isBlank()) continue
+            val fbArea = BubbleCandidateMerger.areaOf(fb.rect).coerceAtLeast(1L)
+            val duplicatesExisting = merged.any { existing ->
+                val inter = BubbleCandidateMerger.overlapArea(fb.rect, existing.rect)
+                if (inter <= 0L) return@any false
+                val existArea = BubbleCandidateMerger.areaOf(existing.rect).coerceAtLeast(1L)
+                val unionArea = (fbArea + existArea - inter).coerceAtLeast(1L)
+                val iou = inter.toFloat() / unionArea
+                val fbCoverage = inter.toFloat() / fbArea
+                val existCoverage = inter.toFloat() / existArea
+                iou >= 0.30f ||
+                    fbCoverage >= 0.45f ||
+                    existCoverage >= 0.45f ||
+                    existing.rect.contains(fb.rect.centerX(), fb.rect.centerY()) ||
+                    fb.rect.contains(existing.rect.centerX(), existing.rect.centerY())
+            }
+            if (!duplicatesExisting) {
+                merged.add(fb)
+            }
+        }
+        return merged
+    }
+
+    fun isBubbleInteriorDark(bitmap: Bitmap, bubbleRect: Rect?): Boolean {
+        if (bitmap.isRecycled || bubbleRect == null || bubbleRect.width() < 8 || bubbleRect.height() < 8) {
+            return false
+        }
+        val insetX = (bubbleRect.width() * 0.12f).toInt().coerceAtLeast(1)
+        val insetY = (bubbleRect.height() * 0.12f).toInt().coerceAtLeast(1)
+        val sLeft = (bubbleRect.left + insetX).coerceIn(0, bitmap.width - 1)
+        val sRight = (bubbleRect.right - insetX).coerceIn(sLeft, bitmap.width - 1)
+        val sTop = (bubbleRect.top + insetY).coerceIn(0, bitmap.height - 1)
+        val sBottom = (bubbleRect.bottom - insetY).coerceIn(sTop, bitmap.height - 1)
+        val stepX = maxOf(1, (sRight - sLeft) / 6)
+        val stepY = maxOf(1, (sBottom - sTop) / 6)
+        val lums = ArrayList<Float>(49)
+        var dark = 0
+        for (sy in sTop..sBottom step stepY) {
+            for (sx in sLeft..sRight step stepX) {
+                val px = bitmap.getPixel(sx, sy)
+                val lum = Color.red(px) * 0.299f + Color.green(px) * 0.587f + Color.blue(px) * 0.114f
+                lums.add(lum)
+                if (lum < 65f) dark++
+            }
+        }
+        if (lums.isEmpty()) return false
+        if (dark * 100 >= lums.size * 55) return true
+
+        lums.sort()
+        val median = lums[lums.size / 2]
+        val p95 = lums[((lums.size - 1) * 0.95f).toInt().coerceIn(0, lums.size - 1)]
+        return median < 198f && p95 >= 205f && (p95 - median) >= 42f
+    }
+
+    /**
+     * Detects dark panels or colored/semi-transparent bubbles carrying white/light text
+     * by comparing the immediate outer rim luma against bright interior text strokes.
+     */
+    fun isColoredOrDarkWithLightText(bitmap: Bitmap, textRect: Rect): Boolean {
+        if (bitmap.isRecycled || textRect.isEmpty || bitmap.width < 8 || bitmap.height < 8) return false
+        val rimMedian = sampleRimMedianLuma(bitmap, textRect) ?: return false
+        if (rimMedian < 85f) return true
+        if (rimMedian >= 198f) return false
+
+        val iLeft = textRect.left.coerceIn(0, bitmap.width - 1)
+        val iRight = textRect.right.coerceIn(iLeft, bitmap.width - 1)
+        val iTop = textRect.top.coerceIn(0, bitmap.height - 1)
+        val iBottom = textRect.bottom.coerceIn(iTop, bitmap.height - 1)
+        val stepX = maxOf(1, (iRight - iLeft) / 8)
+        val stepY = maxOf(1, (iBottom - iTop) / 8)
+        val innerLums = ArrayList<Float>(81)
+        for (sy in iTop..iBottom step stepY) {
+            for (sx in iLeft..iRight step stepX) {
+                val px = bitmap.getPixel(sx, sy)
+                innerLums.add(Color.red(px) * 0.299f + Color.green(px) * 0.587f + Color.blue(px) * 0.114f)
+            }
+        }
+        if (innerLums.isEmpty()) return false
+        innerLums.sort()
+        val p95 = innerLums[((innerLums.size - 1) * 0.95f).toInt().coerceIn(0, innerLums.size - 1)]
+        return p95 >= 205f && (p95 - rimMedian) >= 42f
+    }
+
+    /**
+     * Prevents `refineBubbleBounds` from spilling outside semi-transparent colored bubbles
+     * or borderless dark panels when no YOLO container box exists.
+     */
+    fun boundFallbackRefinedBox(
+        bitmap: Bitmap,
+        textRect: Rect,
+        rawRefined: Rect,
+        isDarkBubble: Boolean
+    ): Rect {
+        if (textRect.isEmpty || bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) {
+            return rawRefined
+        }
+        val maxPadX = (textRect.width() * 0.14f).toInt().coerceIn(4, 16)
+        val maxPadY = (textRect.height() * 0.14f).toInt().coerceIn(4, 14)
+        val safeClamp = Rect(
+            (textRect.left - maxPadX).coerceAtLeast(0),
+            (textRect.top - maxPadY).coerceAtLeast(0),
+            (textRect.right + maxPadX).coerceAtMost(bitmap.width),
+            (textRect.bottom + maxPadY).coerceAtMost(bitmap.height)
+        )
+        val rimMedian = sampleRimMedianLuma(bitmap, textRect) ?: 255f
+        val shouldTightClamp = isDarkBubble || rimMedian < 200f
+        val innerLeft = textRect.left.coerceIn(safeClamp.left, safeClamp.right)
+        val innerTop = textRect.top.coerceIn(safeClamp.top, safeClamp.bottom)
+        val innerRight = textRect.right.coerceIn(innerLeft, safeClamp.right)
+        val innerBottom = textRect.bottom.coerceIn(innerTop, safeClamp.bottom)
+        val clampedRefined = Rect(
+            rawRefined.left.coerceIn(safeClamp.left, innerLeft),
+            rawRefined.top.coerceIn(safeClamp.top, innerTop),
+            rawRefined.right.coerceIn(innerRight, safeClamp.right),
+            rawRefined.bottom.coerceIn(innerBottom, safeClamp.bottom)
+        )
+        if (shouldTightClamp) {
+            return clampedRefined
+        }
+
+        // For light bubbles, reject runaway expansion when the expanded area isn't uniform light paper.
+        val overExpanded = rawRefined.width() > textRect.width() * 2.4f ||
+            rawRefined.height() > textRect.height() * 2.4f
+        if (overExpanded && !isMostlyUniformLightFill(bitmap, rawRefined)) {
+            return clampedRefined
+        }
+        return rawRefined
+    }
+
+    private fun sampleRimMedianLuma(bitmap: Bitmap, rect: Rect): Float? {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width <= 0 || height <= 0 || rect.isEmpty) return null
+        val lums = ArrayList<Float>(64)
+        for (dist in intArrayOf(3, 6)) {
+            val left = (rect.left - dist).coerceIn(0, width - 1)
+            val top = (rect.top - dist).coerceIn(0, height - 1)
+            val right = (rect.right + dist).coerceIn(0, width - 1)
+            val bottom = (rect.bottom + dist).coerceIn(0, height - 1)
+            val stepX = maxOf(1, (right - left) / 6)
+            for (x in left..right step stepX) {
+                lums.add(pixelLuma(bitmap.getPixel(x, top)))
+                lums.add(pixelLuma(bitmap.getPixel(x, bottom)))
+            }
+            val stepY = maxOf(1, (bottom - top) / 6)
+            for (y in top..bottom step stepY) {
+                lums.add(pixelLuma(bitmap.getPixel(left, y)))
+                lums.add(pixelLuma(bitmap.getPixel(right, y)))
+            }
+        }
+        if (lums.isEmpty()) return null
+        lums.sort()
+        return lums[lums.size / 2]
+    }
+
+    private fun isMostlyUniformLightFill(bitmap: Bitmap, rect: Rect): Boolean {
+        val left = rect.left.coerceIn(0, bitmap.width - 1)
+        val right = rect.right.coerceIn(left, bitmap.width - 1)
+        val top = rect.top.coerceIn(0, bitmap.height - 1)
+        val bottom = rect.bottom.coerceIn(top, bitmap.height - 1)
+        val stepX = maxOf(1, (right - left) / 8)
+        val stepY = maxOf(1, (bottom - top) / 8)
+        var total = 0
+        var light = 0
+        for (sy in top..bottom step stepY) {
+            for (sx in left..right step stepX) {
+                total++
+                if (pixelLuma(bitmap.getPixel(sx, sy)) >= 195f) light++
+            }
+        }
+        return total > 0 && light * 100 >= total * 70
+    }
+
+    private fun pixelLuma(px: Int): Float =
+        Color.red(px) * 0.299f + Color.green(px) * 0.587f + Color.blue(px) * 0.114f
 }

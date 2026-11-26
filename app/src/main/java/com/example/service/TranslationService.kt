@@ -883,6 +883,152 @@ class TranslationService(
         resolveCollidingBlocks(results)
     }
 
+    /**
+     * Scans outside [existingBubbleRects] and [excludeSfx] using PP-OCRv5 DBNet
+     * (normal + conditional inverted pass) to recover missed semi-transparent
+     * webtoon bubbles and free text on dark panels, clusters nearby lines, and
+     * runs recognition through the active [PpOcrV5Engine].
+     */
+    suspend fun performFallbackLineScanAndOcr(
+        bitmap: Bitmap,
+        existingBubbleRects: List<Rect>,
+        excludeSfx: List<Rect>,
+        originLanguage: String,
+        ocrEngine: String
+    ): List<RectAndText> = withContext(Dispatchers.Default) {
+        if (bitmap.isRecycled || bitmap.width < 8 || bitmap.height < 8) return@withContext emptyList()
+        if (!isRegionOcrEngine(ocrEngine)) return@withContext emptyList()
+
+        val isEnglishVariant = isPpOcrEnglishEngine(ocrEngine)
+        val activePpEngine = if (isEnglishVariant) ppOcrV5EnglishEngine else ppOcrV5Engine
+        if (!activePpEngine.isReady()) return@withContext emptyList()
+
+        val excludeRegions = (existingBubbleRects + excludeSfx).filter { !it.isEmpty }
+        val missingLines = activePpEngine.detectMissingPageLines(
+            bitmap = bitmap,
+            excludeRegions = excludeRegions,
+            includeInvertedPass = true
+        )
+        if (missingLines.isEmpty()) return@withContext emptyList()
+
+        val validLineRects = missingLines
+            .map { Rect(it.rect) }
+            .filter { it.width() >= 8 && it.height() >= 8 }
+        if (validLineRects.isEmpty()) return@withContext emptyList()
+
+        val candidateRegions = groupFallbackLineRegions(validLineRects, bitmap)
+        val recovered = ArrayList<RectAndText>()
+        for (region in candidateRegions) {
+            currentCoroutineContext().ensureActive()
+            if (region.isEmpty) continue
+            val marginX = max(8, (region.width() * 0.08f).toInt())
+            val marginY = max(8, (region.height() * 0.08f).toInt())
+            val expanded = Rect(
+                (region.left - marginX).coerceAtLeast(0),
+                (region.top - marginY).coerceAtLeast(0),
+                (region.right + marginX).coerceAtMost(bitmap.width),
+                (region.bottom + marginY).coerceAtMost(bitmap.height)
+            )
+            if (expanded.width() < 8 || expanded.height() < 8) continue
+
+            val recognized = activePpEngine.recognizeBlock(bitmap, expanded, originLanguage)
+            for (item in recognized) {
+                if (item.rect.isEmpty || overlapsAnyExcludeRegion(item.rect, excludeRegions)) continue
+                val cleaned = cleanOcrArtifacts(item.text, originLanguage)
+                if (cleaned.isBlank()) continue
+                val hasCjk = cleaned.any {
+                    it.code in 0x3040..0x9FAF || it.code in 0xAC00..0xD7AF
+                }
+                if (!hasCjk && cleaned.count { it.isLetterOrDigit() } <= 1) continue
+                val analysis = analyzeBubble(bitmap, item.rect)
+                if (!isValidDialogueText(cleaned, isBubble = analysis.isBubble || analysis.isDarkBubble)) continue
+                recovered.add(RectAndText(item.rect, cleaned))
+            }
+        }
+        resolveCollidingBlocks(recovered)
+    }
+
+    private fun groupFallbackLineRegions(lineRects: List<Rect>, bitmap: Bitmap): List<Rect> {
+        if (lineRects.size <= 1) return lineRects.map { Rect(it) }
+        val sorted = lineRects
+            .map { Rect(it) }
+            .sortedWith(compareBy<Rect> { it.top }.thenBy { it.left })
+            .toMutableList()
+        val shortSide = min(bitmap.width, bitmap.height).toFloat()
+        val scale = max(0.5f, shortSide / 1000f)
+        val maxGroupWidth = (bitmap.width * 0.55f).toInt().coerceAtLeast(64)
+        val maxGroupHeight = (bitmap.height * 0.30f).toInt().coerceAtLeast(64)
+
+        var i = 0
+        while (i < sorted.size) {
+            var merged: Boolean
+            do {
+                merged = false
+                val current = sorted[i]
+                var j = i + 1
+                while (j < sorted.size) {
+                    val other = sorted[j]
+                    val unionW = max(current.right, other.right) - min(current.left, other.left)
+                    val unionH = max(current.bottom, other.bottom) - min(current.top, other.top)
+                    if (unionW <= maxGroupWidth && unionH <= maxGroupHeight &&
+                        shouldMergeFallbackLines(current, other, bitmap, scale)
+                    ) {
+                        current.union(other)
+                        sorted.removeAt(j)
+                        merged = true
+                        break
+                    }
+                    j++
+                }
+            } while (merged)
+            i++
+        }
+        return sorted
+    }
+
+    private fun shouldMergeFallbackLines(a: Rect, b: Rect, bitmap: Bitmap, scale: Float): Boolean {
+        val w1 = a.width().toFloat()
+        val h1 = a.height().toFloat()
+        val w2 = b.width().toFloat()
+        val h2 = b.height().toFloat()
+        val overlapX = (min(a.right, b.right) - max(a.left, b.left)).toFloat()
+        val overlapY = (min(a.bottom, b.bottom) - max(a.top, b.top)).toFloat()
+        val gapX = max(0f, -overlapX)
+        val gapY = max(0f, -overlapY)
+
+        val stackedHorizontally = (overlapX >= min(w1, w2) * 0.20f ||
+            abs(a.exactCenterX() - b.exactCenterX()) <= max(w1, w2) * 0.45f) &&
+            gapY <= max(h1, h2) * 1.8f
+        val sideBySide = overlapY >= min(h1, h2) * 0.35f &&
+            gapX <= max(h1, h2) * 1.6f
+        val verticalColumns = h1 > w1 * 1.5f && h2 > w2 * 1.5f &&
+            overlapY >= min(h1, h2) * 0.25f &&
+            gapX <= max(w1, w2) * 1.8f
+
+        if (!stackedHorizontally && !sideBySide && !verticalColumns) return false
+        return !hasBalloonDividerBetween(a, b, bitmap, scale)
+    }
+
+    private fun overlapsAnyExcludeRegion(rect: Rect, excludeRegions: List<Rect>): Boolean {
+        val rectArea = rect.width().toLong() * rect.height()
+        if (rectArea <= 0L) return true
+        for (exclude in excludeRegions) {
+            if (exclude.isEmpty) continue
+            val interLeft = max(rect.left, exclude.left)
+            val interTop = max(rect.top, exclude.top)
+            val interRight = min(rect.right, exclude.right)
+            val interBottom = min(rect.bottom, exclude.bottom)
+            if (interRight <= interLeft || interBottom <= interTop) continue
+            val interArea = (interRight - interLeft).toLong() * (interBottom - interTop)
+            val excludeArea = exclude.width().toLong() * exclude.height()
+            val unionArea = rectArea + excludeArea - interArea
+            val iou = if (unionArea > 0L) interArea.toFloat() / unionArea else 0f
+            val coverage = interArea.toFloat() / rectArea
+            if (iou > 0.30f || coverage > 0.45f) return true
+        }
+        return false
+    }
+
     fun clusterAdjacentBlocks(
         blocks: List<RectAndText>,
         bitmap: Bitmap,
@@ -1310,8 +1456,8 @@ class TranslationService(
             val bottom = (rect.bottom + padY).coerceIn(0, height - 1)
 
             val sampledLums = mutableListOf<Float>()
-            val stepX = max(2, (right - left) / 10)
-            val stepY = max(2, (bottom - top) / 10)
+            val stepX = max(1, (right - left) / 16)
+            val stepY = max(1, (bottom - top) / 16)
             for (y in top..bottom step stepY) {
                 for (x in left..right step stepX) {
                     val px = bitmap.getPixel(x, y)
@@ -1323,19 +1469,66 @@ class TranslationService(
                 return BubbleAnalysis(isBubble = true, isDarkBubble = false)
             }
             sampledLums.sort()
+
+            val innerLeft = rect.left.coerceIn(0, width - 1)
+            val innerTop = rect.top.coerceIn(0, height - 1)
+            val innerRight = (rect.right - 1).coerceIn(innerLeft, width - 1)
+            val innerBottom = (rect.bottom - 1).coerceIn(innerTop, height - 1)
+            val innerLums = mutableListOf<Float>()
+            val innerStepX = max(1, (innerRight - innerLeft) / 16)
+            val innerStepY = max(1, (innerBottom - innerTop) / 16)
+            for (y in innerTop..innerBottom step innerStepY) {
+                for (x in innerLeft..innerRight step innerStepX) {
+                    val px = bitmap.getPixel(x, y)
+                    innerLums.add(pixelLuma(px))
+                }
+            }
+            var borderSamples = 0
+            var nonWhiteBorderSamples = 0
+            val bStepX = max(1, (innerRight - innerLeft) / 16)
+            val bStepY = max(1, (innerBottom - innerTop) / 16)
+            for (x in innerLeft..innerRight step bStepX) {
+                if (pixelLuma(bitmap.getPixel(x, innerTop)) < 195f) nonWhiteBorderSamples++
+                borderSamples++
+                if (innerBottom > innerTop) {
+                    if (pixelLuma(bitmap.getPixel(x, innerBottom)) < 195f) nonWhiteBorderSamples++
+                    borderSamples++
+                }
+            }
+            for (y in innerTop..innerBottom step bStepY) {
+                if (pixelLuma(bitmap.getPixel(innerLeft, y)) < 195f) nonWhiteBorderSamples++
+                borderSamples++
+                if (innerRight > innerLeft) {
+                    if (pixelLuma(bitmap.getPixel(innerRight, y)) < 195f) nonWhiteBorderSamples++
+                    borderSamples++
+                }
+            }
+            val nonWhiteBorderFraction = if (borderSamples > 0) {
+                nonWhiteBorderSamples.toFloat() / borderSamples
+            } else 0f
+
             val bgStartIndex = (sampledLums.size * 0.35f).toInt().coerceIn(0, sampledLums.size - 1)
             val medianLum = sampledLums[sampledLums.size / 2]
             val darkBackgroundLikely = medianLum < 75f
+            val coloredLightTextLikely = if (innerLums.isNotEmpty()) {
+                innerLums.sort()
+                val innerMedian = innerLums[innerLums.size / 2]
+                val innerP95 = innerLums[((innerLums.size - 1) * 95) / 100]
+                innerMedian < 190f && innerP95 >= 205f &&
+                    (innerP95 - innerMedian) >= 42f &&
+                    nonWhiteBorderFraction >= 0.45f
+            } else false
+
             val bgEndIndex = (sampledLums.size * 0.65f).toInt().coerceIn(1, sampledLums.size)
-            // Use the darker population for dark balloons so white lettering does not
-            // dominate the background estimate. For light balloons, ignore dark ink.
-            val bgLums = if (darkBackgroundLikely) {
+            // Use the darker population for dark/colored-with-white-text balloons so
+            // white lettering does not dominate the background estimate.
+            val bgLums = if (darkBackgroundLikely || coloredLightTextLikely) {
                 sampledLums.subList(0, bgEndIndex)
             } else {
                 sampledLums.subList(bgStartIndex, sampledLums.size)
             }
             val avgBgLum = bgLums.average().toFloat()
-            val isDark = avgBgLum < 75f
+            val isDark = avgBgLum < 75f || coloredLightTextLikely
             // Keep a small gray ambiguity band (75..85) between light and dark fills.
             val isBubble = avgBgLum >= 85f || isDark
             BubbleAnalysis(isBubble = isBubble, isDarkBubble = isDark)
@@ -1353,9 +1546,32 @@ class TranslationService(
         val maxExpandX = scanHorizonX.toInt().coerceIn(6, max(6, width))
         val maxExpandY = scanHorizonY.toInt().coerceIn(6, max(6, height))
 
+        val perimeterLums = ArrayList<Float>(16)
+        val pLeft = textRect.left.coerceIn(0, width - 1)
+        val pRight = (textRect.right - 1).coerceIn(pLeft, width - 1)
+        val pTop = textRect.top.coerceIn(0, height - 1)
+        val pBottom = (textRect.bottom - 1).coerceIn(pTop, height - 1)
+        val pStepX = max(1, (pRight - pLeft) / 4)
+        val pStepY = max(1, (pBottom - pTop) / 4)
+        for (x in pLeft..pRight step pStepX) {
+            perimeterLums.add(pixelLuma(bitmap.getPixel(x, pTop)))
+            perimeterLums.add(pixelLuma(bitmap.getPixel(x, pBottom)))
+        }
+        for (y in pTop..pBottom step pStepY) {
+            perimeterLums.add(pixelLuma(bitmap.getPixel(pLeft, y)))
+            perimeterLums.add(pixelLuma(bitmap.getPixel(pRight, y)))
+        }
+        perimeterLums.sort()
+        val localBgLum = if (perimeterLums.isNotEmpty()) perimeterLums[perimeterLums.size / 2] else 255f
+        val isColoredDarkTextBubble = isDark && localBgLum in 80f..198f
+
         fun isBorderPixel(px: Int): Boolean {
             val lum = (Color.red(px) * 0.299 + Color.green(px) * 0.587 + Color.blue(px) * 0.114)
-            return if (isDark) lum > 140 else lum < 100
+            return when {
+                isColoredDarkTextBubble -> abs(lum.toFloat() - localBgLum) > 45f
+                isDark -> lum > 140
+                else -> lum < 100
+            }
         }
 
         val centerY = (textRect.top + textRect.bottom) / 2
@@ -1495,12 +1711,16 @@ class TranslationService(
             val bubbleBox = block.bubbleBox
             val isBubbleBlock = block.isBubble
             if (!isBubbleBlock && block.backgroundColor == null) continue
-            val maskColor = if (block.isDarkBubble) {
-                Color.rgb(18, 18, 18)
-            } else if (block.backgroundColor != null) {
+            val maskColor = if (block.backgroundColor != null) {
                 val c = block.backgroundColor
                 val lum = (Color.red(c) * 0.299 + Color.green(c) * 0.587 + Color.blue(c) * 0.114)
-                if (lum > 215) Color.WHITE else c
+                when {
+                    lum > 215 -> Color.WHITE
+                    block.isDarkBubble && lum < 30 -> Color.rgb(18, 18, 18)
+                    else -> c
+                }
+            } else if (block.isDarkBubble) {
+                Color.rgb(18, 18, 18)
             } else {
                 Color.WHITE
             }
@@ -1727,11 +1947,43 @@ class TranslationService(
             return if (isDarkBubble) Color.rgb(18, 18, 18) else Color.WHITE
         }
 
-        val filtered = sampledColors.filter { c ->
-            val lum = (Color.red(c) * 0.299 + Color.green(c) * 0.587 + Color.blue(c) * 0.114)
-            if (isDarkBubble) lum < 80 else lum > 165
+        val withLuma = sampledColors.map { c ->
+            c to (Color.red(c) * 0.299 + Color.green(c) * 0.587 + Color.blue(c) * 0.114)
         }
-        val pool = if (filtered.isNotEmpty()) filtered else sampledColors
+        val pool: List<Int> = if (isDarkBubble) {
+            val nonWhite = withLuma.filter { it.second < 198.0 }.sortedBy { it.second }
+            if (nonWhite.isEmpty()) {
+                return Color.rgb(18, 18, 18)
+            }
+            val nonWhiteMedianLum = nonWhite[nonWhite.size / 2].second
+            if (nonWhiteMedianLum < 55.0) {
+                val darkPool = nonWhite.filter { it.second < 80.0 }.map { it.first }
+                if (darkPool.isNotEmpty()) darkPool else nonWhite.map { it.first }
+            } else {
+                // Colored / semi-transparent bubble with white text (e.g. purple ~157, brown ~110):
+                // exclude thin black bubble outline (<40) and cluster around the median fill luma.
+                val coloredPool = nonWhite.filter {
+                    it.second >= 40.0 && abs(it.second - nonWhiteMedianLum) <= 35.0
+                }.map { it.first }
+                if (coloredPool.isNotEmpty()) coloredPool else nonWhite.map { it.first }
+            }
+        } else {
+            val brightCount = withLuma.count { it.second > 185.0 }
+            if (brightCount * 100 >= withLuma.size * 35) {
+                val lightPool = withLuma.filter { it.second > 165.0 }.map { it.first }
+                if (lightPool.isNotEmpty()) lightPool else sampledColors
+            } else {
+                // Colored pastel bubble with dark text: exclude black ink (<45) and sample around median.
+                val nonInk = withLuma.filter { it.second >= 45.0 }.sortedBy { it.second }
+                if (nonInk.isNotEmpty()) {
+                    val medianLum = nonInk[nonInk.size / 2].second
+                    val coloredPool = nonInk.filter { abs(it.second - medianLum) <= 35.0 }.map { it.first }
+                    if (coloredPool.isNotEmpty()) coloredPool else nonInk.map { it.first }
+                } else {
+                    sampledColors
+                }
+            }
+        }
         var sumR = 0L
         var sumG = 0L
         var sumB = 0L

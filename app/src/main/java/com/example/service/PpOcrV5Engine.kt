@@ -70,7 +70,10 @@ class PpOcrV5Engine(
         private const val MIN_EN_SHORT_LINE_CONFIDENCE = 0.50f
         private const val MIN_CJK_LINE_CONFIDENCE = 0.45f
         private const val DARK_REGION_MEDIAN_LUMA = 95f
-        private const val INVERT_CONTRAST = 1.85f
+        private const val COLORED_REGION_MAX_MEDIAN_LUMA = 198f
+        private const val LIGHT_TEXT_MIN_P95_LUMA = 205f
+        private const val LIGHT_TEXT_MIN_CONTRAST = 42f
+        private const val NON_WHITE_BORDER_MIN_FRACTION = 0.45f
         private val LEGACY_PARSEQ_CACHE_FILES = listOf("parseq_rec_v1.onnx", "parseq_rec_v2_090.onnx")
 
         /**
@@ -140,6 +143,16 @@ class PpOcrV5Engine(
         val loaded = ensureInitialized()
         if (loaded) detector.prewarm()
         loaded
+    }
+
+    suspend fun detectMissingPageLines(
+        bitmap: Bitmap,
+        excludeRegions: List<Rect>,
+        includeInvertedPass: Boolean = true
+    ): List<PpOcrV5Detector.DetectedLine> = withContext(Dispatchers.Default) {
+        if (bitmap.isRecycled || bitmap.width < 8 || bitmap.height < 8) return@withContext emptyList()
+        if (!ensureInitialized()) return@withContext emptyList()
+        detector.detectMissingPageLines(bitmap, excludeRegions, includeInvertedPass)
     }
 
     suspend fun recognizeBlock(
@@ -551,37 +564,56 @@ class PpOcrV5Engine(
         if (samples.isEmpty()) return false
         samples.sort()
         val medianLuma = samples[samples.size / 2]
+        if (medianLuma >= COLORED_REGION_MAX_MEDIAN_LUMA) return false
         val p90Luma = samples[((samples.size - 1) * 9) / 10]
-        if (medianLuma >= DARK_REGION_MEDIAN_LUMA || p90Luma <= 125f) return false
+        val p95Luma = samples[((samples.size - 1) * 95) / 100]
 
-        // Verify outer perimeter is predominantly dark so a super-tight black-on-white
-        // crop with dense ink is not misclassified as a dark bubble.
+        val darkCandidate = medianLuma < DARK_REGION_MEDIAN_LUMA && p90Luma > 125f
+        val coloredLightTextCandidate = medianLuma < COLORED_REGION_MAX_MEDIAN_LUMA &&
+            p95Luma >= LIGHT_TEXT_MIN_P95_LUMA &&
+            (p95Luma - medianLuma) >= LIGHT_TEXT_MIN_CONTRAST
+        if (!darkCandidate && !coloredLightTextCandidate) return false
+
+        // Verify outer perimeter is predominantly dark/non-white so a tight
+        // black-on-white crop with dense ink is not misclassified as a dark bubble.
         var borderSamples = 0
         var darkBorderSamples = 0
+        var nonWhiteBorderSamples = 0
         val borderStepX = max(1, w / 24)
         val borderStepY = max(1, h / 24)
         var bx = safe.left
         while (bx < safe.right) {
-            if (pixelLuma(bitmap.getPixel(bx, safe.top)) < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+            val topLum = pixelLuma(bitmap.getPixel(bx, safe.top))
+            if (topLum < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+            if (topLum < COLORED_REGION_MAX_MEDIAN_LUMA) nonWhiteBorderSamples++
             borderSamples++
             if (h > 1) {
-                if (pixelLuma(bitmap.getPixel(bx, safe.bottom - 1)) < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+                val botLum = pixelLuma(bitmap.getPixel(bx, safe.bottom - 1))
+                if (botLum < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+                if (botLum < COLORED_REGION_MAX_MEDIAN_LUMA) nonWhiteBorderSamples++
                 borderSamples++
             }
             bx += borderStepX
         }
         var by = safe.top
         while (by < safe.bottom) {
-            if (pixelLuma(bitmap.getPixel(safe.left, by)) < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+            val leftLum = pixelLuma(bitmap.getPixel(safe.left, by))
+            if (leftLum < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+            if (leftLum < COLORED_REGION_MAX_MEDIAN_LUMA) nonWhiteBorderSamples++
             borderSamples++
             if (w > 1) {
-                if (pixelLuma(bitmap.getPixel(safe.right - 1, by)) < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+                val rightLum = pixelLuma(bitmap.getPixel(safe.right - 1, by))
+                if (rightLum < DARK_REGION_MEDIAN_LUMA) darkBorderSamples++
+                if (rightLum < COLORED_REGION_MAX_MEDIAN_LUMA) nonWhiteBorderSamples++
                 borderSamples++
             }
             by += borderStepY
         }
-        val darkBorderFraction = if (borderSamples > 0) darkBorderSamples.toFloat() / borderSamples else 0f
-        return darkBorderFraction >= 0.40f
+        if (borderSamples <= 0) return false
+        val darkBorderFraction = darkBorderSamples.toFloat() / borderSamples
+        val nonWhiteBorderFraction = nonWhiteBorderSamples.toFloat() / borderSamples
+        return (darkCandidate && darkBorderFraction >= 0.40f) ||
+            (coloredLightTextCandidate && nonWhiteBorderFraction >= NON_WHITE_BORDER_MIN_FRACTION)
     }
 
     internal fun invertHighContrastBitmap(source: Bitmap): Bitmap {
@@ -589,9 +621,36 @@ class PpOcrV5Engine(
         val h = source.height
         val pixels = IntArray(w * h)
         source.getPixels(pixels, 0, w, 0, 0, w, h)
+        if (pixels.isEmpty()) {
+            return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        }
+        val histogram = IntArray(256)
+        for (pixel in pixels) {
+            histogram[pixelLumaInt(pixel).coerceIn(0, 255)]++
+        }
+        val total = pixels.size
+        fun percentile(p: Int): Float {
+            val target = ((total - 1) * p) / 100
+            var cumulative = 0
+            for (lum in 0 until 256) {
+                cumulative += histogram[lum]
+                if (cumulative > target) return lum.toFloat()
+            }
+            return 255f
+        }
+        val medianLuma = percentile(50)
+        val p95Luma = percentile(95)
+        val p98Luma = percentile(98)
+        val fgAnchor = max((p95Luma + p98Luma) * 0.5f, (medianLuma + LIGHT_TEXT_MIN_CONTRAST).coerceAtMost(255f))
+            .coerceAtMost(255f)
+        val span = max(1f, fgAnchor - medianLuma)
+        val bgAnchor = (medianLuma + span * 0.12f).coerceAtMost(fgAnchor - 1f)
+        val denom = max(1f, fgAnchor - bgAnchor)
+
         for (i in pixels.indices) {
             val gray = pixelLuma(pixels[i])
-            val out = ((127.5f - gray) * INVERT_CONTRAST + 127.5f).roundToInt().coerceIn(0, 255)
+            val norm = ((gray - bgAnchor) / denom).coerceIn(0f, 1f)
+            val out = ((1f - norm) * 255f).roundToInt().coerceIn(0, 255)
             pixels[i] = Color.rgb(out, out, out)
         }
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
@@ -638,13 +697,30 @@ class PpOcrV5Engine(
             if (maxGray - minGray < 35) return false
 
             val threshold = otsuThreshold(gray)
+            var darkCount = 0
+            var lightCount = 0
+            var darkBorderCount = 0
+            var lightBorderCount = 0
+            for (y in 0 until h) {
+                val rowOffset = y * w
+                for (x in 0 until w) {
+                    val isDarkPx = gray[rowOffset + x] < threshold
+                    if (isDarkPx) darkCount++ else lightCount++
+                    if (x == 0 || x == w - 1 || y == 0 || y == h - 1) {
+                        if (isDarkPx) darkBorderCount++ else lightBorderCount++
+                    }
+                }
+            }
+            val lightOnDark = darkBorderCount > lightBorderCount && darkCount > lightCount
+
             var inkCount = 0
             var inkSum = 0L
             var bgCount = 0
             var bgSum = 0L
             val ink = BooleanArray(gray.size)
             for (i in gray.indices) {
-                if (gray[i] < threshold) {
+                val isInk = if (lightOnDark) gray[i] >= threshold else gray[i] < threshold
+                if (isInk) {
                     ink[i] = true
                     inkCount++
                     inkSum += gray[i]
@@ -654,7 +730,12 @@ class PpOcrV5Engine(
                 }
             }
             if (inkCount < 10 || bgCount == 0) return false
-            if ((bgSum.toDouble() / bgCount) - (inkSum.toDouble() / inkCount) < 35.0) return false
+            val contrast = if (lightOnDark) {
+                (inkSum.toDouble() / inkCount) - (bgSum.toDouble() / bgCount)
+            } else {
+                (bgSum.toDouble() / bgCount) - (inkSum.toDouble() / inkCount)
+            }
+            if (contrast < 35.0) return false
 
             val visited = BooleanArray(ink.size)
             val queue = IntArray(ink.size)

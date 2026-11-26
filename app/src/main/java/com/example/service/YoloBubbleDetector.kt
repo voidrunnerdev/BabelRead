@@ -1920,9 +1920,9 @@ class YoloBubbleDetector(context: Context) {
         val sTop = (pxTop + insetY).coerceIn(0, bitmap.height - 1)
         val sBottom = (pxBottom - insetY).coerceIn(sTop, bitmap.height - 1)
 
-        val stepX = max(1, (sRight - sLeft) / 10)
-        val stepY = max(1, (sBottom - sTop) / 10)
-        val lums = ArrayList<Float>(121)
+        val stepX = max(1, (sRight - sLeft) / 24)
+        val stepY = max(1, (sBottom - sTop) / 24)
+        val lums = ArrayList<Float>(625)
         for (y in sTop..sBottom step stepY) {
             for (x in sLeft..sRight step stepX) {
                 val pixel = bitmap.getPixel(x, y)
@@ -1936,6 +1936,9 @@ class YoloBubbleDetector(context: Context) {
         if (lums.isEmpty()) return false
         lums.sort()
         val medianLuma = lums[lums.size / 2]
-        return medianLuma < maxMedianLuma
+        if (medianLuma < maxMedianLuma) return true
+        val p95Index = (((lums.size - 1) * 95) / 100).coerceIn(0, lums.lastIndex)
+        val p95Luma = lums[p95Index]
+        return medianLuma < 198f && p95Luma >= 205f && (p95Luma - medianLuma) >= 42f
     }
 }
