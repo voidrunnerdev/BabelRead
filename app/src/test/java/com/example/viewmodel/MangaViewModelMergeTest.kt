@@ -6,10 +6,12 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import com.example.service.TranslationService
+import com.example.util.BubbleLayoutGeometry
 import com.example.util.ContourScanlineProfile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -269,5 +271,96 @@ class MangaViewModelMergeTest {
         assertTrue(bounded.contains(purpleTextRect))
 
         bitmap.recycle()
+    }
+
+    @Test
+    fun `shouldRunFallbackLineScan skips full-page DBNet when YOLO regions already yielded OCR blocks`() {
+        assertFalse(
+            FallbackBubbleSupport.shouldRunFallbackLineScan(
+                isPpOcrAny = true,
+                regionCount = 4,
+                primaryBlockCount = 4
+            )
+        )
+        assertTrue(
+            FallbackBubbleSupport.shouldRunFallbackLineScan(
+                isPpOcrAny = true,
+                regionCount = 0,
+                primaryBlockCount = 0
+            )
+        )
+        assertTrue(
+            FallbackBubbleSupport.shouldRunFallbackLineScan(
+                isPpOcrAny = true,
+                regionCount = 3,
+                primaryBlockCount = 0
+            )
+        )
+        assertFalse(
+            FallbackBubbleSupport.shouldRunFallbackLineScan(
+                isPpOcrAny = false,
+                regionCount = 0,
+                primaryBlockCount = 0
+            )
+        )
+    }
+
+    @Test
+    fun `vertical text narration box without balloon keeps rectangular contour and never forces oval`() {
+        val pageBitmap = Bitmap.createBitmap(300, 500, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.WHITE)
+        }
+        val canvas = Canvas(pageBitmap)
+        val borderPaint = Paint().apply {
+            color = Color.BLACK
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+        }
+        val narrationBox = Rect(40, 40, 140, 320)
+        canvas.drawRect(narrationBox, borderPaint)
+        val textBounds = Rect(55, 65, 125, 295)
+
+        // Real balloons list is empty (only "text" narration box was detected).
+        val containingBalloon = FallbackBubbleSupport.selectContainingBalloon(
+            textRect = textBounds,
+            balloonBoxes = emptyList()
+        )
+        assertNull(containingBalloon)
+
+        val contour = FallbackBubbleSupport.resolveNonBalloonContour(
+            bitmap = pageBitmap,
+            textBounds = textBounds,
+            bubbleBounds = narrationBox,
+            isDarkBubble = false,
+            dialogueLabel = "text"
+        )
+        assertNotNull(contour)
+        assertTrue(contour!!.isUsable)
+        assertTrue("Narration text box without balloon must stay rectangular", contour.isRectangularLike)
+
+        val rectLayout = BubbleLayoutGeometry.centeredLayoutBox(
+            anchor = textBounds,
+            bubble = narrationBox,
+            isRectangular = true
+        )
+        assertNotNull(rectLayout)
+        assertTrue(rectLayout!!.width() >= (narrationBox.width() * 0.85f).toInt())
+
+        // When YOLO missed a dark/colored oval (dialogueLabel == null) and contour extraction returns null,
+        // resolveNonBalloonContour must return null so ReaderScreen's oval fallback stays intact.
+        val unborderedDarkOval = Bitmap.createBitmap(200, 140, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.rgb(32, 32, 36))
+        }
+        val fallbackContour = FallbackBubbleSupport.resolveNonBalloonContour(
+            bitmap = unborderedDarkOval,
+            textBounds = Rect(40, 35, 160, 105),
+            bubbleBounds = Rect(20, 20, 180, 120),
+            isDarkBubble = true,
+            dialogueLabel = null
+        )
+        assertNull(fallbackContour)
+        unborderedDarkOval.recycle()
+
+        pageBitmap.recycle()
     }
 }

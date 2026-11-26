@@ -133,6 +133,70 @@ class TranslationService(
         private const val GEMINI_MODEL_TIMEOUT_MS = 30_000L
         private const val GEMINI_TOTAL_TIMEOUT_MS = 60_000L
         private val ELONGATED_DIALOGUE_REGEX = Regex("^(?:n[o]{2,}|o{2,}h+|a{2,}h+|h+m{2,}|s+h{2,})$")
+        private const val LATIN_VOWELS = "aeiouyäöüı"
+        private val THREE_REPEAT_CHAR_REGEX = Regex("(.)\\1{2,}")
+        private val REPEATED_SYLLABLE_2_4_REGEX = Regex("^([a-z]{2,4})\\1+$")
+        private val REPEATED_SYLLABLE_1_3_REGEX = Regex("^([a-z]{1,3})\\1{2,}$")
+        private val RARE_DOUBLE_LETTER_REGEX = Regex("([iujkqvwxy])\\1")
+        private val ALLOWED_REPEATED_SYLLABLES = setOf("mama", "papa", "dada", "baba", "haha", "hehe", "hahaha", "hehehe", "byebye", "tata")
+        private val ALLOWED_DOUBLE_AA_WORDS = setOf("isaac", "aaron", "bazaar", "naan", "aardvark", "maam")
+        private val ALLOWED_RARE_DOUBLE_WORDS = setOf("skiing", "hawaii", "vacuum", "continuum")
+        private val LATIN_SFX_WORDS = setOf(
+            "whoosh", "woosh", "swoosh", "fwoosh", "swish", "raaw", "raawr", "rawr",
+            "roaaar", "roar", "grr", "grrr", "grrrr", "kjj", "kjjj", "bzzt", "bzz", "bzzz",
+            "zzz", "bam", "blam", "bang", "kaboom", "kablam", "boom", "booom", "baboom",
+            "pow", "wham", "whack", "smack", "thud", "thump", "crash", "smash", "slash",
+            "clang", "clank", "clink", "clunk", "crackle", "crunch", "chomp", "splat",
+            "sploosh", "plop", "drip", "fizz", "sizzle", "shing", "shwing", "zing", "zap",
+            "zoom", "zooom", "vroom", "vrooom", "boing", "bonk", "poof", "puff", "snort",
+            "slurp", "gulp", "rumble", "creak", "squeak", "screech", "shriek", "hiss",
+            "purr", "meow", "woof", "arf", "chirp", "tock", "boop", "honk", "kapow",
+            "thwack", "fwip", "fshh", "kshh", "pshh", "brrr", "doki", "badump",
+            "gyaa", "gyaaa", "kyaa", "kyaaa", "waaa", "uraa", "oraa", "dododo", "gogogo",
+            "kerplunk", "krak", "kraak", "skree", "tsk"
+        )
+        private val COMMON_SINGLE_WORD_DIALOGUE = setOf(
+            "yes", "no", "wait", "what", "why", "who", "where", "when", "how",
+            "stop", "help", "hey", "hi", "hello", "bye", "goodbye", "okay", "ok",
+            "please", "thanks", "sorry", "here", "there", "look", "listen", "run",
+            "go", "come", "stay", "leave", "move", "hurry", "careful", "quiet",
+            "silence", "enough", "never", "always", "really", "seriously", "sure",
+            "fine", "right", "wrong", "true", "false", "good", "great", "nice",
+            "cool", "awesome", "wow", "damn", "dammit", "damnit", "hell", "crap",
+            "alright", "bastard", "bastards", "idiot", "idiots", "moron", "fool",
+            "liar", "die", "dead", "kill", "promise", "shut", "crazy", "insane",
+            "weird", "stupid", "useless", "pathetic", "coward", "trust", "believe",
+            "forget", "remember", "understand", "explain", "answer", "danger",
+            "warning", "win", "lost", "done", "ready", "now", "soon",
+            "later", "today", "tonight", "tomorrow", "sir", "boss", "master",
+            "lord", "lady", "miss", "king", "queen", "sensei", "senpai", "brother",
+            "sister", "mom", "dad", "mother", "father", "friend", "enemy",
+            "impossible", "unbelievable", "incredible", "amazing", "perfect",
+            "exactly", "maybe", "actually", "finally", "meanwhile", "earlier",
+            "prologue", "epilogue", "continued", "end", "welcome", "oops", "huh",
+            "hmm", "pardon", "excuse", "attack", "dodge", "duck", "jump", "fire",
+            "shoot", "retreat", "surrender", "save", "protect", "escape", "wake",
+            "sleep", "speak", "talk", "hold", "grab", "catch", "open", "close",
+            "break", "check", "nothing", "something", "everything", "anything",
+            "nobody", "someone", "everyone", "mine", "yours", "this", "that",
+            "it", "me", "us", "them", "you", "we", "he", "she", "they", "up",
+            "i", "a", "ah", "eh", "oh", "ha", "ne", "evet", "hayır", "tamam",
+            "dur", "bekle", "yardım", "kim", "neden", "nasıl", "nerede", "hı", "ya"
+        )
+
+        private fun isLikelySfxLatinToken(lettersOnly: String): Boolean {
+            if (lettersOnly.isEmpty()) return false
+            val lower = lettersOnly.lowercase(Locale.ROOT)
+            if (lower in COMMON_SINGLE_WORD_DIALOGUE) return false
+            if (lower in LATIN_SFX_WORDS) return true
+            if (lower.length >= 3 && lower.none { it in LATIN_VOWELS }) return true
+            if (THREE_REPEAT_CHAR_REGEX.containsMatchIn(lower)) return true
+            if (REPEATED_SYLLABLE_2_4_REGEX.matches(lower) && lower !in ALLOWED_REPEATED_SYLLABLES) return true
+            if (REPEATED_SYLLABLE_1_3_REGEX.matches(lower) && lower !in ALLOWED_REPEATED_SYLLABLES) return true
+            if (lower.contains("aa") && lower !in ALLOWED_DOUBLE_AA_WORDS) return true
+            if (RARE_DOUBLE_LETTER_REGEX.containsMatchIn(lower) && lower !in ALLOWED_RARE_DOUBLE_WORDS) return true
+            return false
+        }
 
         val latinRecognizer by lazy {
             try {
@@ -303,18 +367,28 @@ class TranslationService(
         val letterRatio = clean.count { it.isLetter() }.toFloat() / totalNonSpace.toFloat()
         if (letterRatio < 0.35f) return false
 
-        if (!isBubble && words.size == 1) {
+        if (words.size == 1) {
             val w = words[0].filter { it.isLetter() }
             val isCjk = w.any { (it.code in 0x3040..0x9FAF) || (it.code in 0xAC00..0xD7AF) }
             if (!isCjk) {
-                if (w.length <= 2 && !setOf("no", "hi", "oh", "ah", "ha", "ok", "go", "up", "me", "it", "so", "he", "we").contains(w.lowercase(Locale.ROOT))) {
-                    return false
+                if (isLikelySfxLatinToken(w)) return false
+                if (!isBubble) {
+                    val wLower = w.lowercase(Locale.ROOT)
+                    if (w.length <= 2 && wLower !in COMMON_SINGLE_WORD_DIALOGUE) {
+                        return false
+                    }
+                    if (w.length in 3..10 && wLower !in COMMON_SINGLE_WORD_DIALOGUE) {
+                        return false
+                    }
                 }
-                val commonDialogue = setOf("yes", "no", "what", "wait", "stop", "here", "look", "thanks", "hello", "goodbye", "please", "help")
-                val hasSentencePunctuation = clean.contains(".") || clean.contains("?") || clean.contains("!")
-                if (w.length in 3..10 && !commonDialogue.contains(w.lowercase(Locale.ROOT)) && !hasSentencePunctuation) {
-                    return false
-                }
+            }
+        } else if (words.size in 2..3) {
+            val letterTokens = words.map { token -> token.filter { it.isLetter() } }.filter { it.isNotEmpty() }
+            val hasCjk = letterTokens.any { token ->
+                token.any { (it.code in 0x3040..0x9FAF) || (it.code in 0xAC00..0xD7AF) }
+            }
+            if (!hasCjk && letterTokens.isNotEmpty() && letterTokens.all { isLikelySfxLatinToken(it) }) {
+                return false
             }
         }
         return true

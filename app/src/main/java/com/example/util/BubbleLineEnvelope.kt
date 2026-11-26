@@ -76,19 +76,44 @@ class ContourScanlineProfile(
     val bottomFraction: Float
         get() = if (isUsable) (lastValidRow + 1).toFloat() / rowCount.toFloat() else 1f
 
-    /** True when the top and bottom bands are nearly as wide as the middle (e.g., rectangular narration box). */
+    /** True when all interior rows (~10%..90% band) stay uniformly wide with low edge drift (e.g., rectangular narration box). */
     val isRectangularLike: Boolean
         get() {
             if (!isUsable) return false
             val spanRows = lastValidRow - firstValidRow + 1
             if (spanRows < 4) return false
-            val topIdx = (firstValidRow + spanRows / 8).coerceIn(firstValidRow, lastValidRow)
-            val midIdx = (firstValidRow + lastValidRow) / 2
-            val botIdx = (lastValidRow - spanRows / 8).coerceIn(firstValidRow, lastValidRow)
-            val topW = rowRightFractions[topIdx] - rowLeftFractions[topIdx]
-            val midW = rowRightFractions[midIdx] - rowLeftFractions[midIdx]
-            val botW = rowRightFractions[botIdx] - rowLeftFractions[botIdx]
-            return midW > 0.5f && topW >= midW * 0.86f && botW >= midW * 0.86f
+            val marginRows = if (spanRows >= 8) {
+                ((spanRows - 1) * 0.10f).toInt().coerceAtLeast(1)
+            } else {
+                0
+            }
+            val bandStart = (firstValidRow + marginRows).coerceIn(firstValidRow, lastValidRow)
+            val bandEnd = (lastValidRow - marginRows).coerceIn(bandStart, lastValidRow)
+            var minW = Float.POSITIVE_INFINITY
+            var maxW = 0f
+            var minLeft = Float.POSITIVE_INFINITY
+            var maxLeft = Float.NEGATIVE_INFINITY
+            var minRight = Float.POSITIVE_INFINITY
+            var maxRight = Float.NEGATIVE_INFINITY
+            for (r in bandStart..bandEnd) {
+                val lf = rowLeftFractions[r]
+                val rf = rowRightFractions[r]
+                if (!lf.isFinite() || !rf.isFinite() || rf <= lf) return false
+                val w = rf - lf
+                if (w < minW) minW = w
+                if (w > maxW) maxW = w
+                if (lf < minLeft) minLeft = lf
+                if (lf > maxLeft) maxLeft = lf
+                if (rf < minRight) minRight = rf
+                if (rf > maxRight) maxRight = rf
+            }
+            if (!minW.isFinite() || maxW <= 0f) return false
+            val leftSpread = maxLeft - minLeft
+            val rightSpread = maxRight - minRight
+            return minW > 0.50f &&
+                minW >= maxW * 0.84f &&
+                leftSpread <= 0.12f &&
+                rightSpread <= 0.12f
         }
 
     override fun equals(other: Any?): Boolean {
@@ -306,8 +331,8 @@ data class BubbleLineEnvelope(
         val lf = profile.rowLeftFractions[row]
         val rf = profile.rowRightFractions[row]
         if (!lf.isFinite() || !rf.isFinite() || rf <= lf) return ScanlineSpan(centerX, centerX)
-        val left = max(contentLeft, bounds.left + lf * bounds.width)
-        val right = min(contentRight, bounds.left + rf * bounds.width)
+        val left = max(contentLeft, bounds.left + lf * bounds.width + insetX)
+        val right = min(contentRight, bounds.left + rf * bounds.width - insetX)
         return if (right <= left) ScanlineSpan(centerX, centerX) else ScanlineSpan(left, right)
     }
 

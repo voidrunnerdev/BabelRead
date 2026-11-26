@@ -82,11 +82,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sqrt
 
 @Composable
 private fun ReaderSheetSectionHeader(text: String) {
@@ -427,8 +429,7 @@ internal fun resolveIsRectangularBox(
     if (!isBubble || bubbleBox.isEmpty) return true
     val usableContour = contourProfile?.takeIf { it.isUsable }
     if (usableContour != null) return usableContour.isRectangularLike
-    val aspect = if (targetBox.height() > 0) targetBox.width().toFloat() / targetBox.height().toFloat() else 1f
-    return aspect > 1.25f || targetBox.height() > targetBox.width() * 1.5f
+    return false
 }
 
 internal fun resolveDrawIsRectangularBox(
@@ -438,11 +439,95 @@ internal fun resolveDrawIsRectangularBox(
     heightDp: Float,
     contourProfile: ContourScanlineProfile?
 ): Boolean {
+    if (!isBubble || bubbleBox.isEmpty) return true
     val usableContour = contourProfile?.takeIf { it.isUsable }
     if (usableContour != null) return usableContour.isRectangularLike
-    val isAspectExtreme = widthDp > 0f && heightDp > 0f &&
-        (widthDp / heightDp > 2.2f || heightDp / widthDp > 2.5f)
-    return (!isBubble && isAspectExtreme) || (isBubble && bubbleBox.isEmpty)
+    return false
+}
+
+internal fun shouldDrawRectangularBorder(
+    isSubtitleMode: Boolean,
+    isRectangularBox: Boolean,
+    isBubble: Boolean
+): Boolean = !isSubtitleMode && isRectangularBox && isBubble
+
+internal data class DrawBoxRectDp(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+) {
+    val width: Float get() = (right - left).coerceAtLeast(1f)
+    val height: Float get() = (bottom - top).coerceAtLeast(1f)
+}
+
+internal fun resolveOverlayBackgroundBoundsDp(
+    isSubtitleMode: Boolean,
+    isOvalFallback: Boolean,
+    anchorLeftDp: Float,
+    anchorTopDp: Float,
+    anchorRightDp: Float,
+    anchorBottomDp: Float,
+    bubbleLeftDp: Float,
+    bubbleTopDp: Float,
+    bubbleRightDp: Float,
+    bubbleBottomDp: Float,
+    placedLeftDp: Float,
+    placedTopDp: Float,
+    placedRightDp: Float,
+    placedBottomDp: Float,
+    marginDp: Float = 2f
+): DrawBoxRectDp {
+    if (isSubtitleMode) {
+        return DrawBoxRectDp(
+            left = placedLeftDp,
+            top = placedTopDp,
+            right = maxOf(placedRightDp, placedLeftDp + 1f),
+            bottom = maxOf(placedBottomDp, placedTopDp + 1f)
+        )
+    }
+    var left = (minOf(bubbleLeftDp, anchorLeftDp, placedLeftDp) - marginDp).coerceAtLeast(0f)
+    var top = (minOf(bubbleTopDp, anchorTopDp, placedTopDp) - marginDp).coerceAtLeast(0f)
+    var right = maxOf(bubbleRightDp, anchorRightDp, placedRightDp) + marginDp
+    var bottom = maxOf(bubbleBottomDp, anchorBottomDp, placedBottomDp) + marginDp
+
+    if (isOvalFallback && right > left && bottom > top) {
+        // An ellipse inscribed in a bounding box cuts ~29% of corners. Expand symmetrically
+        // around the center when needed so all 4 corners of anchorBox (plus 1dp ink margin)
+        // stay covered by the opaque oval background and never leak source corner glyphs.
+        val cx = (left + right) * 0.5f
+        val cy = (top + bottom) * 0.5f
+        val rx = ((right - left) * 0.5f).coerceAtLeast(1f)
+        val ry = ((bottom - top) * 0.5f).coerceAtLeast(1f)
+        val coverMargin = 1f
+        val dxMax = maxOf(
+            abs((anchorLeftDp - coverMargin) - cx),
+            abs((anchorRightDp + coverMargin) - cx)
+        )
+        val dyMax = maxOf(
+            abs((anchorTopDp - coverMargin) - cy),
+            abs((anchorBottomDp + coverMargin) - cy)
+        )
+        val u = dxMax / rx
+        val v = dyMax / ry
+        val normSq = u * u + v * v
+        if (normSq > 1.0f) {
+            val expandScale = (sqrt(normSq) * 1.03f).coerceAtMost(1.50f)
+            val newRx = rx * expandScale
+            val newRy = ry * expandScale
+            left = (cx - newRx).coerceAtLeast(0f)
+            top = (cy - newRy).coerceAtLeast(0f)
+            right = maxOf(cx + newRx, anchorRightDp + coverMargin + 1f)
+            bottom = maxOf(cy + newRy, anchorBottomDp + coverMargin + 1f)
+        }
+    }
+
+    return DrawBoxRectDp(
+        left = left,
+        top = top,
+        right = maxOf(right, left + 1f),
+        bottom = maxOf(bottom, top + 1f)
+    )
 }
 
 internal fun computeBubblePaddingDp(
@@ -455,7 +540,14 @@ internal fun computeBubblePaddingDp(
         val pV = minOf(heightDp * 0.25f, maxOf(3.5f, minOf(heightDp * 0.06f, 6f))).coerceAtLeast(0f)
         return pH to pV
     }
-    val pH = minOf(widthDp * 0.045f, 5f).coerceAtLeast(0f)
+    val baseH = minOf(widthDp * 0.045f, 5f).coerceAtLeast(0f)
+    val isNarrowVertical = widthDp > 0f && heightDp > 0f &&
+        (heightDp > widthDp * 1.35f || widthDp < 64f)
+    val pH = if (isNarrowVertical) {
+        minOf(widthDp * 0.14f, maxOf(baseH, 4.0f, minOf(widthDp * 0.075f, 5.5f))).coerceAtLeast(0f)
+    } else {
+        baseH
+    }
     val pV = minOf(heightDp * 0.045f, 5f).coerceAtLeast(0f)
     return pH to pV
 }
@@ -2389,14 +2481,29 @@ fun ReaderPageContainer(
                         val placedRightDp = placed.leftDp + placed.widthDp
                         val placedBottomDp = placed.topDp + placed.heightDp
 
-                        val marginDp = 2.dp
-                        val boxLeft = if (isSubtitleMode) placedLeftDp else (minOf(bubbleLeftDp, anchorLeftDp, placedLeftDp) - marginDp).coerceAtLeast(0.dp)
-                        val boxTop = if (isSubtitleMode) placedTopDp else (minOf(bubbleTopDp, anchorTopDp, placedTopDp) - marginDp).coerceAtLeast(0.dp)
-                        val boxRight = if (isSubtitleMode) placedRightDp else maxOf(bubbleRightDp, anchorRightDp, placedRightDp) + marginDp
-                        val boxBottom = if (isSubtitleMode) placedBottomDp else maxOf(bubbleBottomDp, anchorBottomDp, placedBottomDp) + marginDp
-
-                        val boxWidth = (boxRight - boxLeft).coerceAtLeast(1.dp)
-                        val boxHeight = (boxBottom - boxTop).coerceAtLeast(1.dp)
+                        val isOvalFallback = !isSubtitleMode && !isRectangularBox &&
+                            (contour == null || !contour.isUsable)
+                        val resolvedBoundsDp = resolveOverlayBackgroundBoundsDp(
+                            isSubtitleMode = isSubtitleMode,
+                            isOvalFallback = isOvalFallback,
+                            anchorLeftDp = anchorLeftDp.value,
+                            anchorTopDp = anchorTopDp.value,
+                            anchorRightDp = anchorRightDp.value,
+                            anchorBottomDp = anchorBottomDp.value,
+                            bubbleLeftDp = bubbleLeftDp.value,
+                            bubbleTopDp = bubbleTopDp.value,
+                            bubbleRightDp = bubbleRightDp.value,
+                            bubbleBottomDp = bubbleBottomDp.value,
+                            placedLeftDp = placedLeftDp.value,
+                            placedTopDp = placedTopDp.value,
+                            placedRightDp = placedRightDp.value,
+                            placedBottomDp = placedBottomDp.value,
+                            marginDp = 2f
+                        )
+                        val boxLeft = resolvedBoundsDp.left.dp
+                        val boxTop = resolvedBoundsDp.top.dp
+                        val boxWidth = resolvedBoundsDp.width.dp
+                        val boxHeight = resolvedBoundsDp.height.dp
 
                         val cachedBackgroundPath = remember(
                             block,
@@ -2470,7 +2577,12 @@ fun ReaderPageContainer(
                                             size = size,
                                             cornerRadius = CornerRadius(6.dp.toPx())
                                         )
-                                        if (!isSubtitleMode && isRectangularBox) {
+                                        if (shouldDrawRectangularBorder(
+                                                isSubtitleMode = isSubtitleMode,
+                                                isRectangularBox = isRectangularBox,
+                                                isBubble = block.isBubble
+                                            )
+                                        ) {
                                             drawRoundRect(
                                                 color = borderColor,
                                                 size = size,

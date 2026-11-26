@@ -22,6 +22,7 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import kotlin.math.ceil
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
@@ -415,15 +416,126 @@ class PpOcrV5Engine(
             crop
         }
 
+        val prepared = prepareLineBitmapForRecognition(oriented)
+
         try {
-            runRecognition(oriented)
+            runRecognition(prepared)
         } catch (t: Throwable) {
             if (t is kotlinx.coroutines.CancellationException) throw t
             Log.w(TAG, "PP-OCRv5 line recognition failed: ${t.message}")
             null
         } finally {
+            if (prepared !== oriented && prepared !== crop && prepared !== bitmap && !prepared.isRecycled) {
+                prepared.recycle()
+            }
             if (oriented !== crop && crop !== bitmap && !crop.isRecycled) crop.recycle()
             if (oriented !== bitmap && !oriented.isRecycled) oriented.recycle()
+        }
+    }
+
+    /**
+     * Trims excessive vertical whitespace left by DBNet unclipping and ensures a
+     * small horizontal/vertical background margin so condensed words (e.g. "SPOT US")
+     * keep enough horizontal resolution and edge breathing room for CTC spaces.
+     */
+    internal fun prepareLineBitmapForRecognition(crop: Bitmap): Bitmap {
+        if (crop.isRecycled || crop.width < 4 || crop.height < 4) return crop
+        val w = crop.width
+        val h = crop.height
+        val pixels = IntArray(w * h)
+        crop.getPixels(pixels, 0, w, 0, 0, w, h)
+
+        val borderLumas = ArrayList<Int>(2 * (w + h))
+        val borderColors = ArrayList<Int>(2 * (w + h))
+        for (x in 0 until w) {
+            val topPx = pixels[x]
+            borderLumas.add(pixelLumaInt(topPx))
+            borderColors.add(topPx)
+            if (h > 1) {
+                val botPx = pixels[(h - 1) * w + x]
+                borderLumas.add(pixelLumaInt(botPx))
+                borderColors.add(botPx)
+            }
+        }
+        for (y in 1 until h - 1) {
+            val leftPx = pixels[y * w]
+            borderLumas.add(pixelLumaInt(leftPx))
+            borderColors.add(leftPx)
+            if (w > 1) {
+                val rightPx = pixels[y * w + (w - 1)]
+                borderLumas.add(pixelLumaInt(rightPx))
+                borderColors.add(rightPx)
+            }
+        }
+        if (borderLumas.isEmpty()) return crop
+
+        val sortedLumas = borderLumas.sorted()
+        val bgLuma = sortedLumas[sortedLumas.size / 2]
+        if (bgLuma < 170) return crop
+
+        val bgColor = if (bgLuma >= 235) {
+            Color.WHITE
+        } else {
+            var bestColor = Color.WHITE
+            var bestDiff = Int.MAX_VALUE
+            for (i in borderLumas.indices) {
+                val diff = kotlin.math.abs(borderLumas[i] - bgLuma)
+                if (diff < bestDiff) {
+                    bestDiff = diff
+                    bestColor = borderColors[i]
+                }
+            }
+            bestColor
+        }
+
+        val inkThreshold = bgLuma - 28
+        var minInkX = w
+        var maxInkX = -1
+        var minInkY = h
+        var maxInkY = -1
+        for (y in 0 until h) {
+            val rowOffset = y * w
+            for (x in 0 until w) {
+                if (pixelLumaInt(pixels[rowOffset + x]) < inkThreshold) {
+                    if (x < minInkX) minInkX = x
+                    if (x > maxInkX) maxInkX = x
+                    if (y < minInkY) minInkY = y
+                    if (y > maxInkY) maxInkY = y
+                }
+            }
+        }
+        if (minInkX > maxInkX || minInkY > maxInkY) return crop
+
+        val inkH = maxInkY - minInkY + 1
+        val desiredPadY = max(2, (inkH * 0.12f).roundToInt().coerceAtMost(4))
+        val candTop = (minInkY - desiredPadY).coerceAtLeast(0)
+        val candBottom = (maxInkY + desiredPadY + 1).coerceAtMost(h)
+        val candH = candBottom - candTop
+        val shouldTrimY = candH >= 8 && candH <= (h * 0.85f).roundToInt()
+        val trimTop = if (shouldTrimY) candTop else 0
+        val trimBottom = if (shouldTrimY) candBottom else h
+        val sliceH = trimBottom - trimTop
+        val addTop = (2 - (minInkY - trimTop)).coerceAtLeast(0)
+        val addBottom = (2 - (trimBottom - 1 - maxInkY)).coerceAtLeast(0)
+        val outH = sliceH + addTop + addBottom
+
+        val desiredPadX = max(3, min(6, (outH * 0.15f).roundToInt()))
+        val addLeft = (desiredPadX - minInkX).coerceAtLeast(0)
+        val addRight = (desiredPadX - (w - 1 - maxInkX)).coerceAtLeast(0)
+
+        if (addLeft == 0 && addRight == 0 && addTop == 0 && addBottom == 0 && trimTop == 0 && trimBottom == h) {
+            return crop
+        }
+
+        val outW = w + addLeft + addRight
+        val outPixels = IntArray(outW * outH) { bgColor }
+        for (y in 0 until sliceH) {
+            val srcOffset = (trimTop + y) * w
+            val dstOffset = (addTop + y) * outW + addLeft
+            System.arraycopy(pixels, srcOffset, outPixels, dstOffset, w)
+        }
+        return Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888).apply {
+            setPixels(outPixels, 0, outW, 0, 0, outW, outH)
         }
     }
 

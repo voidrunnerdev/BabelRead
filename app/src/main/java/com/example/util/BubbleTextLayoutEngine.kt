@@ -113,7 +113,14 @@ object BubbleTextLayoutEngine {
         val measurer = BubbleTextMeasurer(
             measureWidth = { line, textSizePx ->
                 measurementPaint.textSize = textSizePx
-                measurementPaint.measureText(line)
+                val advance = measurementPaint.measureText(line)
+                if (line.isEmpty()) {
+                    advance
+                } else {
+                    measurementPaint.getTextBounds(line, 0, line.length, tmpBounds)
+                    val leftOverhang = (-tmpBounds.left).coerceAtLeast(0).toFloat()
+                    maxOf(advance, tmpBounds.right.toFloat()) + leftOverhang * 2f
+                }
             },
             metricsForSize = { textSizePx ->
                 measurementPaint.textSize = textSizePx

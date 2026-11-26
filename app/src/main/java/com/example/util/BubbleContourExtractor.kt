@@ -22,11 +22,12 @@ object BubbleContourExtractor {
 
     private const val MAX_GRID_DIM = 48
     private const val MIN_CROP_PX = 12
-    private const val MIN_USABLE_AREA_RATIO = 0.24f
-    private const val MIN_VALID_ROW_RATIO = 0.45f
+    private const val MIN_USABLE_AREA_RATIO = 0.17f
+    private const val MIN_VALID_ROW_RATIO = 0.36f
     private const val MIN_SPAN_WIDTH_RATIO = 0.22f
     private const val MIN_MEDIAN_SPAN_RATIO = 0.34f
     private const val MAX_GLYPH_BRIDGE_RATIO = 0.10f
+    private const val MAX_PERIMETER_LEAK_RATIO = 0.55f
     private const val EDT_INF = 1e6f
 
     fun extractFromBitmap(
@@ -191,7 +192,13 @@ object BubbleContourExtractor {
 
         fun isInteriorPixel(lum: Int): Boolean = when {
             isLight -> lum >= max(135, seedLum - 58)
-            isDark -> lum <= min(120, seedLum + 58)
+            isDark -> if (seedLum <= 110) {
+                lum <= min(168, seedLum + 58)
+            } else {
+                // Colored / translucent dark bubble with light glyphs: keep hue band around seedLum
+                // and stop at bright white borders/glyphs or dark inked outlines.
+                abs(lum - seedLum) <= 48 && lum < 215
+            }
             else -> abs(lum - seedLum) <= 46
         }
 
@@ -210,20 +217,20 @@ object BubbleContourExtractor {
 
         if (hasAnchorRect) {
             val anchorArea = (anchorRight - anchorLeft + 1) * (anchorBottom - anchorTop + 1)
-            val useEllipticalAnchor = anchorArea > total * 0.70f
+            val useEllipticalAnchor = anchorArea > total * 0.42f
             val aCx = (anchorLeft + anchorRight) * 0.5f
             val aCy = (anchorTop + anchorBottom) * 0.5f
             val aRx = max(1f, (anchorRight - anchorLeft + 1) * 0.5f)
             val aRy = max(1f, (anchorBottom - anchorTop + 1) * 0.5f)
             for (sy in anchorTop..anchorBottom) {
                 val rowOffset = sy * gridW
-                val ny = if (useEllipticalAnchor) (sy - aCy) / aRy else 0f
+                val ny = (sy - aCy) / aRy
                 for (sx in anchorLeft..anchorRight) {
-                    if (useEllipticalAnchor) {
-                        val nx = (sx - aCx) / aRx
-                        if (nx * nx + ny * ny > 1.0f) continue
-                    }
+                    val nx = (sx - aCx) / aRx
+                    val distSq = nx * nx + ny * ny
+                    if (useEllipticalAnchor && distSq > 1.0f) continue
                     val idx = rowOffset + sx
+                    if (!useEllipticalAnchor && distSq > 1.15f && !isInteriorPixel(luma[idx])) continue
                     if (!mask[idx]) {
                         mask[idx] = true
                         queue[tail++] = idx
@@ -295,7 +302,7 @@ object BubbleContourExtractor {
             if (mask[y * gridW]) leakedPerimeterCells++
             if (mask[y * gridW + (gridW - 1)]) leakedPerimeterCells++
         }
-        if (perimeterCells > 0 && leakedPerimeterCells.toFloat() / perimeterCells.toFloat() > 0.45f) {
+        if (perimeterCells > 0 && leakedPerimeterCells.toFloat() / perimeterCells.toFloat() > MAX_PERIMETER_LEAK_RATIO) {
             return null
         }
 

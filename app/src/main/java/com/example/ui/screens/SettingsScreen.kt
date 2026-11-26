@@ -120,7 +120,7 @@ fun SettingsScreen(viewModel: MangaViewModel) {
     val translationCacheTtlDays by viewModel.preferences.translationCacheTtlDays.collectAsState(initial = 30)
 
     val yoloAiEnabled by viewModel.preferences.yoloAiEnabled.collectAsState(initial = true)
-    val detectorModelType by viewModel.preferences.detectorModelType.collectAsState(initial = DetectorModel.YOLO11N_SEG.id)
+    val detectorModelType by viewModel.preferences.detectorModelType.collectAsState(initial = DetectorModel.YOLO11S_SEG.id)
     val confidenceThreshold by viewModel.preferences.confidenceThreshold.collectAsState(
         initial = DetectorModel.fromId(detectorModelType).defaultConfidence
     )
@@ -295,10 +295,10 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                                 }
                             }
 
-                            // 2. Model: YOLO11n-seg
-                            val isYoloSegSelected = activeModelId == "yolo11n_seg"
+                            // 2. Model: YOLO11s-seg
+                            val isYoloSegSelected = activeModelId == DetectorModel.YOLO11S_SEG.id
                             Surface(
-                                onClick = { viewModel.setDetectorModelType(DetectorModel.YOLO11N_SEG) },
+                                onClick = { viewModel.setDetectorModelType(DetectorModel.YOLO11S_SEG) },
                                 shape = MaterialTheme.shapes.medium,
                                 color = if (isYoloSegSelected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
                                 border = if (isYoloSegSelected) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null,
@@ -314,17 +314,17 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                                     ) {
                                         RadioButton(
                                             selected = isYoloSegSelected,
-                                            onClick = { viewModel.setDetectorModelType(DetectorModel.YOLO11N_SEG) }
+                                            onClick = { viewModel.setDetectorModelType(DetectorModel.YOLO11S_SEG) }
                                         )
                                         Text(
-                                            text = "YOLO11n-seg",
+                                            text = "YOLO11s-seg",
                                             style = MaterialTheme.typography.titleSmall,
                                             fontWeight = FontWeight.Bold,
                                             color = if (isYoloSegSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
                                         )
                                     }
                                     Text(
-                                        text = "Piksel Segmentasyon\n12.5 MB Manga109",
+                                        text = "Piksel Segmentasyon\n39.3 MB Manga",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -393,14 +393,14 @@ fun SettingsScreen(viewModel: MangaViewModel) {
                                 verticalArrangement = Arrangement.spacedBy(AppSpacing.xs)
                             ) {
                                 Text(
-                                    text = if (activeModelId == "yolo11n_seg") "YOLO11n-seg & Piksel Segmentasyon Prensibi:" else "RT-DETR-v2 & Akıllı Kutu Prensibi:",
+                                    text = if (activeModelId == DetectorModel.YOLO11S_SEG.id) "YOLO11s-seg & Piksel Segmentasyon Prensibi:" else "RT-DETR-v2 & Akıllı Kutu Prensibi:",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.primary,
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = if (activeModelId == "yolo11n_seg") {
-                                        "• Piksel Konturu: Manga109 üzerinde eğitilmiş sinir ağı, balonun sınırlarını kaba bir dikdörtgen yerine gerçek eğri sınırlarıyla (piksel maskesi) tespit eder.\n• Düzensiz ve Kardan Adam Balonlar: Üst üste binen veya birleşik balonlar ayrı olarak korunur ve birbirine yapışmaz.\n• İnce Halat / Sütun Koruması: Dar veya eğik balonlarda metin, balonun gerçek iç genişliğine göre satır satır optimize edilerek dizilir."
+                                    text = if (activeModelId == DetectorModel.YOLO11S_SEG.id) {
+                                        "• 4 Sınıflı Manga Segmentasyonu: Balon (bubble), ses efekti (sfx), serbest metin (text) ve panel çerçevelerini ayırarak 1024px dinamik dikdörtgen çözünürlükte piksel konturu çıkarır.\n• Düzensiz ve Kardan Adam Balonlar: Üst üste binen veya birleşik balonlar ayrı olarak korunur ve birbirine yapışmaz.\n• İnce Halat / Sütun Koruması: Dar veya eğik balonlarda metin, balonun gerçek iç genişliğine göre satır satır optimize edilerek dizilir."
                                     } else {
                                         "• Balon & Metin Tespiti: Konuşma balonunu (balloon) ve balon içi metin bölgesini (text_bubble) transformer yapay zekasıyla keskin olarak saptar.\n• Metin Merkezli Yerleşim: Türkçe çeviri, balonun kuyruğuna kaymadan orijinal metnin merkezine hizalanır.\n• Ses Efekti (SFX) Filtresi: Çizim üzerindeki dış ve arka plan ses efektlerini (text_free) otomatik olarak eler."
                                     },

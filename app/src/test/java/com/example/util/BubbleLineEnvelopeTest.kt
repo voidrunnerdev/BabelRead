@@ -1,6 +1,7 @@
 package com.example.util
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -82,5 +83,71 @@ class BubbleLineEnvelopeTest {
         assertTrue(midSpan.leftPx.isFinite())
         assertTrue(midSpan.rightPx.isFinite())
         assertEquals(0f, midSpan.widthPx, 0.01f)
+    }
+
+    @Test
+    fun `hourglass and bilobed snowman profiles are never classified rectangular`() {
+        val rows = 40
+        // Symmetric snowman/hourglass: wide top lobe, pinched waist, wide bottom lobe
+        val lefts = FloatArray(rows)
+        val rights = FloatArray(rows)
+        for (r in 0 until rows) {
+            val t = r.toFloat() / (rows - 1).toFloat()
+            val halfW = when {
+                t < 0.35f -> 0.40f
+                t < 0.65f -> 0.24f // narrow waist
+                else -> 0.42f
+            }
+            lefts[r] = 0.5f - halfW
+            rights[r] = 0.5f + halfW
+        }
+        val hourglass = ContourScanlineProfile(lefts, rights)
+        assertTrue(hourglass.isUsable)
+        assertFalse("Hourglass profile must not be rectangular", hourglass.isRectangularLike)
+
+        // Off-center pinched waist (narrowest at 32% height, wide at 12%/50%/88%)
+        val offCenterLefts = FloatArray(rows) { r ->
+            val t = r.toFloat() / (rows - 1).toFloat()
+            if (t in 0.28f..0.38f) 0.26f else 0.08f
+        }
+        val offCenterRights = FloatArray(rows) { r ->
+            val t = r.toFloat() / (rows - 1).toFloat()
+            if (t in 0.28f..0.38f) 0.74f else 0.92f
+        }
+        assertFalse(
+            "Off-center pinched bilobed profile must not be rectangular",
+            ContourScanlineProfile(offCenterLefts, offCenterRights).isRectangularLike
+        )
+
+        // S-shifted bilobed profile (width stays constant, edges drift strongly)
+        val shiftedLefts = FloatArray(rows) { r -> if (r < rows / 2) 0.06f else 0.24f }
+        val shiftedRights = FloatArray(rows) { r -> if (r < rows / 2) 0.76f else 0.94f }
+        assertFalse(
+            "S-shifted bilobed profile must not be rectangular",
+            ContourScanlineProfile(shiftedLefts, shiftedRights).isRectangularLike
+        )
+
+        // True rectangular narration box stays rectangular
+        val rectLefts = FloatArray(rows) { r -> if (r == 0 || r == rows - 1) 0.12f else 0.06f }
+        val rectRights = FloatArray(rows) { r -> if (r == 0 || r == rows - 1) 0.88f else 0.94f }
+        assertTrue(ContourScanlineProfile(rectLefts, rectRights).isRectangularLike)
+    }
+
+    @Test
+    fun `contour scanline applies horizontalInsetPx inside curved contour edges`() {
+        val lefts = FloatArray(10) { 0.15f }
+        val rights = FloatArray(10) { 0.85f }
+        val profile = ContourScanlineProfile(lefts, rights)
+        val envelope = BubbleLineEnvelope(
+            bounds = EnvelopeBounds(0f, 0f, 200f, 100f),
+            horizontalInsetPx = 6f,
+            verticalInsetPx = 4f,
+            shape = EnvelopeShape(kind = EnvelopeShapeKind.CONTOUR_SCANLINE),
+            contourProfile = profile
+        )
+        val span = envelope.spanAtBand(30f, 60f)
+        // 0.15 * 200 + 6 = 36, 0.85 * 200 - 6 = 164
+        assertEquals(36f, span.leftPx, 0.01f)
+        assertEquals(164f, span.rightPx, 0.01f)
     }
 }

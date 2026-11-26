@@ -28,13 +28,12 @@ import kotlin.math.roundToInt
 
 /**
  * RT-DETR-v2 & YOLO Çizgi Roman / Manga Konuşma Balonu ve Metin Bölgesi Dedektörü.
- * Upstream model: ogkalu/comic-text-and-bubble-detector/detector-v4-s_int8.onnx.
- * The bundled asset is renamed to models/detector.onnx; koharu-yolo26s.onnx is
- * retained only as a legacy asset lookup fallback.
- * Çok sınıflı destek:
+ * Varsayılan segmentasyon modeli: chiqui7/yolo11-manga-seg (yolo11s_seg.onnx, 4 sınıf:
  *   0: bubble (konuşma balonu)
- *   1: text_bubble (balon içi metin)
- *   2: text_free (balon dışı metin)
+ *   1: panel (manga panel çerçevesi - filtrelenir)
+ *   2: sfx (ses efekti)
+ *   3: text (balon dışı/serbest metin veya anlatım kutusu)
+ * ).
  */
 enum class DetectorModel(
     val id: String,
@@ -58,21 +57,23 @@ enum class DetectorModel(
         defaultConfidence = 0.35f,
         description = "Transformer tabanlı nesne tespiti. Balon, metin ve ses efektlerini (SFX) dikdörtgen sınır kutularıyla ayrıştırır."
     ),
-    YOLO11N_SEG(
-        id = "yolo11n_seg",
-        title = "YOLO11n-seg Manga109",
-        subtitle = "Piksel Segmentasyon (12.5 MB)",
-        assetPath = "models/yolo11n_seg.onnx",
-        targetFileName = "yolo11n_seg.onnx",
-        expectedBytes = 12509314L,
-        sha256 = "760146a01c3e9f547bc271751bedacd30ae973bfa043dd7761069be7ae0b1336",
+    YOLO11S_SEG(
+        id = "yolo11s_seg",
+        title = "YOLO11s-seg Manga",
+        subtitle = "Piksel Segmentasyon (39.3 MB)",
+        assetPath = "models/yolo11s_seg.onnx",
+        targetFileName = "yolo11s_seg.onnx",
+        expectedBytes = 41227478L,
+        sha256 = "d87389af4350954143a216bcfe40fd2ad93312cb136534e6073c9c740d98b646",
         defaultConfidence = 0.25f,
-        description = "Manga109 üzerinde eğitilmiş piksel düzeyinde segmentasyon yapay zekası. Düzensiz, kardan adam veya eğri balon sınırlarını kontur profiliyle çıkararak metni balon içine kusursuz yayar."
+        description = "Manga ve çizgi roman üzerinde eğitilmiş 4 sınıflı (bubble, panel, sfx, text) piksel segmentasyon yapay zekası. 1024px dinamik dikdörtgen çözünürlükle düzensiz, kardan adam veya eğri balon sınırlarını kontur profiliyle çıkarır."
     );
 
     companion object {
-        fun fromId(id: String?): DetectorModel =
-            entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: YOLO11N_SEG
+        fun fromId(id: String?): DetectorModel {
+            if (id.equals("yolo11n_seg", ignoreCase = true)) return YOLO11S_SEG
+            return entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: YOLO11S_SEG
+        }
     }
 }
 
@@ -121,6 +122,8 @@ class YoloBubbleDetector(context: Context) {
         const val EMBEDDED_ASSET_PATH = "models/detector.onnx"
         const val LEGACY_MODEL_FILENAME = "koharu-yolo26s.onnx"
         const val DEFAULT_INPUT_SIZE = 640
+        const val DEFAULT_YOLO11S_INPUT_SIZE = 1024
+        const val DEFAULT_MODEL_STRIDE = 32
         const val DEFAULT_CONF_THRESHOLD = 0.25f
         private const val LETTERBOX_FILL_VALUE = 114f / 255f
         private const val MIN_MODEL_FILE_BYTES = 10_000L
@@ -131,6 +134,18 @@ class YoloBubbleDetector(context: Context) {
             "text_bubble",
             "text_free"
         )
+
+        val YOLO11S_SEG_CLASS_NAMES = listOf(
+            "bubble",
+            "panel",
+            "sfx",
+            "text"
+        )
+
+        private val PANEL_LABELS = setOf("panel", "panels", "frame")
+        private val BUBBLE_LABELS = setOf("bubble", "balloon")
+        private val INVERTED_RESCUE_LABELS = setOf("bubble", "balloon", "text")
+        private val PRIMARY_TEXT_SUPPRESS_LABELS = setOf("bubble", "balloon", "text", "text_bubble")
     }
 
     private val sessionLock = Any()
@@ -156,11 +171,19 @@ class YoloBubbleDetector(context: Context) {
         private set
 
     @Volatile
-    var modelInputWidth = DEFAULT_INPUT_SIZE
+    var modelInputWidth = DEFAULT_YOLO11S_INPUT_SIZE
         private set
 
     @Volatile
-    var modelInputHeight = DEFAULT_INPUT_SIZE
+    var modelInputHeight = DEFAULT_YOLO11S_INPUT_SIZE
+        private set
+
+    @Volatile
+    var hasDynamicInputShape = false
+        private set
+
+    @Volatile
+    var modelStride = DEFAULT_MODEL_STRIDE
         private set
 
     @Volatile
@@ -183,7 +206,7 @@ class YoloBubbleDetector(context: Context) {
         private set
 
     @Volatile
-    var activeModelType: DetectorModel = DetectorModel.YOLO11N_SEG
+    var activeModelType: DetectorModel = DetectorModel.YOLO11S_SEG
         private set
 
     fun switchModel(modelType: DetectorModel): Boolean = synchronized(sessionLock) {
@@ -256,6 +279,24 @@ class YoloBubbleDetector(context: Context) {
             }
         }
         return result
+    }
+
+    internal fun parseImgszFromMetadata(raw: String?): Pair<Int, Int>? {
+        if (raw.isNullOrBlank()) return null
+        val nums = Regex("""\d+""").findAll(raw)
+            .mapNotNull { it.value.toIntOrNull() }
+            .filter { it > 0 }
+            .toList()
+        return when {
+            nums.size >= 2 -> nums[0] to nums[1]
+            nums.size == 1 -> nums[0] to nums[0]
+            else -> null
+        }
+    }
+
+    internal fun parseStrideFromMetadata(raw: String?): Int {
+        if (raw.isNullOrBlank()) return DEFAULT_MODEL_STRIDE
+        return Regex("""\d+""").find(raw)?.value?.toIntOrNull()?.takeIf { it > 0 } ?: DEFAULT_MODEL_STRIDE
     }
 
     private fun nmsDetections(dets: List<YoloDetection>, iouThreshold: Float = 0.5f): List<YoloDetection> {
@@ -393,15 +434,23 @@ class YoloBubbleDetector(context: Context) {
     fun getLabelForClass(classId: Int, totalClassesInHead: Int): String {
         if (classId < 0 || classId >= totalClassesInHead) return "unknown"
         dynamicClassNames[classId]?.let { return it.lowercase() }
+        if (activeModelType == DetectorModel.YOLO11S_SEG && (verifiedBundledClassMap || dynamicClassNames.isEmpty())) {
+            return YOLO11S_SEG_CLASS_NAMES.getOrNull(classId) ?: "unknown"
+        }
         if (!verifiedBundledClassMap) return "unknown"
         return DEFAULT_CLASS_NAMES.getOrNull(classId) ?: "unknown"
     }
 
     private fun effectiveClassCount(headClassCount: Int? = null): Int {
         val metadataClassCount = dynamicClassNames.keys.maxOrNull()?.plus(1)
+        val defaultClassCount = if (activeModelType == DetectorModel.YOLO11S_SEG) {
+            YOLO11S_SEG_CLASS_NAMES.size
+        } else {
+            DEFAULT_CLASS_NAMES.size
+        }
         return headClassCount?.takeIf { it > 0 }
             ?: metadataClassCount?.takeIf { it > 0 }
-            ?: DEFAULT_CLASS_NAMES.size
+            ?: defaultClassCount
     }
 
     private fun sha256(file: File): String = synchronized(hashCacheLock) {
@@ -436,6 +485,8 @@ class YoloBubbleDetector(context: Context) {
         // Never let a previous model's trusted class map survive a failed or replacement init.
         verifiedBundledClassMap = false
         dynamicClassNames = emptyMap()
+        hasDynamicInputShape = false
+        modelStride = DEFAULT_MODEL_STRIDE
         try {
             val modelFile = getModelFile()
             if (modelFile != null && modelFile.exists() && modelFile.length() > MIN_MODEL_FILE_BYTES) {
@@ -457,11 +508,13 @@ class YoloBubbleDetector(context: Context) {
                 var inputW = DEFAULT_INPUT_SIZE
                 var inputH = DEFAULT_INPUT_SIZE
                 var hasOrigSizes = false
+                var dynamicInput = false
                 try {
                     val inputInfo = session.inputInfo
                     for ((name, nodeInfo) in inputInfo) {
                         if (isOriginalTargetSizesInput(name)) {
                             hasOrigSizes = true
+                            continue
                         }
                         val tensorInfo = nodeInfo?.info as? TensorInfo
                         val tensorShape = tensorInfo?.shape
@@ -471,15 +524,14 @@ class YoloBubbleDetector(context: Context) {
                             if (h > 0 && w > 0) {
                                 inputH = h
                                 inputW = w
+                            } else {
+                                dynamicInput = true
                             }
                         }
                     }
                 } catch (e: Exception) {
                     Log.w(TAG, "Giriş boyutu okunamadı, varsayılan $DEFAULT_INPUT_SIZE: ${e.message}")
                 }
-                modelInputWidth = inputW
-                modelInputHeight = inputH
-                hasOrigTargetSizesInput = hasOrigSizes
 
                 // 2. Çıkış isimlerini kontrol et (RT-DETR çoklu çıkış: boxes, scores, labels)
                 val outNames = session.outputNames
@@ -498,20 +550,39 @@ class YoloBubbleDetector(context: Context) {
                 val detOutputName = findOutputName(outNames, setOf("output0", "detections", "pred", "0"))
                 isYoloSegmentation = detOutputName != null && protoOutputName != null
 
-                // 3. Sınıf adlarını ONNX metadata'sından oku
+                // 3. Sınıf adlarını ve dinamik imgsz / stride metadata'sını ONNX'ten oku
                 val parsedClasses = mutableMapOf<Int, String>()
+                var parsedStride = DEFAULT_MODEL_STRIDE
+                var parsedImgsz: Pair<Int, Int>? = null
                 try {
                     val customMeta = session.metadata.customMetadata
                     val namesRaw = customMeta["names"]
                     if (!namesRaw.isNullOrBlank()) {
                         parsedClasses.putAll(parseNamesFromMetadata(namesRaw))
                     }
+                    parsedStride = parseStrideFromMetadata(customMeta["stride"])
+                    parsedImgsz = parseImgszFromMetadata(customMeta["imgsz"])
                 } catch (_: Exception) {}
                 dynamicClassNames = parsedClasses
 
+                if (dynamicInput) {
+                    if (parsedImgsz != null) {
+                        inputH = parsedImgsz.first
+                        inputW = parsedImgsz.second
+                    } else if (activeModelType == DetectorModel.YOLO11S_SEG || isYoloSegmentation) {
+                        inputH = DEFAULT_YOLO11S_INPUT_SIZE
+                        inputW = DEFAULT_YOLO11S_INPUT_SIZE
+                    }
+                }
+                hasDynamicInputShape = dynamicInput
+                modelStride = parsedStride
+                modelInputWidth = inputW
+                modelInputHeight = inputH
+                hasOrigTargetSizesInput = hasOrigSizes
+
                 isSessionInitialized = true
                 lastInitializationError = null
-                Log.i(TAG, "ONNX Dedektör başarıyla yüklendi: ${modelFile.name} (${modelFile.length() / 1024} KB), Boyut: ${inputW}x${inputH}, RT-DETR: $isRtDetrMultiOutput, OrigSizes: $hasOrigSizes")
+                Log.i(TAG, "ONNX Dedektör başarıyla yüklendi: ${modelFile.name} (${modelFile.length() / 1024} KB), Boyut: ${inputW}x${inputH}, Dinamik: $dynamicInput, Stride: $parsedStride, RT-DETR: $isRtDetrMultiOutput, OrigSizes: $hasOrigSizes")
                 true
             } else {
                 Log.d(TAG, "Dedektör ONNX modeli henüz hazır değil.")
@@ -683,6 +754,8 @@ class YoloBubbleDetector(context: Context) {
         synchronized(sessionLock) {
             verifiedBundledClassMap = false
             dynamicClassNames = emptyMap()
+            hasDynamicInputShape = false
+            modelStride = DEFAULT_MODEL_STRIDE
             cachedFloatArray = null
             cachedPixelArray = null
             try {
@@ -700,14 +773,23 @@ class YoloBubbleDetector(context: Context) {
         val modelFile = getModelFile(activeModelType)
         val loaded = isModelLoaded()
         val classLabels = if (dynamicClassNames.isNotEmpty()) {
-            dynamicClassNames.values.joinToString(", ")
+            dynamicClassNames.toSortedMap().values.joinToString(", ")
         } else {
-            if (isRtDetrMultiOutput) "bubble (0), text_bubble (1), text_free (2)" else "balloon (0)"
+            when {
+                isRtDetrMultiOutput -> "bubble (0), text_bubble (1), text_free (2)"
+                activeModelType == DetectorModel.YOLO11S_SEG -> "bubble (0), panel (1), sfx (2), text (3)"
+                else -> "balloon (0)"
+            }
         }
         val architectureName = when {
-            isYoloSegmentation -> "YOLO11n Instance Segmentation (ProtoNet 32-mask)"
+            isYoloSegmentation -> "${activeModelType.title} Instance Segmentation (ProtoNet 32-mask)"
             isRtDetrMultiOutput -> "RT-DETR-v2 End-to-End Transformer"
             else -> "ONNX Dedektör"
+        }
+        val inputSizeDesc = if (hasDynamicInputShape) {
+            "${modelInputWidth}x${modelInputHeight} (Dinamik Rect)"
+        } else {
+            "${modelInputWidth}x${modelInputHeight}"
         }
         return mapOf(
             "engine" to "Microsoft ONNX Runtime Android",
@@ -718,7 +800,7 @@ class YoloBubbleDetector(context: Context) {
             "status" to if (loaded) "Aktif & Yüklendi (${activeModelType.title})" else if (lastInitializationError != null) "Yükleme Hatası" else "Model Bekleniyor",
             "target_path" to (modelFile?.absolutePath ?: "${context.filesDir.absolutePath}/models/${activeModelType.targetFileName}"),
             "file_size" to if (modelFile?.exists() == true) "${modelFile.length()} bayt" else "Mevcut Değil",
-            "input_size" to "${modelInputWidth}x${modelInputHeight}",
+            "input_size" to inputSizeDesc,
             "architecture" to architectureName,
             "last_error" to (lastInitializationError ?: "Hata Yok"),
             "classes" to classLabels,
@@ -766,7 +848,7 @@ class YoloBubbleDetector(context: Context) {
         // Avoid shrinking high-resolution spreads and near-square pages to one
         // input. Overlapped square crops preserve small text and bubbles.
         val inputLongSide = max(modelInputWidth, modelInputHeight)
-        val runInvertedPass = isYoloSegmentation
+        val allowInvertedPass = isYoloSegmentation
         val pass1Detections: List<YoloDetection>
         val pass2Detections: List<YoloDetection>
 
@@ -811,7 +893,7 @@ class YoloBubbleDetector(context: Context) {
                         for (det in runOnnxInference(tile, confidenceThreshold, invertColors = false)) {
                             pass1Tiled += toTileDetection(det)
                         }
-                        if (runInvertedPass) {
+                        if (allowInvertedPass && shouldRunInvertedYoloPass(tile)) {
                             for (det in runOnnxInference(tile, confidenceThreshold, invertColors = true)) {
                                 pass2Tiled += toTileDetection(det)
                             }
@@ -822,7 +904,7 @@ class YoloBubbleDetector(context: Context) {
                 }
             }
             pass1Detections = nmsDetections(mergeTileSeamDetections(pass1Tiled))
-            pass2Detections = if (runInvertedPass) nmsDetections(mergeTileSeamDetections(pass2Tiled)) else emptyList()
+            pass2Detections = if (pass2Tiled.isNotEmpty()) nmsDetections(mergeTileSeamDetections(pass2Tiled)) else emptyList()
         } else if (origH > origW * 2.2f && origH > 2400) {
             // Çok uzun Webtoon sayfalarında dikey parçalama (tiling)
             val tileH = (origW * 1.8f).toInt().coerceIn(1200, 2400)
@@ -866,7 +948,7 @@ class YoloBubbleDetector(context: Context) {
                         for (det in runOnnxInference(tile, confidenceThreshold, invertColors = false)) {
                             pass1Tiled.add(toVerticalTileDetection(det))
                         }
-                        if (runInvertedPass) {
+                        if (allowInvertedPass && shouldRunInvertedYoloPass(tile)) {
                             for (det in runOnnxInference(tile, confidenceThreshold, invertColors = true)) {
                                 pass2Tiled.add(toVerticalTileDetection(det))
                             }
@@ -880,10 +962,10 @@ class YoloBubbleDetector(context: Context) {
                 y += (tileH - overlap)
             }
             pass1Detections = nmsDetections(mergeTileSeamDetections(pass1Tiled))
-            pass2Detections = if (runInvertedPass) nmsDetections(mergeTileSeamDetections(pass2Tiled)) else emptyList()
+            pass2Detections = if (pass2Tiled.isNotEmpty()) nmsDetections(mergeTileSeamDetections(pass2Tiled)) else emptyList()
         } else {
             pass1Detections = runOnnxInference(bitmap, confidenceThreshold, invertColors = false)
-            pass2Detections = if (runInvertedPass) {
+            pass2Detections = if (allowInvertedPass && shouldRunInvertedYoloPass(bitmap)) {
                 runOnnxInference(bitmap, confidenceThreshold, invertColors = true)
             } else {
                 emptyList()
@@ -932,13 +1014,21 @@ class YoloBubbleDetector(context: Context) {
             return emptyList()
         }
 
-        val inputW = modelInputWidth
-        val inputH = modelInputHeight
+        val (inputW, inputH) = if (hasDynamicInputShape) {
+            computeDynamicRectInputSize(
+                origW = source.width,
+                origH = source.height,
+                maxLongSide = max(modelInputWidth, modelInputHeight),
+                stride = modelStride
+            )
+        } else {
+            modelInputWidth to modelInputHeight
+        }
         val origW = source.width.toFloat()
         val origH = source.height.toFloat()
 
-        // RT-DETR is trained on direct 640x640 resize; YOLO11n-seg (1600x1600) is
-        // trained with Ultralytics Letterbox (padding color 114).
+        // RT-DETR is trained on direct 640x640 resize; YOLO11-seg is
+        // trained with Ultralytics Letterbox (padding color 114) and dynamic rect (1024, stride 32).
         val useLetterbox = isYoloSegmentation
         val letterbox = if (useLetterbox) {
             computeLetterboxTransform(source.width, source.height, inputW, inputH)
@@ -1497,6 +1587,33 @@ class YoloBubbleDetector(context: Context) {
 
         val detShape = detTensor.info.shape
         val protoShape = protoTensor.info.shape
+        val detBuffer = detTensor.floatBuffer
+        val detData = FloatArray(detBuffer.remaining()).also { detBuffer.get(it) }
+        val protoBuffer = protoTensor.floatBuffer
+        val protoData = FloatArray(protoBuffer.remaining()).also { protoBuffer.get(it) }
+
+        return parseYoloSegmentationTensors(
+            detData = detData,
+            detShape = detShape,
+            protoData = protoData,
+            protoShape = protoShape,
+            inputW = inputW,
+            inputH = inputH,
+            letterbox = letterbox,
+            confThreshold = confThreshold
+        )
+    }
+
+    internal fun parseYoloSegmentationTensors(
+        detData: FloatArray,
+        detShape: LongArray,
+        protoData: FloatArray,
+        protoShape: LongArray,
+        inputW: Int,
+        inputH: Int,
+        letterbox: LetterboxTransform,
+        confThreshold: Float
+    ): List<YoloDetection> {
         if (detShape.size != 3 || protoShape.size != 4) {
             lastInferenceError = "Geçersiz YOLO segmentasyon tensör şekli: det=${detShape.contentToString()}, proto=${protoShape.contentToString()}"
             return emptyList()
@@ -1506,11 +1623,6 @@ class YoloBubbleDetector(context: Context) {
         val protoW = protoShape[3].toInt()
         val numProtos = protoShape[1].toInt().coerceAtLeast(1)
         if (protoH <= 0 || protoW <= 0) return emptyList()
-
-        val detBuffer = detTensor.floatBuffer
-        val detData = FloatArray(detBuffer.remaining()).also { detBuffer.get(it) }
-        val protoBuffer = protoTensor.floatBuffer
-        val protoData = FloatArray(protoBuffer.remaining()).also { protoBuffer.get(it) }
 
         val dim1 = detShape[1].toInt()
         val dim2 = detShape[2].toInt()
@@ -1523,6 +1635,17 @@ class YoloBubbleDetector(context: Context) {
 
         val numFeatures = if (rowMajor) dim2 else dim1
         val numCandidates = if (rowMajor) dim1 else dim2
+        if (detData.size.toLong() < numFeatures.toLong() * numCandidates.toLong() ||
+            protoData.size.toLong() < numProtos.toLong() * protoH.toLong() * protoW.toLong()
+        ) {
+            lastInferenceError = "YOLO segmentasyon tensörü beklenen boyuttan kısa."
+            return emptyList()
+        }
+
+        val numMaskCoeffs = min(32, numProtos).coerceAtMost((numFeatures - 5).coerceAtLeast(0))
+        if (numMaskCoeffs <= 0) return emptyList()
+        val numClasses = (numFeatures - 4 - numMaskCoeffs).coerceAtLeast(1)
+        if (4 + numClasses + numMaskCoeffs > numFeatures) return emptyList()
 
         fun getDetValue(candidate: Int, feature: Int): Float =
             if (rowMajor) detData[candidate * numFeatures + feature]
@@ -1542,16 +1665,27 @@ class YoloBubbleDetector(context: Context) {
             val boxModel: RectF,
             val score: Float,
             val classId: Int,
+            val label: String,
             val maskCoeffs: FloatArray
         )
 
         val rawCandidates = ArrayList<RawSegCandidate>(64)
-        val numMaskCoeffs = min(min(32, numProtos), numFeatures - 5)
 
         for (candidate in 0 until numCandidates) {
-            // Sınıf skoru (kanal 4). YOLO-seg ONNX çıktısında skorlar zaten 0.0..1.0 aralığındadır.
-            val score = getDetValue(candidate, 4)
-            if (!score.isFinite() || score < confThreshold) continue
+            var bestClass = 0
+            var bestScore = Float.NEGATIVE_INFINITY
+            for (c in 0 until numClasses) {
+                val s = getDetValue(candidate, 4 + c)
+                if (s.isFinite() && s > bestScore) {
+                    bestScore = s
+                    bestClass = c
+                }
+            }
+            if (!bestScore.isFinite() || bestScore < confThreshold) continue
+
+            val label = getLabelForClass(bestClass, numClasses)
+            // Panel çerçeveleri balon değildir; erken ele
+            if (label in PANEL_LABELS) continue
 
             val rawCx = getDetValue(candidate, 0)
             val rawCy = getDetValue(candidate, 1)
@@ -1569,15 +1703,15 @@ class YoloBubbleDetector(context: Context) {
             val y2 = (cy + h * 0.5f).coerceIn(y1, inputH.toFloat())
 
             val coeffs = FloatArray(numMaskCoeffs) { k ->
-                getDetValue(candidate, 5 + k)
+                getDetValue(candidate, 4 + numClasses + k)
             }
-            rawCandidates.add(RawSegCandidate(RectF(x1, y1, x2, y2), score, 0, coeffs))
+            rawCandidates.add(RawSegCandidate(RectF(x1, y1, x2, y2), bestScore, bestClass, label, coeffs))
         }
 
         if (rawCandidates.isEmpty()) return emptyList()
         rawCandidates.sortByDescending { it.score }
 
-        // Greedy NMS with Optical-Center-Aware Snowman / Stacked Bubble Protection
+        // Sınıf-duyarlı Greedy NMS + Balon içi dikey kardan adam koruması
         fun boxIoU(a: RectF, b: RectF): Float {
             val interL = max(a.left, b.left)
             val interT = max(a.top, b.top)
@@ -1600,19 +1734,23 @@ class YoloBubbleDetector(context: Context) {
             for (j in (i + 1) until rawCandidates.size) {
                 if (suppressed[j]) continue
                 val candB = rawCandidates[j]
-                val iou = boxIoU(candA.boxModel, candB.boxModel)
+                // Farklı sınıflar (ör. "bubble" ile "sfx" veya "text") birbirini bastırmaz
+                if (candA.classId != candB.classId) continue
 
-                if (iou > 0.65f) {
-                    suppressed[j] = true
-                } else if (iou >= 0.35f) {
-                    // Şüpheci kuralı: Kardan adam / dikey bitişik balon koruması
-                    val deltaY = abs(candA.boxModel.centerY() - candB.boxModel.centerY())
-                    val maxH = max(candA.boxModel.height(), candB.boxModel.height())
-                    if (deltaY < 0.28f * maxH) {
-                        // Merkezler çok yakın, tek balonun birden fazla aday kutusu
+                val iou = boxIoU(candA.boxModel, candB.boxModel)
+                if (candA.label in BUBBLE_LABELS || candA.label == "text" || candA.label == "text_bubble") {
+                    if (iou > 0.65f) {
                         suppressed[j] = true
+                    } else if (iou >= 0.35f) {
+                        // Şüpheci kuralı: Kardan adam / dikey bitişik balon koruması
+                        val deltaY = abs(candA.boxModel.centerY() - candB.boxModel.centerY())
+                        val maxH = max(candA.boxModel.height(), candB.boxModel.height())
+                        if (deltaY < 0.28f * maxH) {
+                            suppressed[j] = true
+                        }
                     }
-                    // Aksi halde ayrı konuşma balonlarıdır; silinmez!
+                } else if (iou > 0.50f) {
+                    suppressed[j] = true
                 }
             }
         }
@@ -1624,20 +1762,25 @@ class YoloBubbleDetector(context: Context) {
             val normBox = mapLetterboxBoxToNormalized(det.boxModel, letterbox)
             if (normBox.width() < 0.004f || normBox.height() < 0.004f) continue
 
-            val profile = extractSegmentationContourProfile(
-                normBox = normBox,
-                letterbox = letterbox,
-                protoData = protoData,
-                protoW = protoW,
-                protoH = protoH,
-                maskCoeffs = det.maskCoeffs,
-                numMaskCoeffs = numMaskCoeffs
-            )
+            // "sfx" tespitleri dışlama amacıyla korunur; gereksiz maske konturu çıkarılmaz
+            val profile = if (det.label == "sfx") {
+                null
+            } else {
+                extractSegmentationContourProfile(
+                    normBox = normBox,
+                    letterbox = letterbox,
+                    protoData = protoData,
+                    protoW = protoW,
+                    protoH = protoH,
+                    maskCoeffs = det.maskCoeffs,
+                    numMaskCoeffs = numMaskCoeffs
+                )
+            }
 
             detections.add(
                 YoloDetection(
-                    classId = 0,
-                    label = "bubble",
+                    classId = det.classId,
+                    label = det.label,
                     confidence = det.score,
                     box = normBox,
                     contourProfile = profile
@@ -1646,6 +1789,29 @@ class YoloBubbleDetector(context: Context) {
         }
 
         return detections
+    }
+
+    internal fun computeDynamicRectInputSize(
+        origW: Int,
+        origH: Int,
+        maxLongSide: Int = DEFAULT_YOLO11S_INPUT_SIZE,
+        stride: Int = DEFAULT_MODEL_STRIDE
+    ): Pair<Int, Int> {
+        val safeW = origW.coerceAtLeast(1)
+        val safeH = origH.coerceAtLeast(1)
+        val safeStride = stride.coerceAtLeast(1)
+        val safeMax = (maxLongSide.coerceAtLeast(safeStride) / safeStride) * safeStride
+        return if (safeW >= safeH) {
+            val targetW = safeMax
+            val rawH = safeMax.toFloat() * (safeH.toFloat() / safeW.toFloat())
+            val targetH = ((rawH / safeStride).roundToInt() * safeStride).coerceIn(safeStride, safeMax)
+            targetW to targetH
+        } else {
+            val targetH = safeMax
+            val rawW = safeMax.toFloat() * (safeW.toFloat() / safeH.toFloat())
+            val targetW = ((rawW / safeStride).roundToInt() * safeStride).coerceIn(safeStride, safeMax)
+            targetW to targetH
+        }
     }
 
     internal fun computeLetterboxTransform(
@@ -1870,8 +2036,126 @@ class YoloBubbleDetector(context: Context) {
     }
 
     /**
-     * Filters candidates produced by the inverted YOLO11n-seg pass so only genuine
-     * dark-interior speech bubbles not already covered by the primary pass survive.
+     * Fast grid-and-scanline pre-check deciding whether an inverted YOLO pass is
+     * warranted for this page or tile. Plain white manga pages (even with dark hair
+     * or black ink) return false, while pages/tiles containing dark or colored
+     * bubbles/boxes with bright white text return true.
+     */
+    internal fun shouldRunInvertedYoloPass(bitmap: Bitmap): Boolean {
+        if (bitmap.isRecycled || bitmap.width < 16 || bitmap.height < 16) return false
+        val w = bitmap.width
+        val h = bitmap.height
+        val stepY = max(1, h / 120)
+        val stepX = max(1, w / 160)
+        val cols = (w / 40).coerceIn(4, 20)
+        val rows = (h / 40).coerceIn(4, 24)
+        val cellCount = cols * rows
+        val cellTotal = IntArray(cellCount)
+        val cellDark = IntArray(cellCount)
+        val cellNonWhite = IntArray(cellCount)
+        val cellBright = IntArray(cellCount)
+        val cellSandwichedBright = IntArray(cellCount)
+
+        val rowPixels = IntArray(w)
+        val maxStrokeSamples = max(6, ((w * 0.18f) / stepX).roundToInt())
+        var totalSamples = 0
+        var globalDark = 0
+
+        var y = 0
+        while (y < h) {
+            bitmap.getPixels(rowPixels, 0, w, 0, y, w, 1)
+            val cellRow = ((y * rows) / h).coerceIn(0, rows - 1)
+            val rowCellBase = cellRow * cols
+
+            var seenDarkBefore = false
+            var leftMinLuma = 255
+            var inBrightRun = false
+            var brightRunSamples = 0
+            var brightRunMaxLuma = 0
+            var brightRunCell = 0
+
+            var x = 0
+            while (x < w) {
+                val pixel = rowPixels[x]
+                val alpha = ((pixel ushr 24) and 0xFF) / 255f
+                val r = ((pixel shr 16) and 0xFF) * alpha + 255f * (1f - alpha)
+                val g = ((pixel shr 8) and 0xFF) * alpha + 255f * (1f - alpha)
+                val b = (pixel and 0xFF) * alpha + 255f * (1f - alpha)
+                val luma = (r * 0.299f + g * 0.587f + b * 0.114f).roundToInt()
+
+                val cellCol = ((x * cols) / w).coerceIn(0, cols - 1)
+                val cellIdx = rowCellBase + cellCol
+                cellTotal[cellIdx]++
+                totalSamples++
+                if (luma < 90) {
+                    cellDark[cellIdx]++
+                    globalDark++
+                }
+                if (luma < 198) cellNonWhite[cellIdx]++
+                if (luma >= 205) cellBright[cellIdx]++
+
+                if (luma >= 205) {
+                    if (!inBrightRun) {
+                        inBrightRun = true
+                        brightRunSamples = 1
+                        brightRunMaxLuma = luma
+                        brightRunCell = cellIdx
+                    } else {
+                        brightRunSamples++
+                        if (luma > brightRunMaxLuma) brightRunMaxLuma = luma
+                    }
+                } else if (luma < 190) {
+                    if (inBrightRun) {
+                        if (seenDarkBefore &&
+                            brightRunSamples <= maxStrokeSamples &&
+                            brightRunMaxLuma - leftMinLuma >= 42 &&
+                            brightRunMaxLuma - luma >= 42
+                        ) {
+                            cellSandwichedBright[brightRunCell]++
+                        }
+                        inBrightRun = false
+                        leftMinLuma = luma
+                    } else {
+                        leftMinLuma = if (!seenDarkBefore) luma else min(leftMinLuma, luma)
+                    }
+                    seenDarkBefore = true
+                } else if (inBrightRun) {
+                    // Anti-aliased edge pixel (190..204): keep bright run alive up to stroke limit
+                    brightRunSamples++
+                    if (brightRunSamples > maxStrokeSamples) {
+                        inBrightRun = false
+                        seenDarkBefore = false
+                        leftMinLuma = 255
+                    }
+                }
+
+                x += stepX
+            }
+            y += stepY
+        }
+
+        if (totalSamples <= 0) return false
+        var darkCellSandwichedRuns = 0
+        for (c in 0 until cellCount) {
+            val count = cellTotal[c]
+            if (count < 8) continue
+            val nonWhiteRatio = cellNonWhite[c].toFloat() / count
+            val darkRatio = cellDark[c].toFloat() / count
+            val brightRatio = cellBright[c].toFloat() / count
+            if (nonWhiteRatio >= 0.55f && (darkRatio >= 0.06f || nonWhiteRatio >= 0.65f)) {
+                darkCellSandwichedRuns += cellSandwichedBright[c]
+                if (brightRatio in 0.02f..0.42f && cellBright[c] >= 2 && cellSandwichedBright[c] >= 2) {
+                    return true
+                }
+            }
+        }
+        val globalDarkRatio = globalDark.toFloat() / totalSamples
+        return globalDarkRatio >= 0.07f && darkCellSandwichedRuns >= 2
+    }
+
+    /**
+     * Filters candidates produced by the inverted YOLO11s-seg pass so only genuine
+     * dark-interior speech bubbles or dark text boxes not already covered by the primary pass survive.
      */
     internal fun filterInvertedBubbleDetections(
         bitmap: Bitmap,
@@ -1881,11 +2165,17 @@ class YoloBubbleDetector(context: Context) {
         if (invertedDetections.isEmpty() || bitmap.isRecycled || bitmap.width < 8 || bitmap.height < 8) {
             return emptyList()
         }
-        val primaryBalloons = primaryDetections.filter { it.label in setOf("bubble", "balloon") }
+        val primaryBalloons = primaryDetections.filter { it.label in BUBBLE_LABELS }
+        val primaryBalloonsOrText = primaryDetections.filter { it.label in PRIMARY_TEXT_SUPPRESS_LABELS }
         val accepted = mutableListOf<YoloDetection>()
-        for (cand in invertedDetections.sortedByDescending { it.confidence }) {
-            if (cand.label !in setOf("bubble", "balloon")) continue
-            val overlapsPrimary = primaryBalloons.any { det ->
+        val prioritized = invertedDetections.sortedWith(
+            compareBy<YoloDetection> { if (it.label in BUBBLE_LABELS) 0 else 1 }
+                .thenByDescending { it.confidence }
+        )
+        for (cand in prioritized) {
+            if (cand.label !in INVERTED_RESCUE_LABELS) continue
+            val primaryToCheck = if (cand.label in BUBBLE_LABELS) primaryBalloons else primaryBalloonsOrText
+            val overlapsPrimary = primaryToCheck.any { det ->
                 iou(cand.box, det.box) > 0.30f || intersectionOverSmallerArea(cand.box, det.box) > 0.45f
             }
             if (overlapsPrimary) continue

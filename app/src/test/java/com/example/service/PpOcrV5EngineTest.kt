@@ -9,9 +9,13 @@ import android.graphics.Rect
 import android.graphics.Typeface
 import androidx.datastore.preferences.core.edit
 import androidx.test.core.app.ApplicationProvider
+import com.example.data.db.TranslationCorrectionDao
+import com.example.data.db.TranslationCorrectionEntity
 import com.example.data.pref.MangaPreferences
 import com.example.data.pref.dataStore
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -285,6 +289,21 @@ class PpOcrV5EngineTest {
         val whitePixels = IntArray(100 * 100) { Color.WHITE }
         assertFalse(detector.shouldRunInvertedPass(whitePixels, 100, 100))
 
+        // White manga page with 10% black ink/text must never trigger double DBNet pass.
+        val whiteWithBlackInk = IntArray(100 * 100) { idx ->
+            val y = idx / 100
+            if (y < 10) Color.BLACK else Color.WHITE
+        }
+        assertFalse(detector.shouldRunInvertedPass(whiteWithBlackInk, 100, 100))
+
+        // Dark panel (>= 22% dark pixels) with bright white text must trigger inverted pass.
+        val darkPanelWithWhiteText = IntArray(100 * 100) { idx ->
+            val x = idx % 100
+            val y = idx / 100
+            if (x in 25..75 && y in 40..55) Color.WHITE else Color.rgb(30, 30, 34)
+        }
+        assertTrue(detector.shouldRunInvertedPass(darkPanelWithWhiteText, 100, 100))
+
         val purpleWithWhiteText = IntArray(100 * 100) { idx ->
             val x = idx % 100
             val y = idx / 100
@@ -332,5 +351,70 @@ class PpOcrV5EngineTest {
 
         prefs.setOcrEngine("PP-OCRv5")
         assertEquals("PP-OCRv5", prefs.ocrEngine.first())
+    }
+
+    @Test
+    fun `prepareLineBitmapForRecognition pads tight crops and trims excess vertical DBNet margin`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val engine = PpOcrV5Engine(context, PpOcrV5Engine.Variant.ENGLISH_ONLY)
+
+        // Tightly cropped line with ink touching all 4 edges should gain horizontal and vertical margins.
+        val tightCrop = Bitmap.createBitmap(40, 14, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.WHITE)
+            val paint = Paint().apply { color = Color.BLACK }
+            Canvas(this).drawRect(0f, 0f, 40f, 14f, paint)
+        }
+        val padded = engine.prepareLineBitmapForRecognition(tightCrop)
+        assertTrue("Tight crop should gain horizontal margin", padded.width >= tightCrop.width + 6)
+        assertTrue("Tight crop should gain vertical margin", padded.height >= tightCrop.height + 4)
+        assertEquals(Color.WHITE, padded.getPixel(0, padded.height / 2))
+        assertEquals(Color.WHITE, padded.getPixel(padded.width - 1, padded.height / 2))
+        if (padded !== tightCrop) padded.recycle()
+        tightCrop.recycle()
+
+        // Over-padded DBNet crop should trim excessive vertical whitespace while keeping margins.
+        val tallCrop = Bitmap.createBitmap(100, 44, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.WHITE)
+            val paint = Paint().apply { color = Color.BLACK }
+            Canvas(this).drawRect(4f, 16f, 96f, 28f, paint)
+        }
+        val trimmed = engine.prepareLineBitmapForRecognition(tallCrop)
+        assertTrue("Excess vertical whitespace should be trimmed (${trimmed.height} < ${tallCrop.height})", trimmed.height < tallCrop.height)
+        assertTrue("Trimmed crop must keep vertical padding", trimmed.height >= 16)
+        assertTrue("Trimmed crop must preserve width", trimmed.width >= tallCrop.width)
+        if (trimmed !== tallCrop) trimmed.recycle()
+        tallCrop.recycle()
+    }
+
+    @Test
+    fun `isValidDialogueText rejects Latin SFX hallucinations while keeping real exclamations and word spaces`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val service = TranslationService(
+            correctionDao = object : TranslationCorrectionDao {
+                override suspend fun getCorrectionForText(originalText: String, targetLang: String): TranslationCorrectionEntity? = null
+                override suspend fun insertCorrection(correction: TranslationCorrectionEntity) {}
+                override suspend fun deleteCorrection(id: Int) {}
+                override suspend fun deleteCorrectionByText(originalText: String) {}
+                override fun getAllCorrections(): Flow<List<TranslationCorrectionEntity>> = flowOf(emptyList())
+                override suspend fun clearAll() {}
+            },
+            context = context
+        )
+
+        for (sfx in listOf("RAAW!", "KJJ!", "WHOOSH!", "BZZT!", "GOGOGO!", "DOKIDOKI!", "KJJ! KJJ!")) {
+            assertFalse("Expected SFX '$sfx' to be rejected (isBubble=false)", service.isValidDialogueText(sfx, isBubble = false))
+            assertFalse("Expected SFX '$sfx' to be rejected (isBubble=true)", service.isValidDialogueText(sfx, isBubble = true))
+        }
+
+        for (realDialogue in listOf(
+            "YES!", "NO!", "WAIT!", "WHAT?!", "STOP!", "HELP!", "HEY!", "OKAY!", "WHAT!", "WHY!",
+            "DIE!", "DEAD!", "KILL!", "DAMMIT!", "ALRIGHT!", "PROMISE?"
+        )) {
+            assertTrue("Expected dialogue '$realDialogue' to be kept (isBubble=false)", service.isValidDialogueText(realDialogue, isBubble = false))
+            assertTrue("Expected dialogue '$realDialogue' to be kept (isBubble=true)", service.isValidDialogueText(realDialogue, isBubble = true))
+        }
+
+        assertEquals("SPOT US", service.cleanOcrArtifacts("SPOT US", "İngilizce"))
+        assertEquals("SPOT US", service.joinTextFragments("SPOT", "US", isFirstBeforeSecond = true))
     }
 }

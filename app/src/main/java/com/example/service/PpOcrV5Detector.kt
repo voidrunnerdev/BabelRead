@@ -40,8 +40,12 @@ class PpOcrV5Detector(context: Context) {
         private const val MAX_REGION_PIXELS = 4_000_000L
         private const val PAGE_SCAN_TILE_MAX_WIDTH = 1280
         private const val PAGE_SCAN_TILE_MAX_HEIGHT = 1152
+        private const val PAGE_SCAN_DARK_LUMA = 140
         private const val PAGE_SCAN_NON_WHITE_LUMA = 185
         private const val PAGE_SCAN_BRIGHT_LUMA = 195
+        private const val PAGE_SCAN_INVERT_MIN_DARK_RATIO = 0.22f
+        private const val PAGE_SCAN_INVERT_MIN_COLORED_RATIO = 0.40f
+        private const val PAGE_SCAN_INVERT_MIN_BRIGHT_SAMPLES = 8
     }
 
     data class DetectedLine(
@@ -285,6 +289,7 @@ class PpOcrV5Detector(context: Context) {
         if (width <= 0 || height <= 0 || pixels.size < width * height) return false
         val stride = max(2, min(8, min(width, height) / 48))
         var total = 0
+        var darkCount = 0
         var nonWhiteCount = 0
         var brightCount = 0
         var y = 0
@@ -297,6 +302,7 @@ class PpOcrV5Detector(context: Context) {
                 val g = (color shr 8) and 0xFF
                 val b = color and 0xFF
                 val luma = (r * 299 + g * 587 + b * 114) / 1000
+                if (luma < PAGE_SCAN_DARK_LUMA) darkCount++
                 if (luma < PAGE_SCAN_NON_WHITE_LUMA) nonWhiteCount++
                 if (luma >= PAGE_SCAN_BRIGHT_LUMA) brightCount++
                 total++
@@ -304,7 +310,11 @@ class PpOcrV5Detector(context: Context) {
             }
             y += stride
         }
-        return total > 0 && nonWhiteCount.toFloat() / total >= 0.02f && brightCount >= 4
+        if (total <= 0 || brightCount < PAGE_SCAN_INVERT_MIN_BRIGHT_SAMPLES) return false
+        val darkRatio = darkCount.toFloat() / total
+        val coloredRatio = nonWhiteCount.toFloat() / total
+        return darkRatio >= PAGE_SCAN_INVERT_MIN_DARK_RATIO ||
+            coloredRatio >= PAGE_SCAN_INVERT_MIN_COLORED_RATIO
     }
 
     internal fun buildInvertedContrastPixels(pixels: IntArray): IntArray {

@@ -131,7 +131,7 @@ class MangaPreferences(private val context: Context) {
         val NOTIFICATION_NEW_CHAPTER = booleanPreferencesKey("notification_new_chapter")
         val UPDATE_CHECK_INTERVAL = intPreferencesKey("update_check_interval") // 6, 12, 24 saat
         val YOLO_AI_ENABLED = booleanPreferencesKey("yolo_ai_enabled")
-        val DETECTOR_MODEL_TYPE = stringPreferencesKey("detector_model_type") // "yolo11n_seg", "rtdetr_v2"
+        val DETECTOR_MODEL_TYPE = stringPreferencesKey("detector_model_type") // "yolo11s_seg", "rtdetr_v2"
         val CONFIDENCE_THRESHOLD = floatPreferencesKey("confidence_threshold")
         val DEBUG_MODE = booleanPreferencesKey("debug_mode")
         val UI_LANGUAGE = stringPreferencesKey("ui_language")
@@ -191,7 +191,7 @@ class MangaPreferences(private val context: Context) {
     val updateCheckInterval: Flow<Int> = context.dataStore.data.map { it[UPDATE_CHECK_INTERVAL] ?: 12 }
     val yoloAiEnabled: Flow<Boolean> = context.dataStore.data.map { it[YOLO_AI_ENABLED] ?: true }
     val detectorModelType: Flow<String> = context.dataStore.data.map {
-        it[DETECTOR_MODEL_TYPE] ?: DetectorModel.YOLO11N_SEG.id
+        DetectorModel.fromId(it[DETECTOR_MODEL_TYPE]).id
     }
     val confidenceThreshold: Flow<Float> = context.dataStore.data.map {
         it[CONFIDENCE_THRESHOLD] ?: DetectorModel.fromId(it[DETECTOR_MODEL_TYPE]).defaultConfidence
@@ -364,11 +364,12 @@ class MangaPreferences(private val context: Context) {
     }
 
     suspend fun setDetectorModelType(value: String) {
+        val normalized = DetectorModel.fromId(value).id
         context.dataStore.edit { prefs ->
-            val current = prefs[DETECTOR_MODEL_TYPE] ?: DetectorModel.YOLO11N_SEG.id
-            prefs[DETECTOR_MODEL_TYPE] = value
-            if (!current.equals(value, ignoreCase = true) || prefs[CONFIDENCE_THRESHOLD] == null) {
-                prefs[CONFIDENCE_THRESHOLD] = DetectorModel.fromId(value).defaultConfidence
+            val current = DetectorModel.fromId(prefs[DETECTOR_MODEL_TYPE]).id
+            prefs[DETECTOR_MODEL_TYPE] = normalized
+            if (!current.equals(normalized, ignoreCase = true) || prefs[CONFIDENCE_THRESHOLD] == null) {
+                prefs[CONFIDENCE_THRESHOLD] = DetectorModel.fromId(normalized).defaultConfidence
             }
         }
     }

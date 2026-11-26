@@ -45,6 +45,7 @@ import com.example.service.LocalMangaImporter
 import com.example.service.TextBlockObj
 import com.example.service.TranslationRequest
 import com.example.service.TranslationService
+import com.example.util.BubbleContourExtractor
 import com.example.util.BubbleLayoutGeometry
 import com.example.util.ContourScanlineProfile
 import com.example.util.ReaderBitmapPolicy
@@ -2610,12 +2611,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private fun buildBubbleOcrRegions(bubbles: List<BubbleBox>, width: Int, height: Int): List<Rect> {
         if (bubbles.isEmpty() || width <= 0 || height <= 0) return emptyList()
 
+        val nonPanelBubbles = bubbles.filterNot { it.label.equals("panel", ignoreCase = true) }
         val balloonLabels = setOf("bubble", "balloon")
         val textLabels = setOf("text_bubble", "dialogue_text", "text")
-        val balloonRects = bubbles.filter { it.label in balloonLabels }
+        val balloonRects = nonPanelBubbles.filter { it.label in balloonLabels }
             .map { it.toPixelRect(width, height) }
             .filter { !it.isEmpty }
-        val textRects = bubbles.filter { it.label in textLabels }
+        val textRects = nonPanelBubbles.filter { it.label in textLabels }
             .map { it.toPixelRect(width, height) }
             .filter { !it.isEmpty }
 
@@ -2637,12 +2639,13 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
     private fun buildPpOcrV5Regions(bubbles: List<BubbleBox>, width: Int, height: Int): List<Rect> {
         if (bubbles.isEmpty() || width <= 0 || height <= 0) return emptyList()
 
+        val nonPanelBubbles = bubbles.filterNot { it.label.equals("panel", ignoreCase = true) }
         val textLabels = setOf("text_bubble", "dialogue_text", "text")
         val balloonLabels = setOf("bubble", "balloon")
-        val textRects = bubbles.filter { it.label in textLabels }
+        val textRects = nonPanelBubbles.filter { it.label in textLabels }
             .map { it.toPixelRect(width, height) }
             .filter { !it.isEmpty }
-        val balloonRects = bubbles.filter { it.label in balloonLabels }
+        val balloonRects = nonPanelBubbles.filter { it.label in balloonLabels }
             .map { it.toPixelRect(width, height) }
             .filter { !it.isEmpty }
 
@@ -2778,7 +2781,7 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     val regionMode = yoloEnabled && bubbleDetector.isAiModelReady()
                     val sfxBoxes = if (yoloBubbles.isNotEmpty()) {
                         yoloBubbles.filter {
-                            it.label in setOf("text_free", "onomatopoeia_text")
+                            it.label in setOf("text_free", "onomatopoeia_text", "sfx")
                         }.map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
                     } else {
                         emptyList()
@@ -2832,7 +2835,12 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         if (primaryTimedOut) {
                             null
-                        } else if (isPpOcrAny) {
+                        } else if (FallbackBubbleSupport.shouldRunFallbackLineScan(
+                                isPpOcrAny = isPpOcrAny,
+                                regionCount = bubbleOcrRegions.size,
+                                primaryBlockCount = primaryBlocks.size
+                            )
+                        ) {
                             val fallbackTimeoutMs = (20000L + ((bitmap.height / 1400).coerceAtLeast(1) * 10000L))
                                 .coerceAtMost(120000L)
                             val fallbackBlocks = ocrExecutionMutex.withLock {
@@ -2925,38 +2933,32 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                     // 3. Eşleştirme ve Çeviri Akışı
                     if (yoloBubbles.isNotEmpty()) {
                         pageAuxBoxes.addAll(sfxBoxes)
+                        val nonPanelBubbles = yoloBubbles.filterNot {
+                            it.label.equals("panel", ignoreCase = true)
+                        }
+                        val balloonLabels = setOf("bubble", "balloon")
+                        val dialogueLabels = setOf("text_bubble", "dialogue_text", "text")
+                        val balloonDetections = nonPanelBubbles.filter { it.label in balloonLabels }
+                        val dialogueDetectionEntries = nonPanelBubbles
+                            .filter { it.label in dialogueLabels }
+                            .mapNotNull { det ->
+                                val rect = det.toPixelRect(bmpW.toInt(), bmpH.toInt())
+                                if (rect.isEmpty) null else rect to det.label
+                            }
                         val balloonBoxes = dedupeRegions(
-                            yoloBubbles.filter { it.label in setOf("bubble", "balloon") }
-                                .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
+                            balloonDetections.map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
                         )
                         val dialogueBoxes = dedupeRegions(
-                            yoloBubbles.filter { it.label in setOf("text_bubble", "dialogue_text", "text") }
-                                .map { it.toPixelRect(bmpW.toInt(), bmpH.toInt()) }
+                            dialogueDetectionEntries.map { it.first }
                         )
 
-                        val allCandidateBubbles = dedupeRegions(balloonBoxes + dialogueBoxes)
+                        fun selectContainingBubble(textRect: Rect): Rect? =
+                            FallbackBubbleSupport.selectContainingBalloon(textRect, balloonBoxes)
 
-                        fun selectContainingBubble(textRect: Rect): Rect? {
-                            if (textRect.isEmpty || allCandidateBubbles.isEmpty()) return null
-                            val textArea = rectArea(textRect).coerceAtLeast(1L)
-                            val scored = allCandidateBubbles.filter { !it.isEmpty }.map { bBox ->
-                                val coverage = rectOverlapArea(textRect, bBox).toFloat() / textArea
-                                val containsCenter = bBox.contains(textRect.centerX(), textRect.centerY())
-                                val score = coverage +
-                                    (if (containsCenter) 0.08f else 0f) +
-                                    (if (coverage >= 0.95f) 0.04f else 0f)
-                                Triple(bBox, score, rectArea(bBox))
-                            }
-                            val comparator = compareBy<Triple<Rect, Float, Long>> { it.second }
-                                .thenBy { it.third }
-                            val acceptable = scored.filter { it.second >= 0.35f }
-                            return acceptable.maxWithOrNull(comparator)?.first
-                        }
-
-                        fun matchingTextDetection(textRect: Rect): Rect? {
-                            if (dialogueBoxes.isEmpty() || textRect.isEmpty) return null
+                        fun matchingTextDetectionEntry(textRect: Rect): Pair<Rect, String>? {
+                            if (dialogueDetectionEntries.isEmpty() || textRect.isEmpty) return null
                             val textArea = (textRect.width().toLong() * textRect.height()).coerceAtLeast(1L)
-                            return dialogueBoxes.mapNotNull { detection ->
+                            return dialogueDetectionEntries.mapNotNull { (detection, label) ->
                                 val intersectionWidth = (minOf(textRect.right, detection.right) - maxOf(textRect.left, detection.left))
                                     .coerceAtLeast(0)
                                 val intersectionHeight = (minOf(textRect.bottom, detection.bottom) - maxOf(textRect.top, detection.top))
@@ -2964,16 +2966,18 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 val overlap = (intersectionWidth.toLong() * intersectionHeight).toFloat() / textArea.toFloat()
                                 val containsCenter = detection.contains(textRect.centerX(), textRect.centerY())
                                 val score = overlap + if (containsCenter) 0.05f else 0f
-                                if (score < 0.20f) null else detection to score
+                                if (score < 0.20f) null else Triple(detection, label, score)
                             }
                                 .sortedWith(
-                                    compareByDescending<Pair<Rect, Float>> { it.second }
+                                    compareByDescending<Triple<Rect, String, Float>> { it.third }
                                         .thenByDescending { it.first.width().toLong() * it.first.height() }
                                 )
                                 .firstOrNull()
-                                ?.first
-                                ?.let(::Rect)
+                                ?.let { Rect(it.first) to it.second }
                         }
+
+                        fun matchingTextDetection(textRect: Rect): Rect? =
+                            matchingTextDetectionEntry(textRect)?.first
 
                         // Keep tight text detections even when they lie inside a
                         // balloon; they are useful anchors for OCR assignment.
@@ -3105,39 +3109,62 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             val cleanedText = translationService.cleanOcrArtifacts(rawText, ppOriginLang ?: originLang)
                             val analysis = translationService.analyzeBubble(bitmap, textBounds)
                             val containingBubble = selectContainingBubble(textBounds)
+                            val matchedDialogue = if (containingBubble == null) matchingTextDetectionEntry(textBounds) else null
+                            val dialogueBounds = matchedDialogue?.first
                             val isDarkBubble = analysis.isDarkBubble ||
-                                isBubbleInteriorDark(containingBubble) ||
+                                isBubbleInteriorDark(containingBubble ?: dialogueBounds) ||
                                 (containingBubble == null && FallbackBubbleSupport.isColoredOrDarkWithLightText(bitmap, textBounds))
                             val finalIsBubble = containingBubble != null || analysis.isBubble || isDarkBubble
-                            if (cleanedText.isBlank() || !translationService.isValidDialogueText(cleanedText, isBubble = finalIsBubble)) {
+                            val dialogueValidationIsBubble = containingBubble != null ||
+                                (matchedDialogue?.second != "text" && finalIsBubble)
+                            if (cleanedText.isBlank() || !translationService.isValidDialogueText(cleanedText, isBubble = dialogueValidationIsBubble)) {
                                 return null
                             }
                             val bubbleBounds = when {
                                 containingBubble != null -> containingBubble
+                                finalIsBubble && dialogueBounds != null -> {
+                                    if (dialogueBounds.contains(textBounds)) Rect(dialogueBounds)
+                                    else Rect(dialogueBounds).apply { union(textBounds) }
+                                }
                                 finalIsBubble -> FallbackBubbleSupport.boundFallbackRefinedBox(
                                     bitmap = bitmap,
                                     textRect = textBounds,
                                     rawRefined = translationService.refineBubbleBounds(bitmap, textBounds, isDarkBubble),
                                     isDarkBubble = isDarkBubble
                                 )
-                                else -> textBounds
+                                else -> dialogueBounds ?: textBounds
                             }
-                            val candidateContour = yoloBubbles.firstOrNull { yb ->
-                                yb.toPixelRect(bitmap.width, bitmap.height) == bubbleBounds
-                            }?.contourProfile ?: yoloBubbles.firstOrNull { yb ->
-                                yb.toPixelRect(bitmap.width, bitmap.height).contains(textBounds.centerX(), textBounds.centerY())
-                            }?.contourProfile
+                            val candidateContour = when {
+                                containingBubble != null -> {
+                                    balloonDetections.firstOrNull { yb ->
+                                        yb.toPixelRect(bitmap.width, bitmap.height) == bubbleBounds
+                                    }?.contourProfile ?: balloonDetections.firstOrNull { yb ->
+                                        yb.toPixelRect(bitmap.width, bitmap.height).contains(textBounds.centerX(), textBounds.centerY())
+                                    }?.contourProfile
+                                }
+                                finalIsBubble -> {
+                                    FallbackBubbleSupport.resolveNonBalloonContour(
+                                        bitmap = bitmap,
+                                        textBounds = textBounds,
+                                        bubbleBounds = bubbleBounds,
+                                        isDarkBubble = isDarkBubble,
+                                        dialogueLabel = matchedDialogue?.second
+                                    )
+                                }
+                                else -> null
+                            }
                             // Size bubble text from the balloon interior. The tight
                             // text_bubble detection remains a fallback anchor, but
                             // fitting to it left longer translations needlessly tiny.
-                            val isRectangularBox = !finalIsBubble || (candidateContour?.isRectangularLike == true) ||
-                                (containingBubble == null && bubbleBounds.width() > 0 && bubbleBounds.height() > 0)
+                            val isRectangularBox = !finalIsBubble ||
+                                (candidateContour?.isRectangularLike == true) ||
+                                (containingBubble == null && matchedDialogue?.second.equals("text", ignoreCase = true))
                             val targetBox = (if (finalIsBubble) {
                                 BubbleLayoutGeometry.centeredLayoutBox(textBounds, bubbleBounds, isRectangular = isRectangularBox)
                             } else {
                                 null
                             })
-                                ?: matchingTextDetection(textBounds)
+                                ?: dialogueBounds
                                 ?: Rect(textBounds)
                             return BubbleCandidate(
                                 targetBox = targetBox,
@@ -5100,6 +5127,64 @@ internal object BubbleCandidateMerger {
 }
 
 internal object FallbackBubbleSupport {
+
+    fun shouldRunFallbackLineScan(
+        isPpOcrAny: Boolean,
+        regionCount: Int,
+        primaryBlockCount: Int
+    ): Boolean = isPpOcrAny && (regionCount == 0 || (primaryBlockCount == 0 && regionCount > 0))
+
+    fun selectContainingBalloon(textRect: Rect, balloonBoxes: List<Rect>): Rect? {
+        if (textRect.isEmpty || balloonBoxes.isEmpty()) return null
+        val textArea = BubbleCandidateMerger.areaOf(textRect).coerceAtLeast(1L)
+        val scored = balloonBoxes.filter { !it.isEmpty }.map { bBox ->
+            val coverage = BubbleCandidateMerger.overlapArea(textRect, bBox).toFloat() / textArea
+            val containsCenter = bBox.contains(textRect.centerX(), textRect.centerY())
+            val score = coverage +
+                (if (containsCenter) 0.08f else 0f) +
+                (if (coverage >= 0.95f) 0.04f else 0f)
+            Triple(bBox, score, BubbleCandidateMerger.areaOf(bBox))
+        }
+        val comparator = compareBy<Triple<Rect, Float, Long>> { it.second }
+            .thenBy { it.third }
+        val acceptable = scored.filter { it.second >= 0.35f }
+        return acceptable.maxWithOrNull(comparator)?.first
+    }
+
+    fun rectangularContourProfile(rows: Int = 16): ContourScanlineProfile {
+        val safeRows = rows.coerceAtLeast(4)
+        return ContourScanlineProfile(
+            rowLeftFractions = FloatArray(safeRows) { 0.02f },
+            rowRightFractions = FloatArray(safeRows) { 0.98f },
+            opticalCenterX = 0.5f,
+            opticalCenterY = 0.5f
+        )
+    }
+
+    fun resolveNonBalloonContour(
+        bitmap: Bitmap,
+        textBounds: Rect,
+        bubbleBounds: Rect,
+        isDarkBubble: Boolean,
+        dialogueLabel: String?
+    ): ContourScanlineProfile? {
+        val isNarrationTextBox = dialogueLabel.equals("text", ignoreCase = true)
+        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0 || bubbleBounds.isEmpty) {
+            return if (isNarrationTextBox) rectangularContourProfile() else null
+        }
+        val extracted = BubbleContourExtractor.extractFromBitmap(
+            bitmap = bitmap,
+            bubbleBox = bubbleBounds,
+            anchorBox = textBounds,
+            pageOriginalWidth = bitmap.width.toFloat(),
+            pageOriginalHeight = bitmap.height.toFloat(),
+            isDarkBubble = isDarkBubble
+        )?.takeIf { it.isUsable }
+        if (isNarrationTextBox) {
+            return extracted?.takeIf { it.isRectangularLike } ?: rectangularContourProfile()
+        }
+        return extracted
+    }
 
     fun mergeOcrBlocksWithFallback(
         primary: List<TranslationService.RectAndText>,

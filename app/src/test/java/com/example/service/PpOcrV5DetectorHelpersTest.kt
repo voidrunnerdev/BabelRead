@@ -78,6 +78,15 @@ class PpOcrV5DetectorHelpersTest {
         assertTrue(boxes[0].left < 8f && boxes[0].right > 31f)
     }
 
+    @Test
+    fun `scaledSize preserves horizontal aspect on wide small-font line crops`() {
+        val wideLine = PpOcrV5DetPreprocess.scaledSize(140, 20, limitSide = 960, minSide = 480)
+        assertTrue("Width should be >= 480 for small line crop", wideLine[0] >= 480)
+        assertTrue("Width must remain multiple of 32", wideLine[0] % 32 == 0)
+        assertTrue("Height must remain multiple of 32", wideLine[1] % 32 == 0)
+        assertTrue("Horizontal aspect must be preserved", wideLine[0] > wideLine[1] * 4)
+    }
+
     private fun assertClose(expected: Float, actual: Float) {
         assertTrue("expected=$expected actual=$actual", abs(expected - actual) < 1e-5f)
     }

@@ -1,5 +1,6 @@
 package com.example.util
 
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -212,5 +213,94 @@ class BubbleContourExtractorTest {
         val h = 32
         val luma = IntArray(w * h) { 250 } // no dark border at all (leaked to outer perimeter)
         assertNull(BubbleContourExtractor.extractFromLuminanceGrid(luma, w, h))
+    }
+
+    @Test
+    fun `round white bubble on white page does not leak when anchor corners touch outside outline`() {
+        val w = 36
+        val h = 36
+        val luma = IntArray(w * h) { 250 } // white page outside
+        val cx = w / 2f
+        val cy = h / 2f
+        val rOuter = 15.5f
+        val rInner = 13.5f
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val dx = x + 0.5f - cx
+                val dy = y + 0.5f - cy
+                val d = kotlin.math.sqrt(dx * dx + dy * dy)
+                if (d in rInner..rOuter) {
+                    luma[y * w + x] = 20 // inked round bubble outline
+                }
+            }
+        }
+        // Rectangular anchor covering ~56% of area (<= 70%) whose 4 corners sit outside the circle
+        val profile = BubbleContourExtractor.extractFromLuminanceGrid(
+            luma = luma,
+            gridW = w,
+            gridH = h,
+            anchorLeft = 5,
+            anchorTop = 5,
+            anchorRight = 30,
+            anchorBottom = 30
+        )
+        assertNotNull("Round bubble must not return null from anchor corner leak", profile)
+        assertFalse(profile!!.isRectangularLike)
+    }
+
+    @Test
+    fun `colored medium-dark bubble with isDarkBubble extracts usable contour`() {
+        val w = 32
+        val h = 32
+        val luma = IntArray(w * h) { 250 } // white outer page/border
+        val cx = w / 2f
+        val cy = h / 2f
+        val rx = 13f
+        val ry = 13f
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val dx = (x + 0.5f - cx) / rx
+                val dy = (y + 0.5f - cy) / ry
+                if (dx * dx + dy * dy <= 1f) {
+                    luma[y * w + x] = 152 // purple/translucent colored bubble interior
+                }
+            }
+        }
+        val profile = BubbleContourExtractor.extractFromLuminanceGrid(
+            luma = luma,
+            gridW = w,
+            gridH = h,
+            isDarkBubble = true
+        )
+        assertNotNull("Medium-dark/colored bubble must extract usable contour", profile)
+        assertFalse(profile!!.isRectangularLike)
+    }
+
+    @Test
+    fun `round bubble inside tail-padded bounding box extracts usable contour`() {
+        val w = 32
+        val h = 44
+        val luma = IntArray(w * h) { 250 }
+        val cx = w / 2f
+        val cy = 12f
+        val rOuter = 10.5f
+        val rInner = 8.5f
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val dx = x + 0.5f - cx
+                val dy = y + 0.5f - cy
+                val d = kotlin.math.sqrt(dx * dx + dy * dy)
+                if (d in rInner..rOuter) luma[y * w + x] = 20
+            }
+        }
+        val profile = BubbleContourExtractor.extractFromLuminanceGrid(
+            luma = luma,
+            gridW = w,
+            gridH = h,
+            seedX = 16,
+            seedY = 12
+        )
+        assertNotNull("Round bubble with extra tail height must still extract contour", profile)
+        assertFalse(profile!!.isRectangularLike)
     }
 }

@@ -11,6 +11,8 @@ import com.example.ui.screens.computeBubblePaddingDp
 import com.example.ui.screens.computeCanvasTextTransform
 import com.example.ui.screens.resolveDrawIsRectangularBox
 import com.example.ui.screens.resolveIsRectangularBox
+import com.example.ui.screens.resolveOverlayBackgroundBoundsDp
+import com.example.ui.screens.shouldDrawRectangularBorder
 import java.util.Locale
 import kotlin.math.sqrt
 import org.junit.Assert.assertEquals
@@ -71,11 +73,30 @@ class BubbleTextLayoutOverflowTest {
             )
         )
 
-        // Fallback when contour is absent still treats wide box as rectangular
-        assertTrue(
+        // When contour is absent on a real speech bubble, layout (ELLIPSE) and draw (drawOval)
+        // must both stay non-rectangular so corner glyphs never collide with the oval border.
+        assertFalse(
             resolveIsRectangularBox(
                 isBubble = true,
                 bubbleBox = wideBubble,
+                targetBox = wideBubble,
+                contourProfile = null
+            )
+        )
+        assertFalse(
+            resolveDrawIsRectangularBox(
+                isBubble = true,
+                bubbleBox = wideBubble,
+                widthDp = 130f,
+                heightDp = 65f,
+                contourProfile = null
+            )
+        )
+        // Only non-bubble or empty-bubbleBox falls back to rectangular
+        assertTrue(
+            resolveIsRectangularBox(
+                isBubble = true,
+                bubbleBox = Rect(),
                 targetBox = wideBubble,
                 contourProfile = null
             )
@@ -260,5 +281,147 @@ class BubbleTextLayoutOverflowTest {
         val mappedRight = transform.translateX + 110f * transform.scale
         assertEquals(0f, mappedLeft, 0.01f)
         assertEquals(100f, mappedRight, 0.01f)
+    }
+
+    @Test
+    fun `narration box with isBubble false never draws oval or synthetic border`() {
+        val box = Rect(40, 60, 180, 150) // aspect = 1.55 (previously < 2.2 fell into drawOval)
+        assertTrue(
+            "Narration box (!isBubble) without contour must resolve rectangular",
+            resolveDrawIsRectangularBox(
+                isBubble = false,
+                bubbleBox = box,
+                widthDp = 70f,
+                heightDp = 45f,
+                contourProfile = null
+            )
+        )
+        assertTrue(
+            "Narration box (!isBubble) even with curved text mask must stay rectangular",
+            resolveDrawIsRectangularBox(
+                isBubble = false,
+                bubbleBox = box,
+                widthDp = 70f,
+                heightDp = 45f,
+                contourProfile = buildEllipticalContourProfile()
+            )
+        )
+        assertFalse(
+            "Narration box (!isBubble) must not draw synthetic black border",
+            shouldDrawRectangularBorder(
+                isSubtitleMode = false,
+                isRectangularBox = true,
+                isBubble = false
+            )
+        )
+        assertTrue(
+            "Rectangular speech bubble (isBubble=true) keeps its border",
+            shouldDrawRectangularBorder(
+                isSubtitleMode = false,
+                isRectangularBox = true,
+                isBubble = true
+            )
+        )
+    }
+
+    @Test
+    fun `oval fallback background expands to cover all four anchor corners`() {
+        val bounds = resolveOverlayBackgroundBoundsDp(
+            isSubtitleMode = false,
+            isOvalFallback = true,
+            anchorLeftDp = 50f,
+            anchorTopDp = 100f,
+            anchorRightDp = 130f,
+            anchorBottomDp = 180f,
+            bubbleLeftDp = 50f,
+            bubbleTopDp = 100f,
+            bubbleRightDp = 130f,
+            bubbleBottomDp = 180f,
+            placedLeftDp = 50f,
+            placedTopDp = 100f,
+            placedRightDp = 130f,
+            placedBottomDp = 180f,
+            marginDp = 2f
+        )
+        val cx = (bounds.left + bounds.right) * 0.5f
+        val cy = (bounds.top + bounds.bottom) * 0.5f
+        val rx = bounds.width * 0.5f
+        val ry = bounds.height * 0.5f
+        val corners = listOf(
+            50f to 100f,
+            130f to 100f,
+            50f to 180f,
+            130f to 180f
+        )
+        for ((x, y) in corners) {
+            val nx = (x - cx) / rx
+            val ny = (y - cy) / ry
+            assertTrue(
+                "Anchor corner ($x,$y) escaped oval fallback: nx^2+ny^2=${nx * nx + ny * ny}",
+                nx * nx + ny * ny <= 1.0f
+            )
+        }
+    }
+
+    @Test
+    fun `narrow vertical oval gets safe horizontal padding without shrinking normal bubbles`() {
+        // Normal bubble remains unchanged at min(w * 0.045, 5)
+        val (normalPadH, _) = computeBubblePaddingDp(
+            widthDp = 120f,
+            heightDp = 100f,
+            isRectangularBox = false
+        )
+        assertEquals(5.0f, normalPadH, 0.01f)
+
+        // Narrow vertical oval ("DING DONG!") gets protective horizontal clearance
+        val (narrowPadH, _) = computeBubblePaddingDp(
+            widthDp = 46f,
+            heightDp = 120f,
+            isRectangularBox = false
+        )
+        assertTrue("Narrow vertical oval padding must be >= 4.0dp, got $narrowPadH", narrowPadH >= 4.0f)
+
+        val contour = buildEllipticalContourProfile()
+        val bubbleBoundsDp = RectF(0f, 0f, 46f, 120f)
+        val (padH, padV) = computeBubblePaddingDp(46f, 120f, isRectangularBox = false)
+        val density = 2f
+        val envelope = BubbleTextLayoutEngine.envelopeForBubble(
+            bubbleBounds = bubbleBoundsDp,
+            horizontalPaddingDp = padH,
+            verticalPaddingDp = padV,
+            density = density,
+            contourProfile = contour,
+            isRectangular = false,
+            safeInsetRatio = BubbleTextLayoutEngine.READER_SAFE_INSET_RATIO,
+            minSafeInsetPx = BubbleTextLayoutEngine.READER_MIN_SAFE_INSET_PX,
+            maxSafeInsetPx = BubbleTextLayoutEngine.READER_MAX_SAFE_INSET_PX
+        )!!
+        val result = BubbleTextLayoutEngine.optimizeLayout(
+            text = "DING DONG!",
+            bubbleBounds = bubbleBoundsDp,
+            horizontalPaddingDp = padH,
+            verticalPaddingDp = padV,
+            minSp = 6.0f,
+            maxSp = 22f,
+            density = density,
+            spToPx = { it * density },
+            layoutLocale = trLocale,
+            targetLanguage = "tr",
+            measureTypeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD),
+            allowBrokenWords = false,
+            textScaleX = 0.90f,
+            contourProfile = contour,
+            isRectangular = false,
+            safeInsetRatio = BubbleTextLayoutEngine.READER_SAFE_INSET_RATIO,
+            minSafeInsetPx = BubbleTextLayoutEngine.READER_MIN_SAFE_INSET_PX,
+            maxSafeInsetPx = BubbleTextLayoutEngine.READER_MAX_SAFE_INSET_PX
+        )
+        assertNotNull(result)
+        assertTrue(result!!.fitsInside)
+        for (line in result.bubbleTextLayout!!.lines) {
+            val span = envelope.spanAtBand(line.topPx, line.topPx + line.heightPx)
+            assertTrue(line.leftPx >= span.leftPx - 0.5f)
+            assertTrue(line.leftPx + line.widthPx <= span.rightPx + 0.5f)
+        }
     }
 }
