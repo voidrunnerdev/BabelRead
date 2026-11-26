@@ -476,12 +476,8 @@ class PpOcrV5Detector(context: Context) {
                     return false
                 }
                 val env = OrtEnvironment.getEnvironment()
-                val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
                 val options = OrtSession.SessionOptions().apply {
-                    setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-                    setMemoryPatternOptimization(true)
-                    setIntraOpNumThreads(threads)
-                    runCatching { addXnnpack(mapOf("intra_op_num_threads" to threads.toString())) }
+                    setIntraOpNumThreads(2)
                 }
                 val loaded = try {
                     env.createSession(modelFile.absolutePath, options)

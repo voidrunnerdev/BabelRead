@@ -240,14 +240,11 @@ class YoloBubbleDetector(context: Context) {
     @Volatile private var warnedUnsupportedInputType = false
 
     private fun createOptimizedSessionOptions(): OrtSession.SessionOptions {
-        val threads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
         return OrtSession.SessionOptions().apply {
-            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            setMemoryPatternOptimization(true)
-            setIntraOpNumThreads(threads)
-            runCatching {
-                addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
-            }
+            // Avoid XNNPACK EP and memory-pattern caching on dynamic-shape
+            // YOLO/PP-OCRv5/RT-DETR graphs (XNNPACK pthreadpool crashes on
+            // dynamic Resize ops in onnxruntime-android 1.20.0 on Android 16).
+            setIntraOpNumThreads(2)
         }
     }
 
