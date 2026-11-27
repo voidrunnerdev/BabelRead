@@ -296,6 +296,7 @@ private fun separateNearbyBoxes(
         return rects[index].bottom - anchor.top
     }
 
+    repeat(2) {
     for (i in rects.indices) {
         if (!isBubble.getOrElse(i) { false }) continue
         for (j in i + 1 until rects.size) {
@@ -335,8 +336,8 @@ private fun separateNearbyBoxes(
                     val topBox = rects[ti]
                     val bottomBox = rects[bi]
                     val mid = interTop + interH / 2
-                    topBox.bottom = min(topBox.bottom, mid - margin)
-                    bottomBox.top = max(bottomBox.top, mid + margin)
+                    topBox.bottom = min(topBox.bottom, mid - margin).coerceAtLeast(topBox.top + 16)
+                    bottomBox.top = max(bottomBox.top, mid + margin).coerceAtMost(bottomBox.bottom - 16)
                     boosted[ti] = true
                     boosted[bi] = true
                 } else {
@@ -345,8 +346,8 @@ private fun separateNearbyBoxes(
                     val leftBox = rects[li]
                     val rightBox = rects[ri]
                     val mid = interLeft + interW / 2
-                    leftBox.right = min(leftBox.right, mid - margin)
-                    rightBox.left = max(rightBox.left, mid + margin)
+                    leftBox.right = min(leftBox.right, mid - margin).coerceAtLeast(leftBox.left + 16)
+                    rightBox.left = max(rightBox.left, mid + margin).coerceAtMost(rightBox.right - 16)
                     boosted[li] = true
                     boosted[ri] = true
                 }
@@ -363,20 +364,20 @@ private fun separateNearbyBoxes(
                 val mid = interLeft + interW / 2
                 val newLeftRight = mid - margin
                 val newRightLeft = mid + margin
-                val minLeftWidth = max(
-                    (originalWidths[li] * 0.75f).toInt(),
-                    minWidthFromLeft(li)
-                )
-                val minRightWidth = max(
-                    (originalWidths[ri] * 0.75f).toInt(),
-                    minWidthFromRight(ri)
-                )
-                if (newLeftRight - leftBox.left >= minLeftWidth &&
-                    rightBox.right - newRightLeft >= minRightWidth
-                ) {
+                val minLeftWidth = (originalWidths[li] * 0.55f).toInt().coerceAtLeast(20)
+                val minRightWidth = (originalWidths[ri] * 0.55f).toInt().coerceAtLeast(20)
+                val canPullLeft = newLeftRight - leftBox.left >= minLeftWidth
+                val canPullRight = rightBox.right - newRightLeft >= minRightWidth
+                if (canPullLeft && canPullRight) {
                     leftBox.right = newLeftRight
                     rightBox.left = newRightLeft
                     boosted[li] = true
+                    boosted[ri] = true
+                } else if (canPullLeft && leftBox.width() > rightBox.width()) {
+                    leftBox.right = (rightBox.left - margin).coerceAtLeast(leftBox.left + minLeftWidth)
+                    boosted[li] = true
+                } else if (canPullRight && rightBox.width() > leftBox.width()) {
+                    rightBox.left = (leftBox.right + margin).coerceAtMost(rightBox.right - minRightWidth)
                     boosted[ri] = true
                 }
             } else {
@@ -389,24 +390,25 @@ private fun separateNearbyBoxes(
                 val mid = interTop + interH / 2
                 val newTopBottom = mid - margin
                 val newBottomTop = mid + margin
-                val minTopHeight = max(
-                    (originalHeights[ti] * 0.75f).toInt(),
-                    minHeightFromTop(ti)
-                )
-                val minBottomHeight = max(
-                    (originalHeights[bi] * 0.75f).toInt(),
-                    minHeightFromBottom(bi)
-                )
-                if (newTopBottom - topBox.top >= minTopHeight &&
-                    bottomBox.bottom - newBottomTop >= minBottomHeight
-                ) {
+                val minTopHeight = (originalHeights[ti] * 0.55f).toInt().coerceAtLeast(20)
+                val minBottomHeight = (originalHeights[bi] * 0.55f).toInt().coerceAtLeast(20)
+                val canPullTop = newTopBottom - topBox.top >= minTopHeight
+                val canPullBottom = bottomBox.bottom - newBottomTop >= minBottomHeight
+                if (canPullTop && canPullBottom) {
                     topBox.bottom = newTopBottom
                     bottomBox.top = newBottomTop
                     boosted[ti] = true
                     boosted[bi] = true
+                } else if (canPullTop && topBox.height() > bottomBox.height()) {
+                    topBox.bottom = (bottomBox.top - margin).coerceAtLeast(topBox.top + minTopHeight)
+                    boosted[ti] = true
+                } else if (canPullBottom && bottomBox.height() > topBox.height()) {
+                    bottomBox.top = (topBox.bottom + margin).coerceAtMost(bottomBox.bottom - minBottomHeight)
+                    boosted[bi] = true
                 }
             }
         }
+    }
     }
     return boosted
 }
@@ -623,8 +625,8 @@ internal fun computeCanvasTextTransform(
     )
 }
 
-private fun contrastingTextColor(backgroundColor: Int): Color {
-    val alpha = android.graphics.Color.alpha(backgroundColor) / 255f
+private fun contrastingTextColor(backgroundColor: Int, effectiveAlpha: Float = 1f): Color {
+    val alpha = effectiveAlpha.coerceIn(0f, 1f)
     fun linearChannel(channel: Int): Float {
         val srgb = (channel * alpha + 255f * (1f - alpha)) / 255f
         return if (srgb <= 0.04045f) srgb / 12.92f
@@ -1725,10 +1727,28 @@ fun ReaderPageContainer(
                                 baseBox
                             }
                         }
+                        val isBubbleList = translatedBlocks.map { it.isBubble }
+                        val anchorList = translatedBlocks.map { Rect(it.boundingBox) }
                         val boldBoostFlags = separateNearbyBoxes(
                             preparedBoxes,
-                            translatedBlocks.map { it.isBubble },
-                            translatedBlocks.map { Rect(it.boundingBox) }
+                            isBubbleList,
+                            anchorList
+                        )
+                        // Also separate raw bubbleBounds so touching/overlapping speech bubbles
+                        // never lay out text or opaque fills on top of a neighbor bubble.
+                        val separatedBubbleBounds = translatedBlocks.map { block ->
+                            val raw = BubbleLayoutGeometry.reliableBubbleBounds(
+                                bubble = block.bubbleBox,
+                                anchor = block.boundingBox,
+                                pageBounds = pageBounds,
+                                requireDistinctBubble = false
+                            ) ?: if (!block.bubbleBox.isEmpty) Rect(block.bubbleBox) else Rect(block.boundingBox)
+                            Rect(raw)
+                        }
+                        separateNearbyBoxes(
+                            separatedBubbleBounds,
+                            isBubbleList,
+                            anchorList
                         )
                         val contourCache = HashMap<Int, ContourScanlineProfile?>()
                         fun layoutBlock(
@@ -1740,7 +1760,7 @@ fun ReaderPageContainer(
                             val boldBoost = boldBoostFlags[blockIndex]
                             val cleanText = block.translatedText.trim()
                             val isSub = bubbleStyle == "Alt Yazı (Şeffaf)" || !block.isBubble
-                            val bubbleBounds = if (isSub) null else {
+                            val rawBubbleBounds = if (isSub) null else {
                                 BubbleLayoutGeometry.reliableBubbleBounds(
                                     bubble = block.bubbleBox,
                                     anchor = block.boundingBox,
@@ -1748,7 +1768,16 @@ fun ReaderPageContainer(
                                     requireDistinctBubble = false
                                 ) ?: if (!block.bubbleBox.isEmpty) Rect(block.bubbleBox) else null
                             }
-                            val contourProfile = if (isSub) {
+                            val sepBounds = separatedBubbleBounds[blockIndex]
+                            val bubbleBounds = if (isSub || rawBubbleBounds == null) null else {
+                                if (!sepBounds.isEmpty) Rect(sepBounds) else rawBubbleBounds
+                            }
+                            val wasBubbleTrimmed = rawBubbleBounds != null && bubbleBounds != null &&
+                                (bubbleBounds.left > rawBubbleBounds.left + 2 ||
+                                    bubbleBounds.right < rawBubbleBounds.right - 2 ||
+                                    bubbleBounds.top > rawBubbleBounds.top + 2 ||
+                                    bubbleBounds.bottom < rawBubbleBounds.bottom - 2)
+                            val contourProfile = if (isSub || wasBubbleTrimmed) {
                                 null
                             } else {
                                 (block.contourProfile?.takeIf { it.isUsable }) ?: if (validMasked != null && bubbleBounds != null) {
@@ -1811,8 +1840,9 @@ fun ReaderPageContainer(
 
                             fun expansionBubbleBounds(): Rect? {
                                 if (isSub) return null
+                                val candidateBubble = if (!sepBounds.isEmpty) sepBounds else block.bubbleBox
                                 return BubbleLayoutGeometry.reliableBubbleBounds(
-                                    bubble = block.bubbleBox,
+                                    bubble = candidateBubble,
                                     anchor = block.boundingBox,
                                     pageBounds = pageBounds
                                 )
@@ -1820,8 +1850,9 @@ fun ReaderPageContainer(
 
                             fun p1BubbleBounds(): Rect? {
                                 if (isSub) return null
+                                val candidateBubble = if (!sepBounds.isEmpty) sepBounds else block.bubbleBox
                                 return BubbleLayoutGeometry.reliableBubbleBounds(
-                                    bubble = block.bubbleBox,
+                                    bubble = candidateBubble,
                                     anchor = block.boundingBox,
                                     pageBounds = pageBounds,
                                     requireDistinctBubble = true
@@ -1830,7 +1861,11 @@ fun ReaderPageContainer(
 
                             fun maxSafeBubbleBounds(): Rect {
                                 val bubble = expansionBubbleBounds() ?: return Rect(targetBox)
-                                return bubbleTextSafeRect(bubble) ?: Rect(targetBox)
+                                return if (isRectangularBox) {
+                                    BubbleLayoutGeometry.safeRectangle(bubble) ?: Rect(targetBox)
+                                } else {
+                                    bubbleTextSafeRect(bubble) ?: Rect(targetBox)
+                                }
                             }
 
                             fun optimize(
@@ -1848,11 +1883,13 @@ fun ReaderPageContainer(
                                     (geo.widthDp - geo.padH * 2).value.coerceAtLeast(1f),
                                     (geo.heightDp - geo.padV * 2).value.coerceAtLeast(1f)
                                 )
+                                val rawMaxSp = (geo.heightDp.value * 0.55f).coerceIn(minSp, 32f)
+                                val effectiveMaxSp = harmonizedMaxSpCap?.let { minOf(rawMaxSp, it).coerceAtLeast(minSp) } ?: rawMaxSp
                                 return StaticTextLayoutOptimizer.optimizeLayout(
                                     text = measuredText,
                                     bounds = textBounds,
                                     minSp = minSp,
-                                    maxSp = (geo.heightDp.value * 0.55f).coerceIn(minSp, 32f),
+                                    maxSp = effectiveMaxSp,
                                     density = density.density,
                                     spToPx = { fontSizeSp ->
                                         with(density) { fontSizeSp.sp.toPx() }
@@ -1877,8 +1914,15 @@ fun ReaderPageContainer(
                                 contourProfile: ContourScanlineProfile? = null,
                                 typefaceOverride: Typeface? = null,
                                 isRectangular: Boolean = false
-                            ): StaticTextLayoutOptimizer.OptimizedLayoutResult? =
-                                BubbleTextLayoutEngine.optimizeLayout(
+                            ): StaticTextLayoutOptimizer.OptimizedLayoutResult? {
+                                val hasContour = contourProfile?.isUsable == true && !isRectangular
+                                // Avoid triple-insetting (padH + EDT margin + safeInset) on contour profiles,
+                                // which previously crushed narrow vertical bubbles into tiny 1-word columns.
+                                val effPadH = if (hasContour) minOf(bubbleGeo.padH.value, 2.5f) else bubbleGeo.padH.value
+                                val effPadV = if (hasContour) minOf(bubbleGeo.padV.value, 2.5f) else bubbleGeo.padV.value
+                                val rawMaxSp = (bubbleGeo.heightDp.value * 0.55f).coerceIn(minSp, 32f)
+                                val effectiveMaxSp = harmonizedMaxSpCap?.let { minOf(rawMaxSp, it).coerceAtLeast(minSp) } ?: rawMaxSp
+                                return BubbleTextLayoutEngine.optimizeLayout(
                                     text = cleanText,
                                     bubbleBounds = RectF(
                                         0f,
@@ -1886,10 +1930,10 @@ fun ReaderPageContainer(
                                         bubbleGeo.widthDp.value.coerceAtLeast(1f),
                                         bubbleGeo.heightDp.value.coerceAtLeast(1f)
                                     ),
-                                    horizontalPaddingDp = bubbleGeo.padH.value,
-                                    verticalPaddingDp = bubbleGeo.padV.value,
+                                    horizontalPaddingDp = effPadH,
+                                    verticalPaddingDp = effPadV,
                                     minSp = minSp,
-                                    maxSp = (bubbleGeo.heightDp.value * 0.55f).coerceIn(minSp, 32f),
+                                    maxSp = effectiveMaxSp,
                                     density = density.density,
                                     spToPx = { fontSizeSp ->
                                         with(density) { fontSizeSp.sp.toPx() }
@@ -1901,10 +1945,11 @@ fun ReaderPageContainer(
                                     textScaleX = textScaleX,
                                     contourProfile = contourProfile,
                                     isRectangular = isRectangular,
-                                    safeInsetRatio = BubbleTextLayoutEngine.READER_SAFE_INSET_RATIO,
-                                    minSafeInsetPx = BubbleTextLayoutEngine.READER_MIN_SAFE_INSET_PX,
-                                    maxSafeInsetPx = BubbleTextLayoutEngine.READER_MAX_SAFE_INSET_PX
+                                    safeInsetRatio = if (hasContour) 0.015f else BubbleTextLayoutEngine.READER_SAFE_INSET_RATIO,
+                                    minSafeInsetPx = if (hasContour) 1.0f else BubbleTextLayoutEngine.READER_MIN_SAFE_INSET_PX,
+                                    maxSafeInsetPx = if (hasContour) 4.0f else BubbleTextLayoutEngine.READER_MAX_SAFE_INSET_PX
                                 )
+                            }
 
                             // Android Türkçe heceleme sözlüğü içermediği için yalnızca
                             // Türkçe metinlerde fonetik hece sınırlarına yumuşak tire (\u00AD)
@@ -2039,6 +2084,16 @@ fun ReaderPageContainer(
                                                 isRectangular = isRectangularBox
                                             )?.takeIf { it.fitsInside && it.fontSizeSp >= 8.0f }?.let { return it }
 
+                                            // 3b. Whole words down to 7.0sp before hyphenating so normal dialogue stays clean.
+                                            optimizeBubbleEnvelope(
+                                                effectiveGeo,
+                                                minSp = 7.0f,
+                                                allowBrokenWords = false,
+                                                textScaleX = 0.85f,
+                                                contourProfile = profile,
+                                                isRectangular = isRectangularBox
+                                            )?.takeIf { it.fitsInside && it.fontSizeSp >= 7.0f }?.let { return it }
+
                                             // 4. Only when whole words cannot fit cleanly: allow Turkish syllable hyphenation (0.90x).
                                             optimizeBubbleEnvelope(
                                                 effectiveGeo,
@@ -2109,6 +2164,7 @@ fun ReaderPageContainer(
                                             ?: tryEnvelope(null, safeInsetRatio = 0.15f, minFloorSp = 6.0f)
                                     } else {
                                         tryEnvelope(contourProfile, minFloorSp = 8.0f)
+                                            ?: tryEnvelope(contourProfile, minFloorSp = 6.0f)
                                     }
                                 }
                                 if (bubbleGeo != null && envelopeFit != null && envelopeFit.fitsInside) {
@@ -2309,14 +2365,17 @@ fun ReaderPageContainer(
                                             // detected speech balloon. The balloon's drawn borders and surrounding artwork
                                             // are strictly preserved.
                                             if (!opt.fitsInside) {
-                                                opt = optimize(
+                                                val tighter = optimize(
                                                     geo,
-                                                    minSp = 7.0f,
+                                                    minSp = OverlayLayoutPolicy.READABLE_MIN_SP,
                                                     allowBrokenWords = true,
                                                     textOverride = hyphenatedLastResort,
-                                                    textScaleX = 0.80f,
-                                                    typefaceOverride = if (isSub) condensedTypeface else comicTypeface
+                                                    textScaleX = 0.78f,
+                                                    typefaceOverride = condensedTypeface
                                                 )
+                                                if (tighter.fitsInside || tighter.totalHeightPx < opt.totalHeightPx) {
+                                                    opt = tighter
+                                                }
                                             }
                                             val isSliver = OverlayLayoutPolicy.isPathologicalSliver(
                                                 widthDp = geo.widthDp.value,
@@ -2405,8 +2464,8 @@ fun ReaderPageContainer(
                                         widthDp = fallbackGeo.widthDp,
                                         heightDp = fallbackGeo.heightDp,
                                         layoutResult = opt,
-                                        paddingHDp = geo.padH,
-                                        paddingVDp = geo.padV,
+                                        paddingHDp = fallbackGeo.padH,
+                                        paddingVDp = fallbackGeo.padV,
                                         showOriginalFallback = shouldFallbackToOriginal,
                                         fallbackSourceBounds = Rect(sourceBox),
                                         forceTextToFitBox = !shouldFallbackToOriginal,
@@ -2433,6 +2492,9 @@ fun ReaderPageContainer(
                                 }
                             }
 
+                            val usedCompactContourPad = opt.bubbleTextLayout?.contourProfile != null && !isRectangularBox
+                            val finalPadH = if (usedCompactContourPad) minOf(geo.padH, 2.5.dp) else geo.padH
+                            val finalPadV = if (usedCompactContourPad) minOf(geo.padV, 2.5.dp) else geo.padV
                             return PlacedOverlayBox(
                                 block = block,
                                 leftDp = geo.leftDp,
@@ -2442,8 +2504,8 @@ fun ReaderPageContainer(
                                 // measured and fit-checked; do not grow downward after placement.
                                 heightDp = geo.heightDp,
                                 layoutResult = opt,
-                                paddingHDp = geo.padH,
-                                paddingVDp = geo.padV,
+                                paddingHDp = finalPadH,
+                                paddingVDp = finalPadV,
                                 // P1 line widths are measured with the exact paint used
                                 // for drawing; fake-bold would invalidate that fit.
                                 boldBoost = boldBoost && opt.bubbleTextLayout == null,
@@ -2457,7 +2519,45 @@ fun ReaderPageContainer(
                             layoutBlock(idx, blk)?.let { idx to it }
                         }
 
-                        val placements = firstPass.map { it.second }
+                        // 2. Geçiş (PageFontHarmonizer): Aynı sayfadaki komşu diyalog balonlarında
+                        // tek kelimelik/seyrek balonların 24sp'ye fırlayıp ritmi bozmasını engelle.
+                        val isSubtitleStyle = bubbleStyle == "Alt Yazı (Şeffaf)"
+                        val pageBaseSp = if (isSubtitleStyle) {
+                            null
+                        } else {
+                            PageFontHarmonizer.computePageBaselineSp(
+                                firstPass.map { (_, placed) ->
+                                    PageFontHarmonizer.BubbleSample(
+                                        fontSizeSp = placed.layoutResult.fontSizeSp,
+                                        text = placed.block.translatedText,
+                                        isNormalSpeechBubble = placed.block.isBubble && !placed.showOriginalFallback,
+                                        fitsInside = placed.layoutResult.fitsInside
+                                    )
+                                }
+                            )
+                        }
+                        val placements = if (pageBaseSp != null) {
+                            firstPass.map { (idx, placed) ->
+                                val cap = if (placed.block.isBubble && !placed.showOriginalFallback) {
+                                    PageFontHarmonizer.harmonizedCapSp(
+                                        currentSp = placed.layoutResult.fontSizeSp,
+                                        text = placed.block.translatedText,
+                                        pageBaseSp = pageBaseSp
+                                    )
+                                } else {
+                                    null
+                                }
+                                if (cap != null) {
+                                    layoutBlock(idx, placed.block, harmonizedMaxSpCap = cap)
+                                        ?.takeIf { it.layoutResult.fitsInside }
+                                        ?: placed
+                                } else {
+                                    placed
+                                }
+                            }
+                        } else {
+                            firstPass.map { it.second }
+                        }
                         placements
                         }
                     }
@@ -2490,8 +2590,7 @@ fun ReaderPageContainer(
                             bubbleStyle = bubbleStyle
                         )
                         val contour = (placed.layoutResult.bubbleTextLayout?.contourProfile
-                            ?: placed.contourProfile
-                            ?: block.contourProfile)?.takeIf { it.isUsable }
+                            ?: placed.contourProfile)?.takeIf { it.isUsable }
                         val isRectangularBox = resolveDrawIsRectangularBox(
                             isBubble = block.isBubble,
                             bubbleBox = block.bubbleBox,
@@ -2500,10 +2599,18 @@ fun ReaderPageContainer(
                             contourProfile = contour
                         )
 
+                        val resolvedBgColor = block.backgroundColor?.let { rawBg ->
+                            val r = android.graphics.Color.red(rawBg)
+                            val g = android.graphics.Color.green(rawBg)
+                            val b = android.graphics.Color.blue(rawBg)
+                            val lum = r * 0.299f + g * 0.587f + b * 0.114f
+                            val chroma = max(r, max(g, b)) - min(r, min(g, b))
+                            if (!block.isDarkBubble && lum > 236f && chroma <= 10) Color.White else Color(rawBg)
+                        }
                         val boxBackground = when {
                             isSubtitleMode -> Color.Black.copy(alpha = 0.85f)
                             bubbleStyle == "Koyu Zemin" -> Color(0xFF111111).copy(alpha = userAlpha)
-                            block.backgroundColor != null -> Color(block.backgroundColor).copy(alpha = userAlpha)
+                            resolvedBgColor != null -> resolvedBgColor.copy(alpha = userAlpha)
                             block.isDarkBubble -> Color(0xFF111111).copy(alpha = userAlpha)
                             else -> Color.White.copy(alpha = userAlpha)
                         }
@@ -2529,12 +2636,13 @@ fun ReaderPageContainer(
                         val placedBottomDp = placed.topDp + placed.heightDp
 
                         val hasRealMaskBitmap = validMasked != null
-                        val isPlacedExpanded = placed.fallbackSourceBounds != null ||
-                            !hasValidBubble ||
-                            placedLeftDp < bubbleLeftDp - 2.dp ||
-                            placedTopDp < bubbleTopDp - 2.dp ||
-                            placedRightDp > bubbleRightDp + 2.dp ||
-                            placedBottomDp > bubbleBottomDp + 2.dp
+                        val spilledBeyondBubble = !hasValidBubble ||
+                            placedLeftDp < bubbleLeftDp - 4.dp ||
+                            placedTopDp < bubbleTopDp - 4.dp ||
+                            placedRightDp > bubbleRightDp + 4.dp ||
+                            placedBottomDp > bubbleBottomDp + 4.dp
+                        val isPlacedExpanded = spilledBeyondBubble ||
+                            (placed.fallbackSourceBounds != null && !(hasRealMaskBitmap && hasValidBubble && block.isBubble))
 
                         val isOvalFallback = !isSubtitleMode && !isRectangularBox &&
                             (contour == null || !contour.isUsable)
@@ -2549,17 +2657,34 @@ fun ReaderPageContainer(
                         } else {
                             2f
                         }
+                        // When a real masked bitmap already erased the original text inside the bubble,
+                        // keep the Layer 1 fill strictly within the separated placement bounds and never
+                        // trigger the 1.50x oval corner bloat that paints over neighboring bubbles/art.
+                        val useTrimmedPlacedBg = hasRealMaskBitmap &&
+                            hasValidBubble &&
+                            block.isBubble &&
+                            bubbleStyle == "Doğal Balon" &&
+                            contour == null &&
+                            !isPlacedExpanded
+                        val bgBubbleL = if (useTrimmedPlacedBg) placedLeftDp.value else bubbleLeftDp.value
+                        val bgBubbleT = if (useTrimmedPlacedBg) placedTopDp.value else bubbleTopDp.value
+                        val bgBubbleR = if (useTrimmedPlacedBg) placedRightDp.value else bubbleRightDp.value
+                        val bgBubbleB = if (useTrimmedPlacedBg) placedBottomDp.value else bubbleBottomDp.value
+                        val bgAnchorL = if (useTrimmedPlacedBg) placedLeftDp.value else anchorLeftDp.value
+                        val bgAnchorT = if (useTrimmedPlacedBg) placedTopDp.value else anchorTopDp.value
+                        val bgAnchorR = if (useTrimmedPlacedBg) placedRightDp.value else anchorRightDp.value
+                        val bgAnchorB = if (useTrimmedPlacedBg) placedBottomDp.value else anchorBottomDp.value
                         val resolvedBoundsDp = resolveOverlayBackgroundBoundsDp(
                             isSubtitleMode = isSubtitleMode,
-                            isOvalFallback = isOvalFallback,
-                            anchorLeftDp = anchorLeftDp.value,
-                            anchorTopDp = anchorTopDp.value,
-                            anchorRightDp = anchorRightDp.value,
-                            anchorBottomDp = anchorBottomDp.value,
-                            bubbleLeftDp = bubbleLeftDp.value,
-                            bubbleTopDp = bubbleTopDp.value,
-                            bubbleRightDp = bubbleRightDp.value,
-                            bubbleBottomDp = bubbleBottomDp.value,
+                            isOvalFallback = isOvalFallback && !hasRealMaskBitmap,
+                            anchorLeftDp = bgAnchorL,
+                            anchorTopDp = bgAnchorT,
+                            anchorRightDp = bgAnchorR,
+                            anchorBottomDp = bgAnchorB,
+                            bubbleLeftDp = bgBubbleL,
+                            bubbleTopDp = bgBubbleT,
+                            bubbleRightDp = bgBubbleR,
+                            bubbleBottomDp = bgBubbleB,
                             placedLeftDp = placedLeftDp.value,
                             placedTopDp = placedTopDp.value,
                             placedRightDp = placedRightDp.value,
@@ -2589,10 +2714,18 @@ fun ReaderPageContainer(
                             isRectangularBox,
                             isSubtitleMode,
                             isFloatingHaloText,
+                            hasValidBubble,
+                            bubbleLeftDp,
+                            bubbleTopDp,
+                            bubbleRightDp,
+                            bubbleBottomDp,
+                            boxLeft,
+                            boxTop,
                             boxWidth,
                             boxHeight,
                             coordinateScaleX,
-                            coordinateScaleY
+                            coordinateScaleY,
+                            density
                         ) {
                             if (!isFloatingHaloText && contour != null && contour.isUsable && !isRectangularBox && !isSubtitleMode) {
                                 val bubbleRect = if (hasValidBubble) {
@@ -2693,9 +2826,9 @@ fun ReaderPageContainer(
 
                     // Katman 2: metinler ve kırpılmış orijinal görseller,
                     // zeminlerin üstünde.
-                    placedOverlays.forEach { placed ->
+                    placedOverlays.forEachIndexed { placedIndex, placed ->
                         val block = placed.block
-                        key("$pageIndex:${block.boundingBox}:${block.originalText}") {
+                        key("$pageIndex:$placedIndex:${block.boundingBox}:${block.originalText}") {
                         val overlayKey = "$pageIndex:${block.boundingBox}:${block.originalText}:${placed.showOriginalFallback}"
                         val isPeekHidden = peekHiddenStates[overlayKey] ?: placed.showOriginalFallback
                         val isSubtitleMode = bubbleStyle == "Alt Yazı (Şeffaf)"
@@ -2853,8 +2986,12 @@ fun ReaderPageContainer(
                                 bubbleStyle = bubbleStyle
                             )
                             val textColor = when {
-                                isSubtitleMode || bubbleStyle == "Koyu Zemin" || block.isDarkBubble -> Color.White
-                                block.backgroundColor != null -> contrastingTextColor(block.backgroundColor)
+                                isSubtitleMode || bubbleStyle == "Koyu Zemin" -> Color.White
+                                block.backgroundColor != null -> contrastingTextColor(
+                                    block.backgroundColor,
+                                    effectiveAlpha = if (block.isDarkBubble || validMasked != null) 1f else userAlpha
+                                )
+                                block.isDarkBubble -> Color.White
                                 else -> Color.Black
                             }
                             val haloStrokeColor = if (isFloatingHaloText) {
@@ -2862,8 +2999,7 @@ fun ReaderPageContainer(
                             } else null
                             val textShadowColor = if (isSubtitleMode) Color.Black.copy(alpha = 0.55f) else null
                             val drawContour = (layoutResult.bubbleTextLayout?.contourProfile
-                                ?: placed.contourProfile
-                                ?: block.contourProfile)?.takeIf { it.isUsable }
+                                ?: placed.contourProfile)?.takeIf { it.isUsable }
                             val drawIsRectangularBox = resolveDrawIsRectangularBox(
                                 isBubble = block.isBubble,
                                 bubbleBox = block.bubbleBox,
@@ -2972,11 +3108,8 @@ fun ReaderPageContainer(
                                     val textPaint = bubbleLayout?.let { layoutResult.bubbleTextPaint }
                                         ?: staticLayout?.paint
                                         ?: return@Canvas
-                                    textPaint.isFakeBoldText = placed.boldBoost
+                                    textPaint.isFakeBoldText = false
                                     val saveCount = nativeCanvas.save()
-                                    if (fallbackContourClipPath != null) {
-                                        nativeCanvas.clipPath(fallbackContourClipPath)
-                                    }
                                     nativeCanvas.translate(
                                         transform.translateX,
                                         transform.translateY

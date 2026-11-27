@@ -50,16 +50,24 @@ class PageFontHarmonizerTest {
     }
 
     @Test
-    fun `two-bubble page anchors to the denser bubble instead of averaging with the outlier`() {
-        val samples = listOf(
+    fun `two-bubble page anchors when within 45 percent ratio and softens extreme outliers`() {
+        val closeSamples = listOf(
+            PageFontHarmonizer.BubbleSample(11f, "5 Şınav Daha Yapabilirsen Sana Bir Öpücük Vereceğim", true, true),
+            PageFontHarmonizer.BubbleSample(15f, "Arsa ne diyorsunuz?", true, true)
+        )
+        val closeBase = PageFontHarmonizer.computePageBaselineSp(closeSamples)
+        assertNotNull(closeBase)
+        assertEquals(11f, closeBase!!, 0.01f)
+
+        val extremeSamples = listOf(
             PageFontHarmonizer.BubbleSample(11f, "5 Şınav Daha Yapabilirsen Sana Bir Öpücük Vereceğim", true, true),
             PageFontHarmonizer.BubbleSample(19f, "Arsa ne diyorsunuz?", true, true)
         )
-        val base = PageFontHarmonizer.computePageBaselineSp(samples)
-        assertNotNull(base)
-        assertEquals(11f, base!!, 0.01f)
-        val cap = PageFontHarmonizer.harmonizedCapSp(19f, "Arsa ne diyorsunuz?", base)
+        val extremeBase = PageFontHarmonizer.computePageBaselineSp(extremeSamples)
+        assertNotNull(extremeBase)
+        assertEquals(15f, extremeBase!!, 0.01f)
+        val cap = PageFontHarmonizer.harmonizedCapSp(19f, "Arsa ne diyorsunuz?", extremeBase)
         assertNotNull(cap)
-        assertEquals(11f * 1.15f, cap!!, 0.01f)
+        assertEquals(15f * 1.15f, cap!!, 0.01f)
     }
 }

@@ -543,4 +543,126 @@ class PpOcrV5EngineTest {
         if (masked !== bmp) masked.recycle()
         bmp.recycle()
     }
+
+    @Test
+    fun `isColoredOrGradientRegion ignores neutral cream bubbles and paintGradientMatchedInterior avoids zebra stripes`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val service = TranslationService(
+            correctionDao = object : TranslationCorrectionDao {
+                override suspend fun getCorrectionForText(originalText: String, targetLang: String): TranslationCorrectionEntity? = null
+                override suspend fun insertCorrection(correction: TranslationCorrectionEntity) {}
+                override suspend fun deleteCorrection(id: Int) {}
+                override suspend fun deleteCorrectionByText(originalText: String) {}
+                override fun getAllCorrections(): Flow<List<TranslationCorrectionEntity>> = flowOf(emptyList())
+                override suspend fun clearAll() {}
+            },
+            context = context
+        )
+
+        val creamBmp = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.rgb(240, 238, 234))
+            // Single black hair/outline streak on one border pixel
+            for (y in 40..48) setPixel(20, y, Color.BLACK)
+        }
+        assertFalse(
+            "Neutral cream bubble must not trigger gradient masking",
+            service.isColoredOrGradientRegion(
+                bitmap = creamBmp,
+                maskRect = RectF(20f, 20f, 100f, 100f),
+                maskColor = Color.rgb(240, 238, 234),
+                isDarkBubble = false
+            )
+        )
+        creamBmp.recycle()
+
+        // Gradient bubble with black border and a dark hair streak touching side edge must stay smooth (no zebra band)
+        val gradBmp = Bitmap.createBitmap(160, 160, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 160) {
+            val lum = (160 + (60 * y) / 159f).toInt()
+            for (x in 0 until 160) {
+                val isBorder = x < 16 || x >= 144 || y < 16 || y >= 144
+                val isHairArtifact = y in 74..78 && x in 16..24
+                gradBmp.setPixel(x, y, if (isBorder || isHairArtifact) Color.BLACK else Color.rgb(lum - 20, lum, lum + 20))
+            }
+        }
+        val bubbleBox = Rect(16, 16, 144, 144)
+        val maskRect = RectF(22f, 30f, 138f, 130f)
+        val outBmp = gradBmp.copy(Bitmap.Config.ARGB_8888, true)
+        service.paintGradientMatchedInterior(
+            canvas = Canvas(outBmp),
+            sourceBitmap = gradBmp,
+            maskRect = maskRect,
+            bubbleBox = bubbleBox,
+            isDarkBubble = false,
+            fallbackColor = Color.rgb(170, 190, 210)
+        )
+        for (y in 35..125) {
+            val px = outBmp.getPixel(80, y)
+            assertTrue("Painted gradient row y=$y must not turn into dark zebra band", Color.green(px) >= 140)
+        }
+        outBmp.recycle()
+        gradBmp.recycle()
+    }
+
+    @Test
+    fun `maskOriginalTextOnBitmap skips giant auxBox outside bubbleBox`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val service = TranslationService(
+            correctionDao = object : TranslationCorrectionDao {
+                override suspend fun getCorrectionForText(originalText: String, targetLang: String): TranslationCorrectionEntity? = null
+                override suspend fun insertCorrection(correction: TranslationCorrectionEntity) {}
+                override suspend fun deleteCorrection(id: Int) {}
+                override suspend fun deleteCorrectionByText(originalText: String) {}
+                override fun getAllCorrections(): Flow<List<TranslationCorrectionEntity>> = flowOf(emptyList())
+                override suspend fun clearAll() {}
+            },
+            context = context
+        )
+
+        val bmp = Bitmap.createBitmap(400, 400, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.rgb(60, 80, 110)) // panel artwork background
+            val whitePaint = Paint().apply { color = Color.WHITE }
+            Canvas(this).drawRect(40f, 40f, 160f, 140f, whitePaint)
+        }
+        val block = TextBlockObj(
+            originalText = "HI",
+            translatedText = "SELAM",
+            boundingBox = Rect(60, 65, 140, 115),
+            bubbleBox = Rect(40, 40, 160, 140),
+            isBubble = true,
+            isDarkBubble = false,
+            backgroundColor = Color.WHITE
+        )
+        // Giant false SFX auxBox touching bubble edge (mostly outside over artwork)
+        val giantAux = Rect(150, 50, 380, 360)
+        val maskedResult = service.maskOriginalTextOnBitmap(bmp, listOf(block), auxBoxes = listOf(giantAux))
+        val masked = maskedResult.bitmap
+        val artworkPx = masked.getPixel(280, 240)
+        assertEquals(
+            "Panel artwork outside bubbleBox must never be whited out by auxBox",
+            Color.rgb(60, 80, 110),
+            artworkPx
+        )
+        if (masked !== bmp) masked.recycle()
+        bmp.recycle()
+    }
+
+    @Test
+    fun `sharpenLineBitmapForOcr leaves high-contrast normal text gentle without blowing out edges`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val engine = PpOcrV5Engine(context, PpOcrV5Engine.Variant.ENGLISH_ONLY)
+
+        val crisp = Bitmap.createBitmap(80, 24, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.rgb(245, 245, 245))
+            val p = Paint().apply { color = Color.rgb(30, 30, 30) }
+            Canvas(this).drawRect(12f, 6f, 20f, 18f, p)
+        }
+        val out = engine.sharpenLineBitmapForOcr(crisp)
+        val bgPx = Color.red(out.getPixel(4, 4))
+        val inkPx = Color.red(out.getPixel(16, 12))
+        assertTrue("Background should remain close to original ($bgPx)", bgPx in 240..255)
+        assertTrue("Ink core should remain dark ($inkPx)", inkPx <= 40)
+        if (out !== crisp) out.recycle()
+        crisp.recycle()
+    }
 }

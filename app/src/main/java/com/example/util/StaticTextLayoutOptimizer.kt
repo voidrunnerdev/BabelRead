@@ -128,8 +128,6 @@ object StaticTextLayoutOptimizer {
             setText(cleanText)
         }
 
-        val aspectRatio = (targetWidthPx / targetHeightPx).coerceIn(0.25f, 4.0f)
-
         fun measureCandidate(candidateSp: Float): Pair<OptimizedLayoutResult, Float> {
             val textSizePx = spToPx(candidateSp)
             require(textSizePx.isFinite() && textSizePx > 0f) {
@@ -173,8 +171,9 @@ object StaticTextLayoutOptimizer {
             val lastLineW = if (layout.lineCount > 1) layout.getLineWidth(layout.lineCount - 1) else 0f
 
             val edgeWidthRatio = if (isOvalBubble && layout.lineCount > 1) {
-                val widePenalty = ((aspectRatio - 0.75f) / 1.75f).coerceIn(0f, 1f)
-                (0.94f - widePenalty * 0.16f).coerceIn(0.78f, 0.94f)
+                val verticalFill = (totalH / targetHeightPx).coerceIn(0f, 1f)
+                val edgeY = (verticalFill * 0.65f).coerceIn(0f, 0.82f)
+                kotlin.math.sqrt((1f - edgeY * edgeY).coerceAtLeast(0.01f)).coerceIn(0.84f, 0.96f)
             } else {
                 1.0f
             }
@@ -199,21 +198,26 @@ object StaticTextLayoutOptimizer {
                     var bi = lineEnd - 1
                     while (bi >= 0 && !cleanText[bi].isWhitespace()) {
                         if (cleanText[bi] == TurkishSyllabifier.SOFT_HYPHEN) wordHasSoftHyphen = true
-                        else if (cleanText[bi].isLetter() && lettersBefore < 2) lettersBefore++
+                        else if (cleanText[bi].isLetter()) lettersBefore++
                         bi--
                     }
                     var lettersAfter = 0
                     var ai = lineEnd
                     while (ai < cleanText.length && !cleanText[ai].isWhitespace()) {
                         if (cleanText[ai] == TurkishSyllabifier.SOFT_HYPHEN) wordHasSoftHyphen = true
-                        else if (cleanText[ai].isLetter() && lettersAfter < 2) lettersAfter++
+                        else if (cleanText[ai].isLetter()) lettersAfter++
                         ai++
                     }
+                    val totalWordLetters = lettersBefore + lettersAfter
+                    // Tiresiz kelime ortası harf doğramalarını (ör. "HAY / IR", "GEN / Ç", "OLM / ALI")
+                    // kesin olarak reddet; yalnızca soft-hyphen taşımayan çok uzun (>=10 harf) kelimelerde
+                    // son çare olarak >=3 harf kuralıyla izin ver.
                     if (!allowBrokenWords ||
-                        (isTurkishLocale && wordHasSoftHyphen) ||
-                        lettersBefore < 2 ||
-                        lettersAfter < 2 ||
-                        layout.getLineWidth(line) < targetWidthPx * 0.55f
+                        (isTurkishLocale && (wordHasSoftHyphen || totalWordLetters < 10)) ||
+                        totalWordLetters < 8 ||
+                        lettersBefore < 3 ||
+                        lettersAfter < 3 ||
+                        layout.getLineWidth(line) < targetWidthPx * 0.72f
                     ) {
                         hasIllegalLineBreak = true
                         break

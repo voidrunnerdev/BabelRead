@@ -65,7 +65,7 @@ object BubbleTextLineFitter {
     private const val WIDTH_SAFETY = 0.985f
     private const val FIT_EPSILON = 0.5f
     private const val MAX_DP_TOKENS = 140
-    private const val HYPHEN_PENALTY = 150.0f
+    private const val HYPHEN_PENALTY = 400.0f
     private const val ORPHAN_PENALTY = 1.50f
     private const val CONJUNCTION_PENALTY = 250.0f
     private const val HOURGLASS_PENALTY = 0.85f
@@ -266,6 +266,9 @@ object BubbleTextLineFitter {
                     continue
                 }
                 BreakResult.Blocked -> {
+                    if (envelope.shape.kind == EnvelopeShapeKind.CONTOUR_SCANLINE) {
+                        continue
+                    }
                     return Attempt(rejection = BubbleTextRejection.NO_BREAK_OPPORTUNITY)
                 }
                 is BreakResult.Success -> {
@@ -340,7 +343,10 @@ object BubbleTextLineFitter {
             val span = spans[index]
             val bandTop = blockTop + index * lineHeight
             val glyphTop = bandTop + (lineHeight - textHeight) / 2f
-            val centeredLeft = span.centerX - line.widthPx / 2f
+            // Anchor lines to the bubble's optical vertical axis so notched bubbles don't zigzag,
+            // shifting laterally only when a contour wall requires it.
+            val targetCenterX = (envelope.centerX * 0.70f + span.centerX * 0.30f)
+            val centeredLeft = targetCenterX - line.widthPx / 2f
             val maxLeft = (span.rightPx - line.widthPx).coerceAtLeast(span.leftPx)
             val safeLeft = centeredLeft.coerceIn(span.leftPx, maxLeft)
             fittedLines += BubbleTextLine(
@@ -650,16 +656,8 @@ object BubbleTextLineFitter {
             }
         }
 
-        var bestL = -1
-        var bestCost = inf
-        for (l in 1..maxL) {
-            if (dp[l][n] < bestCost) {
-                bestCost = dp[l][n]
-                bestL = l
-            }
-        }
-        val targetLines = bestL
-        if (targetLines <= 0) return null
+        if (!dp[maxL][n].isFinite() || dp[maxL][n] >= inf) return null
+        val targetLines = maxL
 
         val result = ArrayList<DraftLine>(targetLines)
         var curJ = n
@@ -795,15 +793,16 @@ object BubbleTextLineFitter {
             rawSlice.isNotEmpty() &&
             rawSlice.last().isLetter() &&
             paragraph[brokenEnd].isLetter()
-        val textWithHyphen = if (splitsMidWord) "$rawSlice-" else rawSlice
-        val widthWithHyphen = measurer.measureWidth(textWithHyphen, textSizePx)
-        return if (splitsMidWord && widthWithHyphen.isFinite() && widthWithHyphen <= widthLimit + FIT_EPSILON) {
-            LineBreakStep(brokenEnd, textWithHyphen, widthWithHyphen)
-        } else {
-            val width = measurer.measureWidth(rawSlice, textSizePx)
-            if (!width.isFinite() || width > widthLimit + FIT_EPSILON) return null
-            LineBreakStep(brokenEnd, rawSlice, width)
+        if (splitsMidWord) {
+            // Never split mid-word without a visible hyphen (prevents "HAY / IR", "GEN / Ç").
+            val textWithHyphen = "$rawSlice-"
+            val widthWithHyphen = measurer.measureWidth(textWithHyphen, textSizePx)
+            if (!widthWithHyphen.isFinite() || widthWithHyphen > widthLimit + FIT_EPSILON) return null
+            return LineBreakStep(brokenEnd, textWithHyphen, widthWithHyphen)
         }
+        val width = measurer.measureWidth(rawSlice, textSizePx)
+        if (!width.isFinite() || width > widthLimit + FIT_EPSILON) return null
+        return LineBreakStep(brokenEnd, rawSlice, width)
     }
 
     private fun findSyllableBreak(
@@ -844,15 +843,31 @@ object BubbleTextLineFitter {
         textSizePx: Float,
         measurer: BubbleTextMeasurer
     ): Int {
-        val codePointCount = paragraph.codePointCount(start, paragraph.length)
-        if (codePointCount <= 3) return -1
+        // Keep short words (< 8 letters, including punctuation-prefixed words like ""Hayır!"") intact
+        // and bound `high` strictly to the current word rather than the rest of the paragraph.
+        var letterStart = start
+        while (letterStart < paragraph.length && !paragraph[letterStart].isLetter() && !paragraph[letterStart].isWhitespace()) {
+            letterStart++
+        }
+        var wordEnd = letterStart
+        while (wordEnd < paragraph.length && (paragraph[wordEnd].isLetter() || paragraph[wordEnd] == '\'' || paragraph[wordEnd] == '’')) {
+            wordEnd++
+        }
+        val wordCodePoints = paragraph.codePointCount(letterStart, wordEnd)
+        if (wordCodePoints < 8) return -1
 
-        var low = 2
-        var high = codePointCount - 2
+        val leadingPunctCount = paragraph.codePointCount(start, letterStart)
+        var low = leadingPunctCount + 3
+        var high = leadingPunctCount + wordCodePoints - 3
+        if (low > high) return -1
         var bestEnd = -1
         while (low <= high) {
             val mid = low + (high - low) / 2
             val end = paragraph.offsetByCodePoints(start, mid)
+            if (end < paragraph.length && (paragraph[end] == '\'' || paragraph[end] == '’')) {
+                high = mid - 1
+                continue
+            }
             val candidate = paragraph.substring(start, end).trimEnd()
             val splitsMidWord = end < paragraph.length &&
                 candidate.isNotEmpty() &&

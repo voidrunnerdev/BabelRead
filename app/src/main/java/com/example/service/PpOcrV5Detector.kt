@@ -396,7 +396,7 @@ class PpOcrV5Detector(context: Context) {
                 kept.add(DetectedLine(Rect(candRect), candidate.confidence))
             }
         }
-        return kept.sortedWith(compareBy<DetectedLine> { it.rect.top }.thenBy { it.rect.left })
+        return sortDetectedLinesInReadingOrder(kept)
     }
 
     private suspend fun runDetection(
@@ -782,5 +782,31 @@ internal object PpOcrV5DetPostProcess {
         val secondArea = (second.right - second.left) * (second.bottom - second.top)
         val union = firstArea + secondArea - intersection
         return if (union <= 0f) 0f else intersection / union
+    }
+
+    private fun sortDetectedLinesInReadingOrder(
+        lines: List<DetectedLine>
+    ): List<DetectedLine> {
+        if (lines.size <= 1) return lines
+        val byY = lines.sortedWith(compareBy<DetectedLine> { it.rect.centerY() }.thenBy { it.rect.left })
+        val rows = ArrayList<MutableList<DetectedLine>>()
+        for (line in byY) {
+            val cy = line.rect.exactCenterY()
+            val h = line.rect.height().coerceAtLeast(1).toFloat()
+            val targetRow = rows.lastOrNull()?.takeIf { row ->
+                var sumCy = 0f
+                var sumH = 0f
+                for (item in row) {
+                    sumCy += item.rect.exactCenterY()
+                    sumH += item.rect.height().coerceAtLeast(1)
+                }
+                val avgCy = sumCy / row.size
+                val avgH = sumH / row.size
+                val minH = kotlin.math.min(avgH, h).coerceAtLeast(1f)
+                kotlin.math.abs(cy - avgCy) <= minH * 0.50f
+            }
+            if (targetRow != null) targetRow.add(line) else rows.add(mutableListOf(line))
+        }
+        return rows.flatMap { row -> row.sortedBy { it.rect.left } }
     }
 }

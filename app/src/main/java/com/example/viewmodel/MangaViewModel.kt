@@ -3094,8 +3094,15 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 val isCenterIn = yoloBox.contains(ocr.rect.centerX(), ocr.rect.centerY())
                                 val vDistToTop = kotlin.math.abs(ocr.rect.bottom - yoloBox.top)
                                 val vDistToBottom = kotlin.math.abs(ocr.rect.top - yoloBox.bottom)
-                                val isNearVerticalEdge = (vDistToTop <= yoloBox.height() * 0.28f || vDistToBottom <= yoloBox.height() * 0.28f) &&
-                                    ocr.rect.centerX() in (yoloBox.left - 20)..(yoloBox.right + 20)
+                                val maxEdgeGap = minOf(yoloBox.height() * 0.14f, ocr.rect.height() * 0.75f, 28f)
+                                val belongsToOtherBox = yoloBoxes.any { other ->
+                                    other !== yoloBox && other.contains(ocr.rect.centerX(), ocr.rect.centerY())
+                                }
+                                val isNearVerticalEdge = !belongsToOtherBox &&
+                                    overlap >= 0.05f &&
+                                    interW >= ocr.rect.width() * 0.45f &&
+                                    (vDistToTop <= maxEdgeGap || vDistToBottom <= maxEdgeGap) &&
+                                    ocr.rect.centerX() in yoloBox.left..yoloBox.right
                                 val score = when {
                                     isCenterIn -> overlap + 0.05f
                                     overlap >= 0.25f -> overlap
@@ -3104,10 +3111,11 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                                 }
                                 val currentBestArea = yoloBoxes.getOrNull(bestYoloIdx)?.let {
                                     it.width().toLong() * it.height()
-                                } ?: -1L
+                                } ?: Long.MAX_VALUE
                                 val candidateArea = yoloBox.width().toLong() * yoloBox.height()
+                                // Eşit skorda en içteki (en küçük) balonu tercih et ki bileşik dış kutu komşu balonları yutmasın.
                                 if (score >= 0.20f &&
-                                    (score > bestOverlap || (score == bestOverlap && candidateArea > currentBestArea))
+                                    (score > bestOverlap || (score == bestOverlap && candidateArea < currentBestArea))
                                 ) {
                                     bestOverlap = score
                                     bestYoloIdx = yoloIdx
@@ -3182,11 +3190,17 @@ class MangaViewModel(application: Application) : AndroidViewModel(application) {
                             }
                             val candidateContour = when {
                                 containingBubble != null -> {
-                                    balloonDetections.firstOrNull { yb ->
+                                    (balloonDetections.firstOrNull { yb ->
                                         yb.toPixelRect(bitmap.width, bitmap.height) == bubbleBounds
                                     }?.contourProfile ?: balloonDetections.firstOrNull { yb ->
                                         yb.toPixelRect(bitmap.width, bitmap.height).contains(textBounds.centerX(), textBounds.centerY())
-                                    }?.contourProfile
+                                    }?.contourProfile)?.takeIf { it.isUsable }
+                                        ?: BubbleContourExtractor.detectRectangularFrameFromBitmap(
+                                            bitmap = bitmap,
+                                            bubbleBox = bubbleBounds,
+                                            pageOriginalWidth = bitmap.width.toFloat(),
+                                            pageOriginalHeight = bitmap.height.toFloat()
+                                        )
                                 }
                                 finalIsBubble -> {
                                     FallbackBubbleSupport.resolveNonBalloonContour(
@@ -4805,16 +4819,34 @@ internal object BubbleCandidateMerger {
                     } else {
                         b.bubbleBounds
                     },
-                    contourProfile = a.contourProfile ?: b.contourProfile
+                    contourProfile = if (areaOf(a.bubbleBounds) >= areaOf(b.bubbleBounds)) {
+                        a.contourProfile
+                    } else {
+                        b.contourProfile
+                    }
                 ),
                 lineHeightPx = minOf(first.lineHeightPx, second.lineHeightPx).coerceAtLeast(1f)
             )
         }
 
+        fun fragmentContainedInBubble(inner: Rect, outerBubble: Rect): Boolean {
+            if (inner.isEmpty || outerBubble.isEmpty) return false
+            val interW = (minOf(inner.right, outerBubble.right) - maxOf(inner.left, outerBubble.left)).coerceAtLeast(0)
+            val interH = (minOf(inner.bottom, outerBubble.bottom) - maxOf(inner.top, outerBubble.top)).coerceAtLeast(0)
+            val interArea = interW.toLong() * interH.toLong()
+            val innerArea = areaOf(inner).coerceAtLeast(1L)
+            return interArea >= innerArea * 70L / 100L
+        }
+
         fun tryMerge(firstW: WorkingCandidate, secondW: WorkingCandidate): WorkingCandidate? {
             val a = firstW.candidate
             val b = secondW.candidate
-            if (!sameBalloon(a.bubbleBounds, b.bubbleBounds)) return null
+            val bHasOwnDistinctBubble = b.isBubble && b.bubbleBounds != b.textRect && !sameBalloon(a.bubbleBounds, b.bubbleBounds)
+            val aHasOwnDistinctBubble = a.isBubble && a.bubbleBounds != a.textRect && !sameBalloon(a.bubbleBounds, b.bubbleBounds)
+            val sharesBalloon = sameBalloon(a.bubbleBounds, b.bubbleBounds) ||
+                (a.isBubble && !bHasOwnDistinctBubble && fragmentContainedInBubble(b.textRect, a.bubbleBounds)) ||
+                (b.isBubble && !aHasOwnDistinctBubble && fragmentContainedInBubble(a.textRect, b.bubbleBounds))
+            if (!sharesBalloon) return null
             val lineHeight = minOf(firstW.lineHeightPx, secondW.lineHeightPx).coerceAtLeast(1f)
 
             if (verticalCjkMode) {
@@ -5142,9 +5174,11 @@ internal object BubbleCandidateMerger {
         subBounds: Rect
     ): ContourScanlineProfile? {
         if (profile == null || !profile.isUsable) return null
+        val origW = origBounds.width().toFloat()
         val origH = origBounds.height().toFloat()
+        val subW = subBounds.width().toFloat()
         val subH = subBounds.height().toFloat()
-        if (origH <= 0f || subH <= 0f || profile.rowCount <= 0) return null
+        if (origW <= 0f || origH <= 0f || subW <= 0f || subH <= 0f || profile.rowCount <= 0) return null
 
         val outRows = profile.rowCount.coerceAtLeast(16)
         val lefts = FloatArray(outRows)
@@ -5157,8 +5191,10 @@ internal object BubbleCandidateMerger {
             val y = subBounds.top + subFrac * subH
             val origFrac = ((y - origBounds.top) / origH).coerceIn(0f, 0.9999f)
             val srcRow = (origFrac * profile.rowCount).toInt().coerceIn(0, profile.rowCount - 1)
-            val l = profile.rowLeftFractions[srcRow]
-            val rFrac = profile.rowRightFractions[srcRow]
+            val absL = origBounds.left + profile.rowLeftFractions[srcRow] * origW
+            val absR = origBounds.left + profile.rowRightFractions[srcRow] * origW
+            val l = ((absL - subBounds.left) / subW).coerceIn(0f, 1f)
+            val rFrac = ((absR - subBounds.left) / subW).coerceIn(0f, 1f)
             lefts[r] = l
             rights[r] = rFrac
             if (rFrac > l) {
@@ -5197,7 +5233,7 @@ internal object FallbackBubbleSupport {
             Triple(bBox, score, BubbleCandidateMerger.areaOf(bBox))
         }
         val comparator = compareBy<Triple<Rect, Float, Long>> { it.second }
-            .thenBy { it.third }
+            .thenByDescending { it.third }
         val acceptable = scored.filter { it.second >= 0.35f }
         return acceptable.maxWithOrNull(comparator)?.first
     }
@@ -5234,7 +5270,12 @@ internal object FallbackBubbleSupport {
         if (isNarrationTextBox) {
             return extracted?.takeIf { it.isRectangularLike } ?: rectangularContourProfile()
         }
-        return extracted
+        return extracted ?: BubbleContourExtractor.detectRectangularFrameFromBitmap(
+            bitmap = bitmap,
+            bubbleBox = bubbleBounds,
+            pageOriginalWidth = bitmap.width.toFloat(),
+            pageOriginalHeight = bitmap.height.toFloat()
+        )
     }
 
     fun mergeOcrBlocksWithFallback(

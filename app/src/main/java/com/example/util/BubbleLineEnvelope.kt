@@ -219,14 +219,14 @@ data class BubbleLineEnvelope(
 
     val contentTop: Float
         get() = if (shape.kind == EnvelopeShapeKind.CONTOUR_SCANLINE && contourProfile?.isUsable == true) {
-            max(rawContentTop, bounds.top + contourProfile.topFraction * bounds.height)
+            max(rawContentTop, bounds.top + contourProfile.topFraction * bounds.height + insetY)
         } else {
             rawContentTop
         }
 
     val contentBottom: Float
         get() = if (shape.kind == EnvelopeShapeKind.CONTOUR_SCANLINE && contourProfile?.isUsable == true) {
-            min(rawContentBottom, bounds.top + contourProfile.bottomFraction * bounds.height)
+            min(rawContentBottom, bounds.top + contourProfile.bottomFraction * bounds.height - insetY)
         } else {
             rawContentBottom
         }
@@ -308,20 +308,34 @@ data class BubbleLineEnvelope(
             EnvelopeShapeKind.CONTOUR_SCANLINE -> {
                 val profile = contourProfile ?: return ScanlineSpan(centerX, centerX)
                 if (!profile.isUsable || bounds.height <= 0f) return ScanlineSpan(centerX, centerX)
-                val startRow = floor(((clampedStart - bounds.top) / bounds.height).coerceIn(0f, 0.9999f) * profile.rowCount)
+                // Satır bandının en üst/alt %12'lik boş ascent/descent payını kırparak
+                // kubbe ucundaki tek satırlık daralmanın tüm satırı 0px'e çökertmesini önle.
+                val bandH = (clampedEnd - clampedStart).coerceAtLeast(0f)
+                val trimY = if (bandH > 2f) bandH * 0.12f else 0f
+                val effStart = (clampedStart + trimY).coerceIn(contentTop, contentBottom)
+                val effEnd = (clampedEnd - trimY).coerceIn(effStart, contentBottom)
+                val startRow = floor(((effStart - bounds.top) / bounds.height).coerceIn(0f, 0.9999f) * profile.rowCount)
                     .toInt().coerceIn(profile.firstValidRow, profile.lastValidRow)
-                val endRow = (ceil(((clampedEnd - bounds.top) / bounds.height).coerceIn(0f, 1f) * profile.rowCount).toInt() - 1)
+                val endRow = (ceil(((effEnd - bounds.top) / bounds.height).coerceIn(0f, 1f) * profile.rowCount).toInt() - 1)
                     .coerceIn(startRow, profile.lastValidRow)
+                val minUsableRowWidthPx = min(6f, contentWidth * 0.15f)
                 var maxLeft = contentLeft
                 var minRight = contentRight
+                var validRows = 0
                 for (row in startRow..endRow) {
                     val rowSpan = spanForProfileRow(profile, row)
-                    if (rowSpan.widthPx <= 0f) return ScanlineSpan(centerX, centerX)
+                    if (rowSpan.widthPx < minUsableRowWidthPx) continue
                     if (rowSpan.leftPx > maxLeft) maxLeft = rowSpan.leftPx
                     if (rowSpan.rightPx < minRight) minRight = rowSpan.rightPx
+                    validRows++
                 }
-                if (minRight <= maxLeft) ScanlineSpan(centerX, centerX)
-                else ScanlineSpan(maxLeft, minRight)
+                if (validRows > 0 && (minRight - maxLeft) >= minUsableRowWidthPx) {
+                    ScanlineSpan(maxLeft, minRight)
+                } else {
+                    val midRow = ((startRow + endRow) / 2).coerceIn(profile.firstValidRow, profile.lastValidRow)
+                    val midSpan = spanForProfileRow(profile, midRow)
+                    if (midSpan.widthPx > 0f) midSpan else ScanlineSpan(centerX, centerX)
+                }
             }
             EnvelopeShapeKind.ROUNDED_RECTANGLE -> ScanlineSpan(contentLeft, contentRight)
         }

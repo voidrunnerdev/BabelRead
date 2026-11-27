@@ -340,7 +340,7 @@ class PpOcrV5Engine(
         return if (vertical) {
             lines.sortedByDescending { it.rect.right }
         } else {
-            lines.sortedWith(compareBy<SegmentedTextLine> { it.rect.top }.thenBy { it.rect.left })
+            sortHorizontalLinesInReadingOrder(lines)
         }
     }
 
@@ -382,7 +382,7 @@ class PpOcrV5Engine(
             }
             if (!overlaps) merged.add(det)
         }
-        return merged.sortedWith(compareBy<SegmentedTextLine> { it.rect.top }.thenBy { it.rect.left })
+        return sortHorizontalLinesInReadingOrder(merged)
     }
 
     private fun overlapsExisting(
@@ -638,7 +638,7 @@ class PpOcrV5Engine(
         val lowLum = percentile(2)
         val highLum = percentile(98)
         val span = highLum - lowLum
-        val stretch = span in 16..245
+        val stretch = span in 16..135
         val stretched = if (stretch) {
             val scale = 255f / span.toFloat()
             IntArray(pixels.size) { idx ->
@@ -652,7 +652,7 @@ class PpOcrV5Engine(
             pixels
         }
 
-        val amount = 0.65f
+        val amount = 0.35f
         val outPixels = IntArray(w * h)
         for (y in 0 until h) {
             val y0 = max(0, y - 1) * w
@@ -1223,5 +1223,31 @@ class PpOcrV5Engine(
             Log.e(TAG, "PP-OCRv5 (${variant.name}) model copy failed: ${t.message}", t)
             null
         }
+    }
+
+    private fun sortHorizontalLinesInReadingOrder(
+        lines: List<SegmentedTextLine>
+    ): List<SegmentedTextLine> {
+        if (lines.size <= 1) return lines
+        val byY = lines.sortedWith(compareBy<SegmentedTextLine> { it.rect.centerY() }.thenBy { it.rect.left })
+        val rows = ArrayList<MutableList<SegmentedTextLine>>()
+        for (line in byY) {
+            val cy = line.rect.exactCenterY()
+            val h = line.rect.height().coerceAtLeast(1).toFloat()
+            val targetRow = rows.lastOrNull()?.takeIf { row ->
+                var sumCy = 0f
+                var sumH = 0f
+                for (item in row) {
+                    sumCy += item.rect.exactCenterY()
+                    sumH += item.rect.height().coerceAtLeast(1)
+                }
+                val avgCy = sumCy / row.size
+                val avgH = sumH / row.size
+                val minH = kotlin.math.min(avgH, h).coerceAtLeast(1f)
+                kotlin.math.abs(cy - avgCy) <= minH * 0.50f
+            }
+            if (targetRow != null) targetRow.add(line) else rows.add(mutableListOf(line))
+        }
+        return rows.flatMap { row -> row.sortedBy { it.rect.left } }
     }
 }

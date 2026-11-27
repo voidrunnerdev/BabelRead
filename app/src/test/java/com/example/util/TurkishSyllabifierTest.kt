@@ -70,6 +70,6 @@ class TurkishSyllabifierTest {
         assertTrue("Expected non-empty syllable breaks for İstanbul'da", offsets.isNotEmpty())
         assertTrue("Apostrophe split should be included", offsets.contains(9)) // "İstanbul'" and "da"
         val softHyphenated = TurkishSyllabifier.insertSoftHyphens("Yarın İstanbul'da buluşuruz.")
-        assertTrue(softHyphenated.contains("İstanbul'\u00ADda"))
+        assertTrue(softHyphenated.contains("İstanbul'\u200Bda"))
     }
 }

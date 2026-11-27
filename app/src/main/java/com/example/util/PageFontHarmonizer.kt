@@ -8,7 +8,8 @@ package com.example.util
 object PageFontHarmonizer {
 
     private const val MIN_DIALOGUE_CHARS_FOR_BASELINE = 12
-    private const val MAX_SHOUT_CHARS_EXEMPT = 6
+    private const val MAX_SHOUT_CHARS_EXEMPT = 9
+    private const val MAX_DIALOGUE_CHARS_FOR_BASELINE = 100
     private const val HARMONIZE_TRIGGER_RATIO = 1.18f
     private const val HARMONIZE_CAP_RATIO = 1.15f
     private const val MIN_HARMONIZED_CAP_SP = 10f
@@ -25,27 +26,36 @@ object PageFontHarmonizer {
      * or `null` if fewer than 2 qualifying bubbles exist.
      */
     fun computePageBaselineSp(samples: List<BubbleSample>): Float? {
-        val sizes = samples
+        val normalPool = samples
             .asSequence()
             .filter {
                 it.isNormalSpeechBubble &&
                     it.fitsInside &&
                     it.fontSizeSp.isFinite() &&
-                    it.fontSizeSp > 0f &&
-                    it.text.trim().length >= MIN_DIALOGUE_CHARS_FOR_BASELINE
+                    it.fontSizeSp > 0f
             }
+            .toList()
+
+        val standardSizes = normalPool
+            .filter { it.text.trim().length in MIN_DIALOGUE_CHARS_FOR_BASELINE..MAX_DIALOGUE_CHARS_FOR_BASELINE }
             .map { it.fontSizeSp }
             .sorted()
-            .toList()
-        if (sizes.size < 2) return null
-        // For 2-bubble pages (e.g. a dense 11sp bubble paired with a loose 19sp bubble),
-        // anchor to the denser bubble so the loose one harmonizes cleanly instead of pulling
-        // the midpoint up. For 3+ bubbles, use the lower median.
-        return if (sizes.size == 2) {
-            sizes[0]
-        } else {
-            sizes[(sizes.size - 1) / 2]
+
+        val sizes = when {
+            standardSizes.size >= 2 -> standardSizes
+            standardSizes.size == 1 && normalPool.size >= 2 -> standardSizes
+            else -> normalPool
+                .filter { it.text.trim().length >= MIN_DIALOGUE_CHARS_FOR_BASELINE }
+                .map { it.fontSizeSp }
+                .sorted()
         }
+        if (sizes.isEmpty()) return null
+        if (sizes.size == 1) return sizes[0]
+        if (sizes.size == 2) {
+            return if (sizes[1] > sizes[0] * 1.45f) (sizes[0] + sizes[1]) * 0.5f else sizes[0]
+        }
+        val mid = sizes.size / 2
+        return if (sizes.size % 2 == 1) sizes[mid] else (sizes[mid - 1] + sizes[mid]) * 0.5f
     }
 
     /**
@@ -60,9 +70,11 @@ object PageFontHarmonizer {
         pageBaseSp: Float
     ): Float? {
         if (!currentSp.isFinite() || !pageBaseSp.isFinite() || pageBaseSp <= 0f) return null
-        val trimmed = text.trim()
-        val isShortShout = trimmed.length <= MAX_SHOUT_CHARS_EXEMPT &&
-            (trimmed.endsWith("!") || trimmed.endsWith("!?"))
+        val trimmed = text.trim().trim('\"', '\'', '“', '”', '‘', '’', '(', ')')
+        val wordCount = trimmed.split(Regex("\\s+")).count { it.isNotEmpty() }
+        val isShortShout = wordCount == 1 &&
+            trimmed.length <= MAX_SHOUT_CHARS_EXEMPT &&
+            (trimmed.endsWith("!") || trimmed.endsWith("!?") || trimmed.endsWith("?!"))
         if (isShortShout) return null
         if (currentSp <= pageBaseSp * HARMONIZE_TRIGGER_RATIO) return null
         val cap = (pageBaseSp * HARMONIZE_CAP_RATIO).coerceAtLeast(MIN_HARMONIZED_CAP_SP)

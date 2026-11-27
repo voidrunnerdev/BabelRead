@@ -1250,10 +1250,14 @@ class TranslationService(
                         ) < minColumnWidth * 0.6f
                         val sideBySideColumns = current.isVerticalCjkColumn &&
                             candidate.isVerticalCjkColumn && !sameColumn
-                        val currentFirst = if (sideBySideColumns) {
-                            current.block.rect.right >= candidate.block.rect.right
-                        } else {
-                            current.block.rect.top <= candidate.block.rect.top
+                        val rowOverlapY = min(current.block.rect.bottom, candidate.block.rect.bottom) -
+                            max(current.block.rect.top, candidate.block.rect.top)
+                        val rowMinH = min(current.block.rect.height(), candidate.block.rect.height()).coerceAtLeast(1)
+                        val sameHorizontalRow = !sideBySideColumns && rowOverlapY >= rowMinH * 0.45f
+                        val currentFirst = when {
+                            sideBySideColumns -> current.block.rect.right >= candidate.block.rect.right
+                            sameHorizontalRow -> current.block.rect.left <= candidate.block.rect.left
+                            else -> current.block.rect.top <= candidate.block.rect.top
                         }
                         current.block = RectAndText(
                             unionRect,
@@ -1355,7 +1359,7 @@ class TranslationService(
             val isTallParent = parentH > parentW * 1.30f
             val verticalCenterDist = kotlin.math.abs(a.exactCenterY() - b.exactCenterY())
             val gapY = if (b.top > a.bottom) b.top - a.bottom else if (a.top > b.bottom) a.top - b.bottom else 0
-            if (isTallParent && (gapY > maxOf(h1, h2) * 0.80f || verticalCenterDist > parentH * 0.35f)) {
+            if (isTallParent && gapY > maxOf(h1, h2) * 1.15f && verticalCenterDist > parentH * 0.38f) {
                 return false
             }
 
@@ -1587,12 +1591,19 @@ class TranslationService(
 
             val bgStartIndex = (sampledLums.size * 0.35f).toInt().coerceIn(0, sampledLums.size - 1)
             val medianLum = sampledLums[sampledLums.size / 2]
-            val darkBackgroundLikely = medianLum < 75f
+            if (innerLums.isNotEmpty()) innerLums.sort()
+            val darkBackgroundLikely = if (innerLums.isNotEmpty()) {
+                innerLums[innerLums.size / 2] < 85f
+            } else {
+                medianLum < 75f
+            }
             val coloredLightTextLikely = if (innerLums.isNotEmpty()) {
-                innerLums.sort()
+                val innerP05 = innerLums[((innerLums.size - 1) * 5) / 100]
                 val innerMedian = innerLums[innerLums.size / 2]
                 val innerP95 = innerLums[((innerLums.size - 1) * 95) / 100]
-                innerMedian < 190f && innerP95 >= 205f &&
+                val hasStrongDarkInk = innerP05 < 55f && (innerMedian - innerP05) >= 60f
+                !hasStrongDarkInk &&
+                    innerMedian < 175f && innerP95 >= 205f &&
                     (innerP95 - innerMedian) >= 42f &&
                     nonWhiteBorderFraction >= 0.45f
             } else false
@@ -1663,7 +1674,8 @@ class TranslationService(
             val p1 = bitmap.getPixel(x, (textRect.top + centerY) / 2)
             val p2 = bitmap.getPixel(x, centerY)
             val p3 = bitmap.getPixel(x, (textRect.bottom + centerY) / 2)
-            if (isBorderPixel(p1) || isBorderPixel(p2) || isBorderPixel(p3)) {
+            val hits = (if (isBorderPixel(p1)) 1 else 0) + (if (isBorderPixel(p2)) 1 else 0) + (if (isBorderPixel(p3)) 1 else 0)
+            if (hits >= 2 || (isBorderPixel(p2) && x > 1 && isBorderPixel(bitmap.getPixel(x - 1, centerY)))) {
                 foundBorderLeft = true
                 break
             }
@@ -1678,7 +1690,8 @@ class TranslationService(
             val p1 = bitmap.getPixel(x, (textRect.top + centerY) / 2)
             val p2 = bitmap.getPixel(x, centerY)
             val p3 = bitmap.getPixel(x, (textRect.bottom + centerY) / 2)
-            if (isBorderPixel(p1) || isBorderPixel(p2) || isBorderPixel(p3)) {
+            val hits = (if (isBorderPixel(p1)) 1 else 0) + (if (isBorderPixel(p2)) 1 else 0) + (if (isBorderPixel(p3)) 1 else 0)
+            if (hits >= 2 || (isBorderPixel(p2) && x < width - 2 && isBorderPixel(bitmap.getPixel(x + 1, centerY)))) {
                 foundBorderRight = true
                 break
             }
@@ -1693,7 +1706,8 @@ class TranslationService(
             val p1 = bitmap.getPixel((textRect.left + centerX) / 2, y)
             val p2 = bitmap.getPixel(centerX, y)
             val p3 = bitmap.getPixel((textRect.right + centerX) / 2, y)
-            if (isBorderPixel(p1) || isBorderPixel(p2) || isBorderPixel(p3)) {
+            val hits = (if (isBorderPixel(p1)) 1 else 0) + (if (isBorderPixel(p2)) 1 else 0) + (if (isBorderPixel(p3)) 1 else 0)
+            if (hits >= 2 || (isBorderPixel(p2) && y > 1 && isBorderPixel(bitmap.getPixel(centerX, y - 1)))) {
                 foundBorderTop = true
                 break
             }
@@ -1708,7 +1722,8 @@ class TranslationService(
             val p1 = bitmap.getPixel((textRect.left + centerX) / 2, y)
             val p2 = bitmap.getPixel(centerX, y)
             val p3 = bitmap.getPixel((textRect.right + centerX) / 2, y)
-            if (isBorderPixel(p1) || isBorderPixel(p2) || isBorderPixel(p3)) {
+            val hits = (if (isBorderPixel(p1)) 1 else 0) + (if (isBorderPixel(p2)) 1 else 0) + (if (isBorderPixel(p3)) 1 else 0)
+            if (hits >= 2 || (isBorderPixel(p2) && y < height - 2 && isBorderPixel(bitmap.getPixel(centerX, y + 1)))) {
                 foundBorderBottom = true
                 break
             }
@@ -1791,10 +1806,13 @@ class TranslationService(
             if (!isBubbleBlock && block.backgroundColor == null) continue
             val maskColor = if (block.backgroundColor != null) {
                 val c = block.backgroundColor
-                val lum = (Color.red(c) * 0.299 + Color.green(c) * 0.587 + Color.blue(c) * 0.114)
+                val cr = Color.red(c)
+                val cg = Color.green(c)
+                val cb = Color.blue(c)
+                val lum = (cr * 0.299 + cg * 0.587 + cb * 0.114)
+                val chroma = max(cr, max(cg, cb)) - min(cr, min(cg, cb))
                 when {
-                    lum > 215 -> Color.WHITE
-                    block.isDarkBubble && lum < 30 -> Color.rgb(18, 18, 18)
+                    lum > 236 && chroma <= 10 -> Color.WHITE
                     else -> c
                 }
             } else if (block.isDarkBubble) {
@@ -1843,14 +1861,41 @@ class TranslationService(
 
             if (maskRight > maskLeft && maskBottom > maskTop) {
                 val maskRect = RectF(maskLeft, maskTop, maskRight, maskBottom)
-                val maskArea = (maskRect.width() * maskRect.height()).coerceAtLeast(1f)
-                val coversText = (protectedReaches + otherTextReaches).any { other ->
+                // Bitişik balonlarda maskeyi tamamen iptal edip orijinal İngilizce yazıyı bırakmak
+                // yerine önce komşunun gerçek metin sınırından güvenli şekilde kırp.
+                val protectedRawBoxes = protectedBlocks
+                    .filter { it !== block }
+                    .map { RectF(it.boundingBox) }
+                for (nb in protectedRawBoxes) {
                     val inter = RectF()
-                    if (!inter.setIntersect(maskRect, other)) return@any false
-                    val interArea = inter.width() * inter.height()
-                    val otherArea = (other.width() * other.height()).coerceAtLeast(1f)
-                    interArea > maskArea * 0.25f || interArea > otherArea * 0.35f
+                    if (!inter.setIntersect(maskRect, nb)) continue
+                    val ownRect = RectF(textRect)
+                    if (RectF.intersects(ownRect, nb)) continue
+                    val dx = maskRect.centerX() - nb.centerX()
+                    val dy = maskRect.centerY() - nb.centerY()
+                    if (abs(dx) >= abs(dy)) {
+                        if (dx < 0f && nb.left - 2f > ownRect.left + 4f) {
+                            maskRect.right = min(maskRect.right, nb.left - 2f)
+                        } else if (dx >= 0f && nb.right + 2f < ownRect.right - 4f) {
+                            maskRect.left = max(maskRect.left, nb.right + 2f)
+                        }
+                    } else {
+                        if (dy < 0f && nb.top - 2f > ownRect.top + 4f) {
+                            maskRect.bottom = min(maskRect.bottom, nb.top - 2f)
+                        } else if (dy >= 0f && nb.bottom + 2f < ownRect.bottom - 4f) {
+                            maskRect.top = max(maskRect.top, nb.bottom + 2f)
+                        }
+                    }
                 }
+                val maskArea = (maskRect.width() * maskRect.height()).coerceAtLeast(1f)
+                val coversText = maskRect.width() <= 2f || maskRect.height() <= 2f ||
+                    protectedRawBoxes.any { other ->
+                        val inter = RectF()
+                        if (!inter.setIntersect(maskRect, other)) return@any false
+                        val interArea = inter.width() * inter.height()
+                        val otherArea = (other.width() * other.height()).coerceAtLeast(1f)
+                        interArea > maskArea * 0.30f || interArea > otherArea * 0.35f
+                    }
                 if (!coversText) {
                     val useGradientMask = isColoredOrGradientRegion(
                         bitmap = sourceBitmap,
@@ -1858,6 +1903,8 @@ class TranslationService(
                         maskColor = maskColor,
                         isDarkBubble = block.isDarkBubble
                     )
+                    var contourPainted = false
+                    var contourCoversTextRect = false
                     // For real speech bubbles, paint the EDT-extracted safe interior polygon first
                     // so stray edge glyphs (e.g. "NED", "EEL LIKE" extending outside the OCR box)
                     // are cleanly erased without touching the inked bubble border.
@@ -1930,28 +1977,68 @@ class TranslationService(
                                     }
                                     canvas.drawPath(contourPath, featheredPaint)
                                 }
+                                contourPainted = true
+                                val textF = RectF(textRect)
+                                val textArea = (textF.width() * textF.height()).coerceAtLeast(1f)
+                                val rowH = bH / rowCountF
+                                var coveredArea = 0f
+                                var allRowsCoverWidth = true
+                                var hitAnyRow = false
+                                for (r in firstR..lastR) {
+                                    val rTop = clampedBubble.top + r * rowH
+                                    val rBot = rTop + rowH
+                                    val ovTop = max(textF.top, rTop)
+                                    val ovBot = min(textF.bottom, rBot)
+                                    if (ovBot <= ovTop) continue
+                                    hitAnyRow = true
+                                    val rL = clampedBubble.left + cleanContour.rowLeftFractions[r] * bW
+                                    val rR = clampedBubble.left + cleanContour.rowRightFractions[r] * bW
+                                    val ovL = max(textF.left, rL)
+                                    val ovR = min(textF.right, rR)
+                                    if (ovR > ovL) coveredArea += (ovR - ovL) * (ovBot - ovTop)
+                                    if (rL > textF.left + 2f || rR < textF.right - 2f) allRowsCoverWidth = false
+                                }
+                                val vertCovered = textF.top >= contourBounds.top - 1f && textF.bottom <= contourBounds.bottom + 1f
+                                contourCoversTextRect = hitAnyRow && vertCovered &&
+                                    (allRowsCoverWidth || coveredArea >= textArea * 0.96f)
                                 val paintedContourRect = Rect()
                                 contourBounds.round(paintedContourRect)
                                 paintedRects.add(paintedContourRect)
                             }
                         }
                     }
-                    if (useGradientMask) {
-                        paintGradientMatchedInterior(
-                            canvas = canvas,
-                            sourceBitmap = sourceBitmap,
-                            maskRect = maskRect,
-                            bubbleBox = if (hasDistinctBubbleBounds) bubbleBox else Rect(),
-                            isDarkBubble = block.isDarkBubble,
-                            fallbackColor = maskColor
-                        )
-                    } else {
-                        val cornerRadius = (min(maskRect.width(), maskRect.height()) * 0.35f).coerceIn(4f, 24f)
-                        canvas.drawRoundRect(maskRect, cornerRadius, cornerRadius, paint)
+                    if (!contourPainted || !contourCoversTextRect) {
+                        val safeMaskRect = RectF(maskRect)
+                        val validMaskRect = if (hasDistinctBubbleBounds) {
+                            val innerBox = RectF(
+                                min(bubbleBox.left + 4f, textRect.left.toFloat()).coerceAtLeast(0f),
+                                min(bubbleBox.top + 4f, textRect.top.toFloat()).coerceAtLeast(0f),
+                                max(bubbleBox.right - 4f, textRect.right.toFloat()).coerceAtMost(sourceBitmap.width.toFloat()),
+                                max(bubbleBox.bottom - 4f, textRect.bottom.toFloat()).coerceAtMost(sourceBitmap.height.toFloat())
+                            )
+                            innerBox.width() > 0f && innerBox.height() > 0f && safeMaskRect.intersect(innerBox)
+                        } else {
+                            true
+                        }
+                        if (validMaskRect && safeMaskRect.width() > 0f && safeMaskRect.height() > 0f) {
+                            if (useGradientMask) {
+                                paintGradientMatchedInterior(
+                                    canvas = canvas,
+                                    sourceBitmap = sourceBitmap,
+                                    maskRect = safeMaskRect,
+                                    bubbleBox = if (hasDistinctBubbleBounds) bubbleBox else Rect(),
+                                    isDarkBubble = block.isDarkBubble,
+                                    fallbackColor = maskColor
+                                )
+                            } else {
+                                val cornerRadius = (min(safeMaskRect.width(), safeMaskRect.height()) * 0.18f).coerceIn(2f, 10f)
+                                canvas.drawRoundRect(safeMaskRect, cornerRadius, cornerRadius, paint)
+                            }
+                            val paintedRect = Rect()
+                            safeMaskRect.round(paintedRect)
+                            paintedRects.add(paintedRect)
+                        }
                     }
-                    val paintedRect = Rect()
-                    maskRect.round(paintedRect)
-                    paintedRects.add(paintedRect)
                 }
             }
 
@@ -1966,6 +2053,22 @@ class TranslationService(
                     textRect.right + padX,
                     textRect.bottom + padY
                 )
+                val safeAuxBubbleClip = if (hasDistinctBubbleBounds) {
+                    RectF(
+                        (bubbleBox.left + 3f).coerceAtLeast(0f),
+                        (bubbleBox.top + 3f).coerceAtLeast(0f),
+                        (bubbleBox.right - 3f).coerceAtMost(sourceBitmap.width.toFloat()),
+                        (bubbleBox.bottom - 3f).coerceAtMost(sourceBitmap.height.toFloat())
+                    )
+                } else {
+                    null
+                }
+                val auxUseGradient = isColoredOrGradientRegion(
+                    bitmap = sourceBitmap,
+                    maskRect = RectF(textRect),
+                    maskColor = maskColor,
+                    isDarkBubble = block.isDarkBubble
+                )
                 // Komşu balonların yazı alanları: bir aux kutusu bunların
                 // üstüne taşıyorsa maskeleme atlanır, aksi halde opak zemin
                 // komşu balonun yazısını kapatır. Çevirisi başarısız blokların
@@ -1973,9 +2076,21 @@ class TranslationService(
                 for (aux in auxBoxes) {
                     if (aux.isEmpty) continue
                     val auxRect = RectF(aux)
-                    val hitsText = RectF().setIntersect(auxRect, textReach)
-                    val hitsBubble = RectF().setIntersect(auxRect, RectF(bubbleBox))
-                    if (!hitsText && !hitsBubble) continue
+                    val auxArea = (auxRect.width() * auxRect.height()).coerceAtLeast(1f)
+                    val textInter = RectF()
+                    val textInterArea = if (textInter.setIntersect(auxRect, textReach)) {
+                        textInter.width() * textInter.height()
+                    } else 0f
+                    val bubbleInter = RectF()
+                    val bubbleInterArea = if (hasDistinctBubbleBounds && bubbleInter.setIntersect(auxRect, RectF(bubbleBox))) {
+                        bubbleInter.width() * bubbleInter.height()
+                    } else 0f
+                    val meaningfulOverlap = if (hasDistinctBubbleBounds) {
+                        bubbleInterArea >= auxArea * 0.50f || textInterArea >= auxArea * 0.25f
+                    } else {
+                        textInterArea >= auxArea * 0.25f
+                    }
+                    if (!meaningfulOverlap) continue
                     val growX = max(10f, auxRect.width() * 0.10f)
                     val growY = max(10f, auxRect.height() * 0.10f)
                     val grown = RectF(
@@ -1984,6 +2099,13 @@ class TranslationService(
                         (auxRect.right + growX).coerceAtMost(sourceBitmap.width.toFloat()),
                         (auxRect.bottom + growY).coerceAtMost(sourceBitmap.height.toFloat())
                     )
+                    if (safeAuxBubbleClip != null) {
+                        if (safeAuxBubbleClip.width() <= 0f || safeAuxBubbleClip.height() <= 0f ||
+                            !grown.intersect(safeAuxBubbleClip)
+                        ) {
+                            continue
+                        }
+                    }
                     if (grown.width() <= 0f || grown.height() <= 0f) continue
                     val grownArea = (grown.width() * grown.height()).coerceAtLeast(1f)
                     var coversProtectedText = false
@@ -2015,8 +2137,19 @@ class TranslationService(
                         skippedAuxBoxes.add(skipped)
                         continue
                     }
-                    val auxRadius = (min(grown.width(), grown.height()) * 0.35f).coerceIn(4f, 24f)
-                    canvas.drawRoundRect(grown, auxRadius, auxRadius, paint)
+                    if (auxUseGradient) {
+                        paintGradientMatchedInterior(
+                            canvas = canvas,
+                            sourceBitmap = sourceBitmap,
+                            maskRect = grown,
+                            bubbleBox = if (hasDistinctBubbleBounds) bubbleBox else Rect(),
+                            isDarkBubble = block.isDarkBubble,
+                            fallbackColor = maskColor
+                        )
+                    } else {
+                        val auxRadius = (min(grown.width(), grown.height()) * 0.35f).coerceIn(4f, 24f)
+                        canvas.drawRoundRect(grown, auxRadius, auxRadius, paint)
+                    }
                     val paintedAux = Rect()
                     grown.round(paintedAux)
                     paintedRects.add(paintedAux)
@@ -2038,51 +2171,71 @@ class TranslationService(
         val b = Color.blue(maskColor)
         val chroma = max(r, max(g, b)) - min(r, min(g, b))
         val lum = r * 0.299f + g * 0.587f + b * 0.114f
-        if (chroma >= 16) return true
-        if (!isDarkBubble && lum < 236f) return true
-        if (isDarkBubble && lum > 35f) return true
+        // Tek renkli düz pastel/gri/koyu balonları gereksiz yere satır gradyanına (zebra banding)
+        // sokma; yalnızca kenarlar arasında gerçek renk/parlaklık gradyanı varsa true döndür.
 
         val left = maskRect.left.roundToInt().coerceIn(0, bitmap.width - 1)
         val right = maskRect.right.roundToInt().coerceIn(left, bitmap.width - 1)
         val top = maskRect.top.roundToInt().coerceIn(0, bitmap.height - 1)
         val bottom = maskRect.bottom.roundToInt().coerceIn(top, bitmap.height - 1)
 
-        fun edgeMedianLumaAndMaxChroma(xs: IntProgression, ys: IntProgression): Pair<Float, Int> {
+        fun edgeMedianLumaAndChroma(xs: IntProgression, ys: IntProgression): Pair<Float, Int> {
             val lums = ArrayList<Float>(16)
-            var maxC = 0
+            val chromas = ArrayList<Int>(16)
             for (y in ys) {
                 for (x in xs) {
                     val px = bitmap.getPixel(x, y)
                     val pr = Color.red(px)
                     val pg = Color.green(px)
                     val pb = Color.blue(px)
-                    val c = max(pr, max(pg, pb)) - min(pr, min(pg, pb))
-                    if (c > maxC) maxC = c
-                    lums.add(pr * 0.299f + pg * 0.587f + pb * 0.114f)
+                    val pxLum = pr * 0.299f + pg * 0.587f + pb * 0.114f
+                    val isInkOutlier = (!isDarkBubble && pxLum < 110f) || (isDarkBubble && lum < 120f && pxLum > 150f)
+                    // Reject exterior artwork/border pixels that differ sharply from bubble interior luminance
+                    val isExteriorArtwork = abs(pxLum - lum) > 45f
+                    if (!isInkOutlier && !isExteriorArtwork) {
+                        lums.add(pxLum)
+                        chromas.add(max(pr, max(pg, pb)) - min(pr, min(pg, pb)))
+                    }
                 }
             }
             if (lums.isEmpty()) return lum to 0
             lums.sort()
-            return lums[lums.size / 2] to maxC
+            chromas.sort()
+            return lums[lums.size / 2] to chromas[chromas.size / 2]
         }
 
-        val stepX = max(1, (right - left) / 6)
-        val stepY = max(1, (bottom - top) / 6)
-        val (topLum, topChroma) = edgeMedianLumaAndMaxChroma(left..right step stepX, top..top)
-        val (botLum, botChroma) = edgeMedianLumaAndMaxChroma(left..right step stepX, bottom..bottom)
-        val (leftLum, leftChroma) = edgeMedianLumaAndMaxChroma(left..left, top..bottom step stepY)
-        val (rightLum, rightChroma) = edgeMedianLumaAndMaxChroma(right..right, top..bottom step stepY)
+        // Inset 20% away from rectangle corners so oval speech-bubble exterior artwork
+        // never fools a plain white/solid bubble into entering row-gradient mode.
+        val insetX = ((right - left) * 0.20f).roundToInt()
+        val insetY = ((bottom - top) * 0.20f).roundToInt()
+        val innerL = (left + insetX).coerceAtMost(right)
+        val innerR = (right - insetX).coerceAtLeast(innerL)
+        val innerT = (top + insetY).coerceAtMost(bottom)
+        val innerB = (bottom - insetY).coerceAtLeast(innerT)
 
-        val maxEdgeChroma = max(max(topChroma, botChroma), max(leftChroma, rightChroma))
-        return maxEdgeChroma >= 16 ||
-            abs(topLum - botLum) >= 14f ||
-            abs(leftLum - rightLum) >= 14f
+        val stepX = max(1, (innerR - innerL) / 6)
+        val stepY = max(1, (innerB - innerT) / 6)
+        val (topLum, topChroma) = edgeMedianLumaAndChroma(innerL..innerR step stepX, top..top)
+        val (botLum, botChroma) = edgeMedianLumaAndChroma(innerL..innerR step stepX, bottom..bottom)
+        val (leftLum, leftChroma) = edgeMedianLumaAndChroma(left..left, innerT..innerB step stepY)
+        val (rightLum, rightChroma) = edgeMedianLumaAndChroma(right..right, innerT..innerB step stepY)
+
+        // Tek renkli düz pastel/lavanta/mavi balonlarda maxEdgeChroma yüksek olsa bile
+        // kenarlar arası renk/parlaklık farkı (chromaDiff / lumaDiff) yoksa gradyan DEĞİLDİR;
+        // düz dolgu ile sıfır zebra şeritlenme sağlanır.
+        val chromaDiff = max(abs(topChroma - botChroma), abs(leftChroma - rightChroma))
+        val lumaDiff = max(abs(topLum - botLum), abs(leftLum - rightLum))
+        if (!isDarkBubble && lum >= 242f && chroma <= 10 && chromaDiff < 18 && lumaDiff < 40f) {
+            return false
+        }
+        return chromaDiff >= 18 || lumaDiff >= 26f
     }
 
     /**
      * Paints a row-by-row horizontal gradient matched to the left and right outer edge
-     * background colors inside [maskRect] (or [contourPath]) so colored or gradient
-     * webtoon speech bubbles are erased seamlessly without leaving a flat rectangular patch.
+     * background colors inside [maskRect] (or [contourPath]) using a 5-row vertical
+     * smoothing kernel `[1, 2, 4, 2, 1]` so colored or gradient webtoon bubbles erase
+     * smoothly without horizontal zebra banding.
      */
     internal fun paintGradientMatchedInterior(
         canvas: Canvas,
@@ -2102,28 +2255,46 @@ class TranslationService(
         }
 
         val hasBubbleClamp = !bubbleBox.isEmpty
-        val minSampleX = if (hasBubbleClamp) bubbleBox.left.coerceIn(0, sourceBitmap.width - 1) else 0
-        val maxSampleX = if (hasBubbleClamp) (bubbleBox.right - 1).coerceIn(minSampleX, sourceBitmap.width - 1) else sourceBitmap.width - 1
+        val edgeInset = if (hasBubbleClamp) {
+            min(8, max(5, bubbleBox.width() / 16))
+        } else {
+            0
+        }
+        val minSampleX = if (hasBubbleClamp) {
+            (bubbleBox.left + edgeInset).coerceIn(0, sourceBitmap.width - 1)
+        } else {
+            0
+        }
+        val maxSampleX = if (hasBubbleClamp) {
+            (bubbleBox.right - 1 - edgeInset).coerceIn(minSampleX, sourceBitmap.width - 1)
+        } else {
+            sourceBitmap.width - 1
+        }
         val topY = maskRect.top.toInt().coerceIn(0, sourceBitmap.height - 1)
         val botY = ceil(maskRect.bottom.toDouble()).toInt().coerceIn(topY + 1, sourceBitmap.height)
         val stripH = ((botY - topY) / 40).coerceIn(2, 4)
 
-        val fallbackLum = Color.red(fallbackColor) * 0.299f +
-            Color.green(fallbackColor) * 0.587f +
-            Color.blue(fallbackColor) * 0.114f
+        val fallbackR = Color.red(fallbackColor)
+        val fallbackG = Color.green(fallbackColor)
+        val fallbackB = Color.blue(fallbackColor)
+        val fallbackLum = fallbackR * 0.299f + fallbackG * 0.587f + fallbackB * 0.114f
 
         fun sampleSideColor(anchorX: Int, y: Int): Int? {
-            val candidates = ArrayList<Pair<Int, Float>>(7)
-            for (dx in -3..3) {
+            val candidates = ArrayList<Pair<Int, Float>>(9)
+            for (dx in -4..4) {
                 val sx = (anchorX + dx).coerceIn(minSampleX, maxSampleX)
                 val px = sourceBitmap.getPixel(sx, y)
-                val lum = Color.red(px) * 0.299f + Color.green(px) * 0.587f + Color.blue(px) * 0.114f
-                val isOppositeTextStroke = when {
-                    isDarkBubble && fallbackLum < 120f -> lum > 185f
-                    !isDarkBubble && fallbackLum > 140f -> lum < 90f
-                    else -> false
-                }
-                if (!isOppositeTextStroke) {
+                val pr = Color.red(px)
+                val pg = Color.green(px)
+                val pb = Color.blue(px)
+                val lum = pr * 0.299f + pg * 0.587f + pb * 0.114f
+                val isInkOrHairOutlier = (!isDarkBubble && lum < 110f) ||
+                    (isDarkBubble && fallbackLum < 120f && lum > 150f)
+                // Guard against sampling exterior dark/colored artwork across curved oval walls,
+                // which previously caused horizontal barcode/zebra striping inside speech bubbles.
+                val maxChannelDiff = max(abs(pr - fallbackR), max(abs(pg - fallbackG), abs(pb - fallbackB)))
+                val isExteriorArtwork = abs(lum - fallbackLum) > 40f || maxChannelDiff > 55
+                if (!isInkOrHairOutlier && !isExteriorArtwork) {
                     candidates.add(px to lum)
                 }
             }
@@ -2132,45 +2303,98 @@ class TranslationService(
             return candidates[candidates.size / 2].first
         }
 
+        val rowBounds = ArrayList<Pair<Int, Int>>()
+        val rawLeftColors = ArrayList<Int>()
+        val rawRightColors = ArrayList<Int>()
+        var prevLeft = fallbackColor
+        var prevRight = fallbackColor
+
+        val ovalCenterX = if (hasBubbleClamp) bubbleBox.exactCenterX() else maskRect.centerX()
+        val ovalCenterY = if (hasBubbleClamp) bubbleBox.exactCenterY() else maskRect.centerY()
+        val ovalRx = (if (hasBubbleClamp) bubbleBox.width() * 0.44f else maskRect.width() * 0.46f).coerceAtLeast(4f)
+        val ovalRy = (if (hasBubbleClamp) bubbleBox.height() * 0.46f else maskRect.height() * 0.48f).coerceAtLeast(4f)
+
+        var y0 = topY
+        while (y0 < botY) {
+            val y1 = min(botY, y0 + stripH)
+            val sampleY = ((y0 + y1) / 2).coerceIn(0, sourceBitmap.height - 1)
+            val normY = ((sampleY - ovalCenterY) / ovalRy).coerceIn(-0.98f, 0.98f)
+            val rowHalfW = ovalRx * kotlin.math.sqrt((1f - normY * normY).coerceAtLeast(0.04f))
+            val ovalSafeL = (ovalCenterX - rowHalfW).roundToInt()
+            val ovalSafeR = (ovalCenterX + rowHalfW).roundToInt()
+            val leftAnchorX = max((maskRect.left - 2f).roundToInt(), ovalSafeL).coerceIn(minSampleX, maxSampleX)
+            val rightAnchorX = min((maskRect.right + 2f).roundToInt(), ovalSafeR).coerceIn(leftAnchorX, maxSampleX)
+
+            val sampledL = sampleSideColor(leftAnchorX, sampleY)
+            val sampledR = sampleSideColor(rightAnchorX, sampleY)
+            val cL = sampledL ?: sampledR ?: prevLeft
+            val cR = sampledR ?: sampledL ?: prevRight
+            prevLeft = cL
+            prevRight = cR
+
+            rowBounds.add(y0 to y1)
+            rawLeftColors.add(cL)
+            rawRightColors.add(cR)
+            y0 = y1
+        }
+        if (rowBounds.isEmpty()) return
+
+        fun smoothChannelRows(colors: List<Int>): IntArray {
+            val weights = intArrayOf(1, 2, 3, 4, 3, 2, 1)
+            val count = colors.size
+            val smoothed = IntArray(count)
+            for (i in 0 until count) {
+                var sumR = 0
+                var sumG = 0
+                var sumB = 0
+                var weightSum = 0
+                for (k in -3..3) {
+                    val idx = (i + k).coerceIn(0, count - 1)
+                    val w = weights[k + 3]
+                    val c = colors[idx]
+                    sumR += Color.red(c) * w
+                    sumG += Color.green(c) * w
+                    sumB += Color.blue(c) * w
+                    weightSum += w
+                }
+                smoothed[i] = Color.rgb(
+                    (sumR / weightSum).coerceIn(0, 255),
+                    (sumG / weightSum).coerceIn(0, 255),
+                    (sumB / weightSum).coerceIn(0, 255)
+                )
+            }
+            return smoothed
+        }
+
+        val smoothedLeft = smoothChannelRows(rawLeftColors)
+        val smoothedRight = smoothChannelRows(rawRightColors)
         val stripPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.FILL
         }
-        var prevLeft = fallbackColor
-        var prevRight = fallbackColor
 
         canvas.save()
         canvas.clipPath(clipShape)
         try {
-            var y0 = topY
-            while (y0 < botY) {
-                val y1 = min(botY, y0 + stripH)
-                val sampleY = ((y0 + y1) / 2).coerceIn(0, sourceBitmap.height - 1)
-                val leftAnchorX = (maskRect.left - 2f).roundToInt().coerceIn(minSampleX, maxSampleX)
-                val rightAnchorX = (maskRect.right + 2f).roundToInt().coerceIn(minSampleX, maxSampleX)
-
-                val sampledL = sampleSideColor(leftAnchorX, sampleY)
-                val sampledR = sampleSideColor(rightAnchorX, sampleY)
-                val cL = sampledL ?: sampledR ?: prevLeft
-                val cR = sampledR ?: sampledL ?: prevRight
-                prevLeft = cL
-                prevRight = cR
-
+            for (i in rowBounds.indices) {
+                val (rowTop, rowBot) = rowBounds[i]
+                val midY = ((rowTop + rowBot) * 0.5f)
+                val cL = smoothedLeft[i]
+                val cR = smoothedRight[i]
                 if (cL == cR) {
                     stripPaint.shader = null
                     stripPaint.color = cL
                 } else {
                     stripPaint.shader = LinearGradient(
                         maskRect.left,
-                        sampleY.toFloat(),
+                        midY,
                         maskRect.right,
-                        sampleY.toFloat(),
+                        midY,
                         cL,
                         cR,
                         Shader.TileMode.CLAMP
                     )
                 }
-                canvas.drawRect(maskRect.left - 1f, y0.toFloat(), maskRect.right + 1f, y1.toFloat(), stripPaint)
-                y0 = y1
+                canvas.drawRect(maskRect.left - 1f, rowTop.toFloat(), maskRect.right + 1f, rowBot.toFloat(), stripPaint)
             }
         } finally {
             canvas.restore()
@@ -2180,24 +2404,42 @@ class TranslationService(
     fun sampleSpeechBubbleColor(bitmap: Bitmap, rect: Rect, isDarkBubble: Boolean): Int {
         val width = bitmap.width
         val height = bitmap.height
+        if (width <= 0 || height <= 0 || rect.isEmpty) {
+            return if (isDarkBubble) Color.rgb(18, 18, 18) else Color.WHITE
+        }
         val sampledColors = mutableListOf<Int>()
-        val offsets = listOf(3, 6, 9)
-
-        for (dist in offsets) {
-            val left = (rect.left - dist).coerceIn(0, width - 1)
-            val top = (rect.top - dist).coerceIn(0, height - 1)
-            val right = (rect.right + dist).coerceIn(0, width - 1)
-            val bottom = (rect.bottom + dist).coerceIn(0, height - 1)
-
-            val stepX = max(2, (right - left) / 8)
-            for (x in left..right step stepX) {
-                sampledColors.add(bitmap.getPixel(x, top))
-                sampledColors.add(bitmap.getPixel(x, bottom))
+        // Sample inside the text region (spaces between glyphs are guaranteed bubble interior)
+        // plus a tight 2..4px rim, avoiding 6..9px exterior panel artwork contamination.
+        val inL = rect.left.coerceIn(0, width - 1)
+        val inT = rect.top.coerceIn(0, height - 1)
+        val inR = (rect.right - 1).coerceIn(inL, width - 1)
+        val inB = (rect.bottom - 1).coerceIn(inT, height - 1)
+        val gridStepX = max(2, (inR - inL) / 8)
+        val gridStepY = max(2, (inB - inT) / 8)
+        for (y in inT..inB step gridStepY) {
+            for (x in inL..inR step gridStepX) {
+                sampledColors.add(bitmap.getPixel(x, y))
             }
-            val stepY = max(2, (bottom - top) / 8)
-            for (y in top..bottom step stepY) {
-                sampledColors.add(bitmap.getPixel(left, y))
-                sampledColors.add(bitmap.getPixel(right, y))
+        }
+        // Dış halkayı yalnızca iç örnekleme yetersizse (<16 piksel) yedek olarak ekle;
+        // böylece beyaz sayfa zemini üzerindeki renkli balonlar dış kenar yüzünden beyaza dönmez.
+        if (sampledColors.size < 16) {
+            for (dist in listOf(2, 4)) {
+                val left = (rect.left - dist).coerceIn(0, width - 1)
+                val top = (rect.top - dist).coerceIn(0, height - 1)
+                val right = (rect.right + dist).coerceIn(0, width - 1)
+                val bottom = (rect.bottom + dist).coerceIn(0, height - 1)
+
+                val stepX = max(2, (right - left) / 8)
+                for (x in left..right step stepX) {
+                    sampledColors.add(bitmap.getPixel(x, top))
+                    sampledColors.add(bitmap.getPixel(x, bottom))
+                }
+                val stepY = max(2, (bottom - top) / 8)
+                for (y in top..bottom step stepY) {
+                    sampledColors.add(bitmap.getPixel(left, y))
+                    sampledColors.add(bitmap.getPixel(right, y))
+                }
             }
         }
 
@@ -2218,20 +2460,29 @@ class TranslationService(
                 val darkPool = nonWhite.filter { it.second < 80.0 }.map { it.first }
                 if (darkPool.isNotEmpty()) darkPool else nonWhite.map { it.first }
             } else {
-                // Colored / semi-transparent bubble with white text (e.g. purple ~157, brown ~110):
-                // exclude thin black bubble outline (<40) and cluster around the median fill luma.
                 val coloredPool = nonWhite.filter {
                     it.second >= 40.0 && abs(it.second - nonWhiteMedianLum) <= 35.0
                 }.map { it.first }
                 if (coloredPool.isNotEmpty()) coloredPool else nonWhite.map { it.first }
             }
         } else {
+            // If a strong share of interior/rim pixels are crisp neutral white, snap directly to WHITE
+            // so exterior grey/blue artwork near tight bubble edges never tints a white bubble muddy grey.
+            val pureWhiteCount = withLuma.count { (c, lum) ->
+                val r = Color.red(c)
+                val g = Color.green(c)
+                val b = Color.blue(c)
+                val chroma = max(r, max(g, b)) - min(r, min(g, b))
+                lum > 236.0 && chroma <= 10
+            }
+            if (pureWhiteCount * 100 >= withLuma.size * 40) {
+                return Color.WHITE
+            }
             val brightCount = withLuma.count { it.second > 185.0 }
             if (brightCount * 100 >= withLuma.size * 35) {
-                val lightPool = withLuma.filter { it.second > 165.0 }.map { it.first }
+                val lightPool = withLuma.filter { it.second > 180.0 }.map { it.first }
                 if (lightPool.isNotEmpty()) lightPool else sampledColors
             } else {
-                // Colored pastel bubble with dark text: exclude black ink (<45) and sample around median.
                 val nonInk = withLuma.filter { it.second >= 45.0 }.sortedBy { it.second }
                 if (nonInk.isNotEmpty()) {
                     val medianLum = nonInk[nonInk.size / 2].second
@@ -2242,24 +2493,31 @@ class TranslationService(
                 }
             }
         }
-        var sumR = 0L
-        var sumG = 0L
-        var sumB = 0L
-        for (c in pool) {
-            sumR += Color.red(c)
-            sumG += Color.green(c)
-            sumB += Color.blue(c)
-        }
-        val count = pool.size
-        val avgR = (sumR / count).toInt()
-        val avgG = (sumG / count).toInt()
-        val avgB = (sumB / count).toInt()
-        val avgLum = (avgR * 0.299 + avgG * 0.587 + avgB * 0.114)
+        // Bağımsız kanal medyanı yerine medyan RGB'ye en yakın gerçek pikseli (medoid) seçerek
+        // iki tonlu/renkli balonlarda çamurlu ara renk oluşumunu engelle.
+        val rs = IntArray(pool.size) { Color.red(pool[it]) }.apply { sort() }
+        val gs = IntArray(pool.size) { Color.green(pool[it]) }.apply { sort() }
+        val bs = IntArray(pool.size) { Color.blue(pool[it]) }.apply { sort() }
+        val medR = rs[rs.size / 2]
+        val medG = gs[gs.size / 2]
+        val medB = bs[bs.size / 2]
+        val representative = pool.minByOrNull { c ->
+            val dr = Color.red(c) - medR
+            val dg = Color.green(c) - medG
+            val db = Color.blue(c) - medB
+            dr * dr + dg * dg + db * db
+        } ?: Color.rgb(medR, medG, medB)
+        val repR = Color.red(representative)
+        val repG = Color.green(representative)
+        val repB = Color.blue(representative)
+        val repLum = repR * 0.299 + repG * 0.587 + repB * 0.114
+        val repChroma = max(repR, max(repG, repB)) - min(repR, min(repG, repB))
 
         return if (!isDarkBubble) {
-            if (avgLum > 240) Color.WHITE else Color.rgb(avgR, avgG, avgB)
+            if (repLum > 236.0 && repChroma <= 10) Color.WHITE else representative
         } else {
-            if (avgLum < 30) Color.rgb(18, 18, 18) else Color.rgb(avgR, avgG, avgB)
+            // Saf siyah (#000000) veya koyu lacivert balonları zorla gri (18,18,18) yapma.
+            representative
         }
     }
 
@@ -2342,7 +2600,12 @@ class TranslationService(
             if (cached != null) {
                 results[i] = TranslationResult(
                     requests[i].id,
-                    postProcessTranslatedOutput(cached.turkishText, convertTurkishChars)
+                    postProcessTranslatedOutput(
+                        cached.turkishText,
+                        convertTurkishChars,
+                        targetLangCode,
+                        normalizeCasing = false
+                    )
                 )
             } else {
                 indicesToTranslate.add(i)
@@ -2482,7 +2745,7 @@ class TranslationService(
                 results[originalIndex] = TranslationResult(request.id, null, error)
                 continue
             }
-            translated = postProcessTranslatedOutput(translated, convertTurkishChars)
+            translated = postProcessTranslatedOutput(translated, convertTurkishChars, targetLangCode)
             results[originalIndex] = TranslationResult(request.id, translated)
         }
         TranslationOutcome(
@@ -3018,9 +3281,76 @@ class TranslationService(
         return str.trim()
     }
 
-    private fun postProcessTranslatedOutput(text: String, turkishConvertEnabled: Boolean): String {
-        val cleaned = cleanTranslatedOutput(text)
+    private fun postProcessTranslatedOutput(
+        text: String,
+        turkishConvertEnabled: Boolean,
+        targetLangCode: String = "tr",
+        normalizeCasing: Boolean = true
+    ): String {
+        val preCleaned = cleanTranslatedOutput(text)
+        val cleaned = if (normalizeCasing) normalizeTranslatedCasing(preCleaned, targetLangCode) else preCleaned
         return if (turkishConvertEnabled) convertTurkishChars(cleaned) else cleaned
+    }
+
+    private fun normalizeTranslatedCasing(text: String, targetLangCode: String): String {
+        if (text.isBlank()) return text
+        var letterCount = 0
+        var upperCount = 0
+        for (ch in text) {
+            if (ch.isLetter()) {
+                letterCount++
+                if (ch.isUpperCase()) upperCount++
+            }
+        }
+        val words = text.split(Regex("\\s+")).filter { it.any(Char::isLetter) }
+        val wordCount = words.size
+        val trimmed = text.trim()
+        val isShortShout = !trimmed.contains('.') &&
+            wordCount <= 3 &&
+            (trimmed.endsWith("!") || trimmed.endsWith("!?") || trimmed.endsWith("?!"))
+        if (isShortShout || letterCount < 4 || (wordCount < 2 && letterCount < 10)) return text
+        if (upperCount.toFloat() / letterCount.toFloat() < 0.85f) return text
+
+        val locale = if (targetLangCode.equals("tr", ignoreCase = true)) {
+            java.util.Locale("tr", "TR")
+        } else {
+            java.util.Locale.ROOT
+        }
+        val acronymPattern = Regex("""\b[A-Z0-9]{2,5}(?:'[A-Z]+)?\b""")
+        val acronymMatches = acronymPattern.findAll(text).mapNotNull { m ->
+            val core = m.value.substringBefore('\'')
+            if (core.length in 2..4 && core in setOf("OK", "HP", "MP", "XP", "TV", "PC", "AI", "IQ", "VIP", "DJ", "KO", "GG", "VS", "ABD", "TR", "AB", "FBI", "CIA", "ATM", "SMS", "GPS", "DNA", "USB", "PDF", "RPG", "MMO")) {
+                m.range to m.value
+            } else {
+                null
+            }
+        }.toList()
+
+        val lowered = text.lowercase(locale)
+        val out = StringBuilder(lowered.length)
+        var capitalizeNext = true
+        for (idx in lowered.indices) {
+            val ch = lowered[idx]
+            if (capitalizeNext && ch.isLetter()) {
+                out.append(ch.toString().uppercase(locale))
+                capitalizeNext = false
+            } else {
+                out.append(ch)
+                if (ch == '.' || ch == '!' || ch == '?' || ch == '\u2026' || ch == '\n') {
+                    capitalizeNext = true
+                }
+            }
+        }
+        if (acronymMatches.isNotEmpty() && out.length == text.length) {
+            for ((range, rawToken) in acronymMatches) {
+                val suffixStart = rawToken.indexOf('\'')
+                val endCore = if (suffixStart >= 0) range.first + suffixStart else range.last + 1
+                for (pos in range.first until endCore) {
+                    out.setCharAt(pos, text[pos])
+                }
+            }
+        }
+        return out.toString()
     }
 
     private fun convertTurkishChars(text: String): String {

@@ -27,7 +27,7 @@ object BubbleContourExtractor {
     private const val MIN_SPAN_WIDTH_RATIO = 0.22f
     private const val MIN_MEDIAN_SPAN_RATIO = 0.34f
     private const val MAX_GLYPH_BRIDGE_RATIO = 0.10f
-    private const val MAX_PERIMETER_LEAK_RATIO = 0.55f
+    private const val MAX_PERIMETER_LEAK_RATIO = 0.42f
     private const val EDT_INF = 1e6f
 
     fun extractFromBitmap(
@@ -153,6 +153,134 @@ object BubbleContourExtractor {
     }
 
     /**
+     * Detects tinted/bordered rectangular narration boxes whose thin/colored edges or
+     * flush panel boundaries may cause flood-fill contour extraction to return `null`.
+     */
+    fun detectRectangularFrameFromBitmap(
+        bitmap: Bitmap?,
+        bubbleBox: Rect,
+        pageOriginalWidth: Float,
+        pageOriginalHeight: Float
+    ): ContourScanlineProfile? {
+        if (bitmap == null || bitmap.isRecycled || bitmap.width < 12 || bitmap.height < 12) return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && bitmap.config == Bitmap.Config.HARDWARE) return null
+        if (!pageOriginalWidth.isFinite() || !pageOriginalHeight.isFinite() ||
+            pageOriginalWidth <= 0f || pageOriginalHeight <= 0f || bubbleBox.isEmpty
+        ) {
+            return null
+        }
+        val scaleX = bitmap.width.toFloat() / pageOriginalWidth
+        val scaleY = bitmap.height.toFloat() / pageOriginalHeight
+        val left = (bubbleBox.left * scaleX).roundToInt().coerceIn(0, bitmap.width - 1)
+        val top = (bubbleBox.top * scaleY).roundToInt().coerceIn(0, bitmap.height - 1)
+        val right = (bubbleBox.right * scaleX).roundToInt().coerceIn(left + 1, bitmap.width)
+        val bottom = (bubbleBox.bottom * scaleY).roundToInt().coerceIn(top + 1, bitmap.height)
+        val boxW = right - left
+        val boxH = bottom - top
+        if (boxW < MIN_CROP_PX || boxH < MIN_CROP_PX) return null
+
+        fun pxLuma(px: Int): Int {
+            val r = (px shr 16) and 0xFF
+            val g = (px shr 8) and 0xFF
+            val b = px and 0xFF
+            return (299 * r + 587 * g + 114 * b) / 1000
+        }
+
+        fun colorDist(c1: Int, c2: Int): Int {
+            val dr = abs(((c1 shr 16) and 0xFF) - ((c2 shr 16) and 0xFF))
+            val dg = abs(((c1 shr 8) and 0xFF) - ((c2 shr 8) and 0xFF))
+            val db = abs((c1 and 0xFF) - (c2 and 0xFF))
+            return dr + dg + db
+        }
+
+        val insetX = (boxW * 0.10f).roundToInt().coerceIn(2, max(2, boxW / 5))
+        val insetY = (boxH * 0.10f).roundToInt().coerceIn(2, max(2, boxH / 5))
+        val cornerCoords = arrayOf(
+            intArrayOf((left + insetX).coerceIn(left, right - 1), (top + insetY).coerceIn(top, bottom - 1)),
+            intArrayOf((right - 1 - insetX).coerceIn(left, right - 1), (top + insetY).coerceIn(top, bottom - 1)),
+            intArrayOf((left + insetX).coerceIn(left, right - 1), (bottom - 1 - insetY).coerceIn(top, bottom - 1)),
+            intArrayOf((right - 1 - insetX).coerceIn(left, right - 1), (bottom - 1 - insetY).coerceIn(top, bottom - 1))
+        )
+        val cornerColors = IntArray(4) { i -> bitmap.getPixel(cornerCoords[i][0], cornerCoords[i][1]) }
+        val cornerLums = IntArray(4) { i -> pxLuma(cornerColors[i]) }
+        var maxCornerDist = 0
+        for (i in 0 until 4) {
+            for (j in i + 1 until 4) {
+                val d = colorDist(cornerColors[i], cornerColors[j])
+                if (d > maxCornerDist) maxCornerDist = d
+            }
+        }
+        // Rectangular panels have consistent interior corners (unlike round ovals on contrasting page backgrounds).
+        if (maxCornerDist > 75) return null
+
+        val avgCornerLum = cornerLums.average().toFloat()
+        val avgCornerChroma = cornerColors.map { c ->
+            val r = (c shr 16) and 0xFF
+            val g = (c shr 8) and 0xFF
+            val b = c and 0xFF
+            max(r, max(g, b)) - min(r, min(g, b))
+        }.average().toFloat()
+        val isTintedInterior = avgCornerLum < 236f || avgCornerChroma >= 10f
+
+        var sharpEdges = 0
+        val outOff = 3
+        val inOff = min(4, max(2, min(boxW, boxH) / 10))
+        val samples = 7
+
+        fun checkVerticalEdge(xBorder: Int, isLeft: Boolean): Boolean {
+            val xOut = (if (isLeft) xBorder - outOff else xBorder + outOff).coerceIn(0, bitmap.width - 1)
+            val xIn = (if (isLeft) xBorder + inOff else xBorder - inOff).coerceIn(0, bitmap.width - 1)
+            if (xOut == xIn) return true // flush against page edge
+            var hits = 0
+            val yStart = top + (boxH * 0.15f).roundToInt()
+            val yEnd = bottom - 1 - (boxH * 0.15f).roundToInt()
+            if (yEnd <= yStart) return false
+            for (s in 0 until samples) {
+                val y = (yStart + ((yEnd - yStart) * s) / (samples - 1)).coerceIn(0, bitmap.height - 1)
+                val borderPx = bitmap.getPixel(xBorder.coerceIn(0, bitmap.width - 1), y)
+                val inPx = bitmap.getPixel(xIn, y)
+                val outPx = bitmap.getPixel(xOut, y)
+                if (colorDist(inPx, outPx) >= 36 || colorDist(borderPx, inPx) >= 42) hits++
+            }
+            return hits >= 5
+        }
+
+        fun checkHorizontalEdge(yBorder: Int, isTop: Boolean): Boolean {
+            val yOut = (if (isTop) yBorder - outOff else yBorder + outOff).coerceIn(0, bitmap.height - 1)
+            val yIn = (if (isTop) yBorder + inOff else yBorder - inOff).coerceIn(0, bitmap.height - 1)
+            if (yOut == yIn) return true
+            var hits = 0
+            val xStart = left + (boxW * 0.15f).roundToInt()
+            val xEnd = right - 1 - (boxW * 0.15f).roundToInt()
+            if (xEnd <= xStart) return false
+            for (s in 0 until samples) {
+                val x = (xStart + ((xEnd - xStart) * s) / (samples - 1)).coerceIn(0, bitmap.width - 1)
+                val borderPx = bitmap.getPixel(x, yBorder.coerceIn(0, bitmap.height - 1))
+                val inPx = bitmap.getPixel(x, yIn)
+                val outPx = bitmap.getPixel(x, yOut)
+                if (colorDist(inPx, outPx) >= 36 || colorDist(borderPx, inPx) >= 42) hits++
+            }
+            return hits >= 5
+        }
+
+        if (checkVerticalEdge(left, isLeft = true)) sharpEdges++
+        if (checkVerticalEdge(right - 1, isLeft = false)) sharpEdges++
+        if (checkHorizontalEdge(top, isTop = true)) sharpEdges++
+        if (checkHorizontalEdge(bottom - 1, isTop = false)) sharpEdges++
+
+        val qualifies = (sharpEdges >= 3) || (isTintedInterior && sharpEdges >= 2)
+        if (!qualifies) return null
+
+        val rows = 16
+        return ContourScanlineProfile(
+            rowLeftFractions = FloatArray(rows) { 0.02f },
+            rowRightFractions = FloatArray(rows) { 0.98f },
+            opticalCenterX = 0.5f,
+            opticalCenterY = 0.5f
+        )
+    }
+
+    /**
      * Extracts a normalized [ContourScanlineProfile] from a downsampled grayscale grid
      * (`luma[y * gridW + x]` in `0..255`) using 2-pass exact Euclidean Distance Transform.
      */
@@ -185,21 +313,30 @@ object BubbleContourExtractor {
             }
         }
         patch.sort(0, patchCount)
-        val seedLum = patch[patchCount / 2]
+        // Min/max pooling metin vuruşlarını 5x5 merkeze yayabildiği için açık balonlarda
+        // üst %80 persentil (siyah harfi eler), koyu balonlarda alt %20 persentil (beyaz harfi eler) kullanılır.
+        val seedLum = if (isDarkBubble) {
+            patch[1.coerceAtMost(patchCount - 1)]
+        } else {
+            patch[(patchCount - 2).coerceAtLeast(0)]
+        }
 
-        val isLight = !isDarkBubble && seedLum >= 140
-        val isDark = isDarkBubble || seedLum <= 110
+        // Çağıran isDarkBubble=false verdiyse yoğun siyah metin yüzünden polariteyi karanlığa çevirme!
+        val isLight = !isDarkBubble && seedLum >= 125
+        val isDark = isDarkBubble
 
         fun isInteriorPixel(lum: Int): Boolean = when {
-            isLight -> lum >= max(135, seedLum - 58)
+            isLight -> {
+                val tol = if (seedLum < 225) 40 else 58
+                lum >= max(125, seedLum - tol)
+            }
             isDark -> if (seedLum <= 110) {
                 lum <= min(168, seedLum + 58)
             } else {
-                // Colored / translucent dark bubble with light glyphs: keep hue band around seedLum
-                // and stop at bright white borders/glyphs or dark inked outlines.
-                abs(lum - seedLum) <= 48 && lum < 215
+                val clampedSeed = seedLum.coerceAtMost(195)
+                abs(lum - clampedSeed) <= 48 && lum < 215
             }
-            else -> abs(lum - seedLum) <= 46
+            else -> abs(lum - seedLum) <= 44
         }
 
         val hasAnchorRect = anchorLeft >= 1 && anchorTop >= 1 &&
@@ -217,7 +354,8 @@ object BubbleContourExtractor {
 
         if (hasAnchorRect) {
             val anchorArea = (anchorRight - anchorLeft + 1) * (anchorBottom - anchorTop + 1)
-            val useEllipticalAnchor = anchorArea > total * 0.42f
+            val isSmallOrFlat = min(gridW, gridH) <= 28 || gridW > gridH * 2
+            val useEllipticalAnchor = !isSmallOrFlat && anchorArea > total * 0.42f
             val aCx = (anchorLeft + anchorRight) * 0.5f
             val aCy = (anchorTop + anchorBottom) * 0.5f
             val aRx = max(1f, (anchorRight - anchorLeft + 1) * 0.5f)
@@ -230,7 +368,7 @@ object BubbleContourExtractor {
                     val distSq = nx * nx + ny * ny
                     if (useEllipticalAnchor && distSq > 1.0f) continue
                     val idx = rowOffset + sx
-                    if (!useEllipticalAnchor && distSq > 1.15f && !isInteriorPixel(luma[idx])) continue
+                    if (!useEllipticalAnchor && distSq > 0.72f && !isInteriorPixel(luma[idx])) continue
                     if (!mask[idx]) {
                         mask[idx] = true
                         queue[tail++] = idx
@@ -290,19 +428,29 @@ object BubbleContourExtractor {
         // outer bounding-box perimeter (e.g. a white oval sitting on a white page background).
         // Returning null lets the caller fall back cleanly to the analytical oval envelope
         // instead of misclassifying the leaked box as a rectangular narration frame.
-        var perimeterCells = 0
-        var leakedPerimeterCells = 0
+        var topLeak = 0
+        var botLeak = 0
+        var leftLeak = 0
+        var rightLeak = 0
         for (x in 0 until gridW) {
-            perimeterCells += 2
-            if (mask[x]) leakedPerimeterCells++
-            if (mask[(gridH - 1) * gridW + x]) leakedPerimeterCells++
+            if (mask[x]) topLeak++
+            if (mask[(gridH - 1) * gridW + x]) botLeak++
         }
         for (y in 1 until gridH - 1) {
-            perimeterCells += 2
-            if (mask[y * gridW]) leakedPerimeterCells++
-            if (mask[y * gridW + (gridW - 1)]) leakedPerimeterCells++
+            if (mask[y * gridW]) leftLeak++
+            if (mask[y * gridW + (gridW - 1)]) rightLeak++
         }
-        if (perimeterCells > 0 && leakedPerimeterCells.toFloat() / perimeterCells.toFloat() > MAX_PERIMETER_LEAK_RATIO) {
+        val leakedPerimeterCells = topLeak + botLeak + leftLeak + rightLeak
+        val perimeterCells = 2 * gridW + 2 * (gridH - 2)
+        val singleSideLeak = maxOf(
+            topLeak.toFloat() / gridW,
+            botLeak.toFloat() / gridW,
+            leftLeak.toFloat() / max(1, gridH - 2),
+            rightLeak.toFloat() / max(1, gridH - 2)
+        )
+        if ((perimeterCells > 0 && leakedPerimeterCells.toFloat() / perimeterCells.toFloat() > MAX_PERIMETER_LEAK_RATIO) ||
+            singleSideLeak > 0.65f
+        ) {
             return null
         }
 
@@ -458,6 +606,31 @@ object BubbleContourExtractor {
             if (y < chosenStart || y >= chosenEnd) {
                 rawLeft[y] = 0.5f
                 rawRight[y] = 0.5f
+            }
+        }
+
+        // 5-row median filter inside the valid vertical chamber removes multi-row leak spikes.
+        if (chosenLen >= 5) {
+            val medL = FloatArray(chosenLen)
+            val medR = FloatArray(chosenLen)
+            val winL = FloatArray(5)
+            val winR = FloatArray(5)
+            for (i in 0 until chosenLen) {
+                val y = chosenStart + i
+                for (k in -2..2) {
+                    val ny = (y + k).coerceIn(chosenStart, chosenEnd - 1)
+                    winL[k + 2] = rawLeft[ny]
+                    winR[k + 2] = rawRight[ny]
+                }
+                winL.sort()
+                winR.sort()
+                medL[i] = winL[2]
+                medR[i] = winR[2].coerceAtLeast(medL[i])
+            }
+            for (i in 0 until chosenLen) {
+                val y = chosenStart + i
+                rawLeft[y] = medL[i]
+                rawRight[y] = medR[i]
             }
         }
 

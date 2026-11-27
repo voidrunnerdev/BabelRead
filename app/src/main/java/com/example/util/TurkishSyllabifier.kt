@@ -58,6 +58,14 @@ object TurkishSyllabifier {
         for (k in 0 until vowelIndices.size - 1) {
             val v1 = vowelIndices[k]
             val v2 = vowelIndices[k + 1]
+            val apoInSpan = apostropheIndices.firstOrNull { it in (v1 + 1) until v2 }
+            if (apoInSpan != null) {
+                val apoSplit = apoInSpan + 1
+                if (apoSplit >= MIN_SIDE_CHARS && len - apoSplit >= 2 && !breaks.contains(apoSplit)) {
+                    breaks.add(apoSplit)
+                }
+                continue
+            }
             val consonantsBetween = (v1 + 1 until v2).count { word[it].isLetter() && !isVowel(word[it]) }
             val split = when (consonantsBetween) {
                 0 -> v1 + 1        // sa-at, a-i-le
@@ -65,20 +73,8 @@ object TurkishSyllabifier {
                 2 -> v1 + 2        // kar-şı, gel-dim
                 else -> v2 - 1     // türk-çe, elekt-rik, kont-rol
             }
-            if (split >= MIN_SIDE_CHARS && len - split >= MIN_SIDE_CHARS) {
-                if (!breaks.contains(split)) {
-                    breaks.add(split)
-                }
-            }
-            for (apo in apostropheIndices) {
-                if (apo in v1 until v2) {
-                    val apoSplit = apo + 1
-                    if (apoSplit >= MIN_SIDE_CHARS && len - apoSplit >= 2) {
-                        if (!breaks.contains(apoSplit)) {
-                            breaks.add(apoSplit)
-                        }
-                    }
-                }
+            if (split >= MIN_SIDE_CHARS && len - split >= MIN_SIDE_CHARS && !breaks.contains(split)) {
+                breaks.add(split)
             }
         }
         breaks.sort()
@@ -112,7 +108,12 @@ object TurkishSyllabifier {
                     var prev = 0
                     for (split in breaks) {
                         builder.append(word, prev, split)
-                        builder.append(SOFT_HYPHEN)
+                        val prevChar = if (split > 0) word[split - 1] else '\u0000'
+                        if (prevChar == '\'' || prevChar == '’') {
+                            builder.append('\u200B')
+                        } else {
+                            builder.append(SOFT_HYPHEN)
+                        }
                         prev = split
                     }
                     builder.append(word, prev, word.length)

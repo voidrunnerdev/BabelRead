@@ -85,7 +85,17 @@ class TextLineSegmenter {
 
         val threshold = otsuThreshold(gray)
         val lightCount = gray.count { it >= threshold }
-        val backgroundIsLight = lightCount >= gray.size - lightCount
+        var borderLight = 0
+        var borderDark = 0
+        for (x in 0 until w) {
+            if (gray[x] >= threshold) borderLight++ else borderDark++
+            if (gray[(h - 1) * w + x] >= threshold) borderLight++ else borderDark++
+        }
+        for (y in 1 until h - 1) {
+            if (gray[y * w] >= threshold) borderLight++ else borderDark++
+            if (gray[y * w + (w - 1)] >= threshold) borderLight++ else borderDark++
+        }
+        val backgroundIsLight = if (borderLight != borderDark) borderLight > borderDark else lightCount >= gray.size - lightCount
         val inkMask = BooleanArray(gray.size) { index ->
             if (backgroundIsLight) gray[index] < threshold else gray[index] > threshold
         }
@@ -393,18 +403,31 @@ class TextLineSegmenter {
         return lines.sortedByDescending { it.rect.right }
     }
 
-    private fun runs(profile: IntArray, threshold: Int): List<IntRange> {
-        val runs = ArrayList<IntRange>()
+    private fun runs(profile: IntArray, threshold: Int, maxBridgeGap: Int = 2): List<IntRange> {
+        val raw = ArrayList<IntRange>()
         var start = -1
         for (index in 0..profile.size) {
             val active = index < profile.size && profile[index] >= threshold
             if (active && start < 0) start = index
             if (!active && start >= 0) {
-                runs.add(start until index)
+                raw.add(start until index)
                 start = -1
             }
         }
-        return runs
+        if (raw.size <= 1 || maxBridgeGap <= 0) return raw
+        val merged = ArrayList<IntRange>(raw.size)
+        var cur = raw[0]
+        for (i in 1 until raw.size) {
+            val next = raw[i]
+            if (next.first - cur.last - 1 <= maxBridgeGap) {
+                cur = cur.first..next.last
+            } else {
+                merged.add(cur)
+                cur = next
+            }
+        }
+        merged.add(cur)
+        return merged
     }
 
     private fun scoreLines(
