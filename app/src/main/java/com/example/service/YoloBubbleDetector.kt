@@ -1345,10 +1345,81 @@ class YoloBubbleDetector(context: Context) {
         val texts = detections.filter { it.label in TEXT_LABELS }
         if (texts.isEmpty()) return false
         if (bubbles.isEmpty()) return true
-        return texts.any { t ->
+        val hasUncoveredText = texts.any { t ->
             bubbles.none { b ->
                 iou(t.box, b.box) >= 0.30f || intersectionOverSmallerArea(t.box, b.box) >= 0.50f
             }
+        }
+        if (hasUncoveredText) return true
+        // Also trigger RT-DETR v2 when a single YOLO bubble merges 2+ distinct non-overlapping text blocks.
+        return bubbles.any { b ->
+            val insideTexts = texts.filter { t -> intersectionOverSmallerArea(t.box, b.box) >= 0.55f }
+            if (insideTexts.size < 2) {
+                false
+            } else {
+                var distinctPair = false
+                for (i in insideTexts.indices) {
+                    for (j in i + 1 until insideTexts.size) {
+                        if (iou(insideTexts[i].box, insideTexts[j].box) < 0.25f) {
+                            distinctPair = true
+                            break
+                        }
+                    }
+                    if (distinctPair) break
+                }
+                distinctPair
+            }
+        }
+    }
+
+    private fun remapContourProfileToSubBox(
+        profile: ContourScanlineProfile?,
+        parentBox: RectF,
+        childBox: RectF
+    ): ContourScanlineProfile? {
+        if (profile == null || !profile.isUsable) return null
+        val pW = parentBox.width()
+        val pH = parentBox.height()
+        val cW = childBox.width()
+        val cH = childBox.height()
+        if (pW <= 1e-4f || pH <= 1e-4f || cW <= 1e-4f || cH <= 1e-4f) return null
+        val rows = profile.rowCount
+        if (rows < 4) return null
+        val outLeft = FloatArray(rows) { 1f }
+        val outRight = FloatArray(rows) { 0f }
+        var validRows = 0
+        var sumX = 0f
+        var sumY = 0f
+        for (r in 0 until rows) {
+            val subFrac = (r + 0.5f) / rows.toFloat()
+            val cy = childBox.top + subFrac * cH
+            val pyNorm = (cy - parentBox.top) / pH
+            if (pyNorm < 0f || pyNorm > 1f) continue
+            val pr = (pyNorm * rows).toInt().coerceIn(0, rows - 1)
+            val pl = profile.rowLeftFractions[pr]
+            val pRight = profile.rowRightFractions[pr]
+            if (pRight <= pl) continue
+            val absL = parentBox.left + pl * pW
+            val absR = parentBox.left + pRight * pW
+            val cl = ((absL - childBox.left) / cW).coerceIn(0f, 1f)
+            val cr = ((absR - childBox.left) / cW).coerceIn(0f, 1f)
+            if (cr - cl >= 0.12f) {
+                outLeft[r] = cl
+                outRight[r] = cr
+                validRows++
+                sumX += (cl + cr) * 0.5f
+                sumY += subFrac
+            }
+        }
+        return if (validRows >= 4) {
+            ContourScanlineProfile(
+                rowLeftFractions = outLeft,
+                rowRightFractions = outRight,
+                opticalCenterX = (sumX / validRows).coerceIn(0.15f, 0.85f),
+                opticalCenterY = (sumY / validRows).coerceIn(0.15f, 0.85f)
+            )
+        } else {
+            null
         }
     }
 
@@ -1357,21 +1428,68 @@ class YoloBubbleDetector(context: Context) {
         rtDetrDetections: List<YoloDetection>
     ): List<YoloDetection> {
         if (rtDetrDetections.isEmpty()) return yoloDetections
-        val yoloBalloons = yoloDetections.filter { it.label in BUBBLE_LABELS }.toMutableList()
+        val rawYoloBalloons = yoloDetections.filter { it.label in BUBBLE_LABELS }
         val yoloOthers = yoloDetections.filterNot { it.label in BUBBLE_LABELS }.toMutableList()
         val extraBalloons = mutableListOf<YoloDetection>()
         val extraSfx = mutableListOf<YoloDetection>()
 
-        // Match outer RT-DETR bubbles before inner text_bubble boxes
-        val sortedRt = rtDetrDetections.sortedWith(
-            compareBy<YoloDetection> {
-                when (it.label) {
-                    in BUBBLE_LABELS -> 0
-                    "text_bubble" -> 1
-                    else -> 2
+        // Pre-pass: if a single YOLO bubble merges 2+ non-overlapping RT-DETR sub-bubbles,
+        // replace the merged YOLO box with the clean RT-DETR sub-bubbles instead of averaging
+        // one half with the merged parent.
+        val rtOuterBalloons = rtDetrDetections
+            .filter { it.label in BUBBLE_LABELS }
+            .sortedByDescending { it.confidence }
+        val consumedRtIndices = HashSet<Int>()
+        val yoloBalloons = mutableListOf<YoloDetection>()
+
+        for (yolo in rawYoloBalloons) {
+            val yArea = (yolo.box.width() * yolo.box.height()).coerceAtLeast(1e-6f)
+            val candidateSubIndices = mutableListOf<Int>()
+            for (rIdx in rtOuterBalloons.indices) {
+                if (rIdx in consumedRtIndices) continue
+                val rt = rtOuterBalloons[rIdx]
+                val rArea = (rt.box.width() * rt.box.height()).coerceAtLeast(1e-6f)
+                if (rArea >= yArea * 0.85f) continue
+                if (intersectionOverSmallerArea(rt.box, yolo.box) >= 0.60f) {
+                    val overlapsChosen = candidateSubIndices.any { prevIdx ->
+                        iou(rtOuterBalloons[prevIdx].box, rt.box) >= 0.25f
+                    }
+                    if (!overlapsChosen) {
+                        candidateSubIndices.add(rIdx)
+                    }
                 }
-            }.thenByDescending { it.confidence }
-        )
+            }
+            if (candidateSubIndices.size >= 2) {
+                for (rIdx in candidateSubIndices) {
+                    consumedRtIndices.add(rIdx)
+                    val rt = rtOuterBalloons[rIdx]
+                    val slicedContour = remapContourProfileToSubBox(yolo.contourProfile, yolo.box, rt.box)
+                    yoloBalloons.add(
+                        rt.copy(
+                            confidence = max(rt.confidence, yolo.confidence * 0.95f),
+                            contourProfile = slicedContour
+                        )
+                    )
+                }
+            } else {
+                yoloBalloons.add(yolo)
+            }
+        }
+
+        val consumedRtSet = consumedRtIndices.map { rtOuterBalloons[it] }.toSet()
+
+        // Match outer RT-DETR bubbles before inner text_bubble boxes
+        val sortedRt = rtDetrDetections
+            .filterNot { it in consumedRtSet }
+            .sortedWith(
+                compareBy<YoloDetection> {
+                    when (it.label) {
+                        in BUBBLE_LABELS -> 0
+                        "text_bubble" -> 1
+                        else -> 2
+                    }
+                }.thenByDescending { it.confidence }
+            )
 
         for (rtDet in sortedRt) {
             when (rtDet.label) {

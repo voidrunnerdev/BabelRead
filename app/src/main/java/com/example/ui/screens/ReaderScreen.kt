@@ -551,7 +551,7 @@ internal fun resolveOverlayBackgroundBoundsDp(
         val v = dyMax / ry
         val normSq = u * u + v * v
         if (normSq > 1.0f) {
-            val expandScale = (sqrt(normSq) * 1.03f).coerceAtMost(1.50f)
+            val expandScale = (sqrt(normSq) * 1.02f).coerceAtMost(1.06f)
             val newRx = rx * expandScale
             val newRy = ry * expandScale
             left = (cx - newRx).coerceAtLeast(0f)
@@ -637,6 +637,49 @@ private fun contrastingTextColor(backgroundColor: Int, effectiveAlpha: Float = 1
         0.7152f * linearChannel(android.graphics.Color.green(backgroundColor)) +
         0.0722f * linearChannel(android.graphics.Color.blue(backgroundColor))
     return if (luminance >= 0.179f) Color.Black else Color.White
+}
+
+private fun remapContourToSubBounds(
+    profile: ContourScanlineProfile?,
+    origBounds: Rect,
+    subBounds: Rect
+): ContourScanlineProfile? {
+    if (profile == null || !profile.isUsable) return null
+    val origW = origBounds.width().toFloat()
+    val origH = origBounds.height().toFloat()
+    val subW = subBounds.width().toFloat()
+    val subH = subBounds.height().toFloat()
+    if (origW <= 0f || origH <= 0f || subW <= 0f || subH <= 0f || profile.rowCount <= 0) return null
+    val outRows = profile.rowCount.coerceAtLeast(16)
+    val lefts = FloatArray(outRows)
+    val rights = FloatArray(outRows)
+    var validCount = 0
+    var sumX = 0f
+    var sumY = 0f
+    for (r in 0 until outRows) {
+        val subFrac = (r + 0.5f) / outRows.toFloat()
+        val y = subBounds.top + subFrac * subH
+        val origFrac = ((y - origBounds.top) / origH).coerceIn(0f, 0.9999f)
+        val srcRow = (origFrac * profile.rowCount).toInt().coerceIn(0, profile.rowCount - 1)
+        val absL = origBounds.left + profile.rowLeftFractions[srcRow] * origW
+        val absR = origBounds.left + profile.rowRightFractions[srcRow] * origW
+        val l = ((absL - subBounds.left) / subW).coerceIn(0f, 1f)
+        val rFrac = ((absR - subBounds.left) / subW).coerceIn(0f, 1f)
+        lefts[r] = l
+        rights[r] = rFrac
+        if (rFrac > l) {
+            validCount++
+            sumX += (l + rFrac) * 0.5f
+            sumY += subFrac
+        }
+    }
+    if (validCount < 2) return null
+    return ContourScanlineProfile(
+        rowLeftFractions = lefts,
+        rowRightFractions = rights,
+        opticalCenterX = (sumX / validCount).coerceIn(0.15f, 0.85f),
+        opticalCenterY = (sumY / validCount).coerceIn(0.15f, 0.85f)
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -1777,10 +1820,16 @@ fun ReaderPageContainer(
                                     bubbleBounds.right < rawBubbleBounds.right - 2 ||
                                     bubbleBounds.top > rawBubbleBounds.top + 2 ||
                                     bubbleBounds.bottom < rawBubbleBounds.bottom - 2)
-                            val contourProfile = if (isSub || wasBubbleTrimmed) {
+                            val contourProfile = if (isSub) {
                                 null
                             } else {
-                                (block.contourProfile?.takeIf { it.isUsable }) ?: if (validMasked != null && bubbleBounds != null) {
+                                val yoloContour = block.contourProfile?.takeIf { it.isUsable }
+                                val remappedYolo = if (yoloContour != null && wasBubbleTrimmed && rawBubbleBounds != null && bubbleBounds != null) {
+                                    remapContourToSubBounds(yoloContour, rawBubbleBounds, bubbleBounds)?.takeIf { it.isUsable }
+                                } else {
+                                    yoloContour
+                                }
+                                remappedYolo ?: if (validMasked != null && bubbleBounds != null) {
                                     contourCache.getOrPut(blockIndex) {
                                         BubbleContourExtractor.extractFromBitmap(
                                             bitmap = validMasked,
@@ -2164,7 +2213,7 @@ fun ReaderPageContainer(
                                             ?: tryEnvelope(null, safeInsetRatio = 0.15f, minFloorSp = 6.0f)
                                     } else {
                                         tryEnvelope(contourProfile, minFloorSp = 8.0f)
-                                            ?: tryEnvelope(contourProfile, minFloorSp = 6.0f)
+                                            ?: tryEnvelope(contourProfile, minFloorSp = OverlayLayoutPolicy.READABLE_MIN_SP)
                                     }
                                 }
                                 if (bubbleGeo != null && envelopeFit != null && envelopeFit.fitsInside) {
@@ -2691,9 +2740,9 @@ fun ReaderPageContainer(
                             placedBottomDp = placedBottomDp.value,
                             marginDp = baseMarginDp
                         )
-                        val didOvalExpand = isOvalFallback && hasValidBubble && (
-                            resolvedBoundsDp.width > (bubbleRightDp - bubbleLeftDp).value + 4f ||
-                                resolvedBoundsDp.height > (bubbleBottomDp - bubbleTopDp).value + 4f
+                        val didOvalExpand = isOvalFallback && !hasRealMaskBitmap && hasValidBubble && (
+                            resolvedBoundsDp.width > (bubbleRightDp - bubbleLeftDp).value + 10f ||
+                                resolvedBoundsDp.height > (bubbleBottomDp - bubbleTopDp).value + 10f
                             )
                         val isFallbackExpanded = isPlacedExpanded || didOvalExpand
                         val drawBubbleBorder = shouldDrawNaturalBubbleBorder(
@@ -2750,6 +2799,18 @@ fun ReaderPageContainer(
                                 .height(boxHeight)
                                 .drawBehind {
                                     if (isFloatingHaloText || size.width <= 0f || size.height <= 0f) return@drawBehind
+                                    // In Doğal Balon mode, if the masked bitmap already erased original text
+                                    // and the bubble did not expand, skip drawing an opaque Layer 1 fill that
+                                    // could obscure hand-drawn cloud/tail contours.
+                                    if (hasRealMaskBitmap &&
+                                        bubbleStyle == "Doğal Balon" &&
+                                        block.isBubble &&
+                                        !isSubtitleMode &&
+                                        !isFallbackExpanded &&
+                                        !drawBubbleBorder
+                                    ) {
+                                        return@drawBehind
+                                    }
                                     val isDark = block.isDarkBubble || bubbleStyle == "Koyu Zemin"
                                     val borderColor = if (isDark) {
                                         Color.White.copy(alpha = 0.85f)

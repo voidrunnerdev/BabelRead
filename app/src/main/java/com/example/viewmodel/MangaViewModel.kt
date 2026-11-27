@@ -5132,11 +5132,12 @@ internal object BubbleCandidateMerger {
                         segRight.coerceAtLeast(segLeft + 1),
                         segBottom.coerceAtLeast(segTop + 1)
                     )
-                    val updatedTarget = computeSplitTargetBox(cand, splitBounds, null)
+                    val slicedContour = sliceContourVertically(cand.contourProfile, canonicalEnvelope, splitBounds)
+                    val updatedTarget = computeSplitTargetBox(cand, splitBounds, slicedContour)
                     result[idx] = cand.copy(
                         targetBox = updatedTarget,
                         bubbleBounds = splitBounds,
-                        contourProfile = null
+                        contourProfile = slicedContour
                     )
                 }
             }

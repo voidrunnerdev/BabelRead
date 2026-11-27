@@ -54,6 +54,8 @@ object TurkishSyllabifier {
         if (allUpper && len <= 5) return emptyList()
         if (vowelIndices.size < 2 || vowelIndices.size == len) return emptyList()
 
+        val firstApostrophe = apostropheIndices.firstOrNull() ?: -1
+        val protectShortRoot = firstApostrophe in 1 until minWordLength.coerceAtLeast(8)
         val breaks = ArrayList<Int>(vowelIndices.size + apostropheIndices.size)
         for (k in 0 until vowelIndices.size - 1) {
             val v1 = vowelIndices[k]
@@ -73,6 +75,7 @@ object TurkishSyllabifier {
                 2 -> v1 + 2        // kar-şı, gel-dim
                 else -> v2 - 1     // türk-çe, elekt-rik, kont-rol
             }
+            if (protectShortRoot && split <= firstApostrophe) continue
             if (split >= MIN_SIDE_CHARS && len - split >= MIN_SIDE_CHARS && !breaks.contains(split)) {
                 breaks.add(split)
             }

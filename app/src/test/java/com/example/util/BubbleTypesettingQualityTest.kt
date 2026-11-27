@@ -154,4 +154,11 @@ class BubbleTypesettingQualityTest {
         assertTrue("Should allow zero-width break after apostrophe: $soft", soft.contains("'\u200B"))
         assertNull("Short ?! shout must be exempt from harmonizer cap", PageFontHarmonizer.harmonizedCapSp(22f, "NE?!", 12f))
     }
+
+    @Test
+    fun turkishSyllabifier_neverSplitsShortProperNounRootBeforeApostrophe() {
+        val breaks = TurkishSyllabifier.syllableBreakOffsets("RİKUTO'yu")
+        // Root "RİKUTO" has 6 letters (< 8): must NEVER split inside "RİKUTO", only after apostrophe (index 7)
+        assertTrue("Short proper noun root RİKUTO must not be split inside: $breaks", breaks.all { it >= 7 })
+    }
 }

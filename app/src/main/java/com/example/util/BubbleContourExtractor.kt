@@ -148,7 +148,11 @@ object BubbleContourExtractor {
             anchorTop = aTop,
             anchorRight = aRight,
             anchorBottom = aBottom,
-            marginScale = marginScale
+            marginScale = marginScale,
+            openTop = top <= 2,
+            openBottom = bottom >= bitmap.height - 2,
+            openLeft = left <= 2,
+            openRight = right >= bitmap.width - 2
         )
     }
 
@@ -295,7 +299,11 @@ object BubbleContourExtractor {
         anchorTop: Int = -1,
         anchorRight: Int = -1,
         anchorBottom: Int = -1,
-        marginScale: Float = 1.0f
+        marginScale: Float = 1.0f,
+        openTop: Boolean = false,
+        openBottom: Boolean = false,
+        openLeft: Boolean = false,
+        openRight: Boolean = false
     ): ContourScanlineProfile? {
         if (gridW < 8 || gridH < 8 || luma.size < gridW * gridH) return null
 
@@ -440,13 +448,21 @@ object BubbleContourExtractor {
             if (mask[y * gridW]) leftLeak++
             if (mask[y * gridW + (gridW - 1)]) rightLeak++
         }
-        val leakedPerimeterCells = topLeak + botLeak + leftLeak + rightLeak
-        val perimeterCells = 2 * gridW + 2 * (gridH - 2)
+        // Do not count open bubble sides flush against page boundaries as perimeter leak.
+        val effTopLeak = if (openTop) 0 else topLeak
+        val effBotLeak = if (openBottom) 0 else botLeak
+        val effLeftLeak = if (openLeft) 0 else leftLeak
+        val effRightLeak = if (openRight) 0 else rightLeak
+        val leakedPerimeterCells = effTopLeak + effBotLeak + effLeftLeak + effRightLeak
+        val perimeterCells = (if (openTop) 0 else gridW) +
+            (if (openBottom) 0 else gridW) +
+            (if (openLeft) 0 else max(0, gridH - 2)) +
+            (if (openRight) 0 else max(0, gridH - 2))
         val singleSideLeak = maxOf(
-            topLeak.toFloat() / gridW,
-            botLeak.toFloat() / gridW,
-            leftLeak.toFloat() / max(1, gridH - 2),
-            rightLeak.toFloat() / max(1, gridH - 2)
+            effTopLeak.toFloat() / gridW,
+            effBotLeak.toFloat() / gridW,
+            effLeftLeak.toFloat() / max(1, gridH - 2),
+            effRightLeak.toFloat() / max(1, gridH - 2)
         )
         if ((perimeterCells > 0 && leakedPerimeterCells.toFloat() / perimeterCells.toFloat() > MAX_PERIMETER_LEAK_RATIO) ||
             singleSideLeak > 0.65f

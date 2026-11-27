@@ -1909,15 +1909,16 @@ class TranslationService(
                     // so stray edge glyphs (e.g. "NED", "EEL LIKE" extending outside the OCR box)
                     // are cleanly erased without touching the inked bubble border.
                     if (hasDistinctBubbleBounds) {
-                        val cleanContour = BubbleContourExtractor.extractFromBitmap(
-                            bitmap = sourceBitmap,
-                            bubbleBox = bubbleBox,
-                            anchorBox = textRect,
-                            pageOriginalWidth = sourceBitmap.width.toFloat(),
-                            pageOriginalHeight = sourceBitmap.height.toFloat(),
-                            isDarkBubble = block.isDarkBubble,
-                            marginScale = 0.55f
-                        )
+                        val cleanContour = block.contourProfile?.takeIf { it.isUsable }
+                            ?: BubbleContourExtractor.extractFromBitmap(
+                                bitmap = sourceBitmap,
+                                bubbleBox = bubbleBox,
+                                anchorBox = textRect,
+                                pageOriginalWidth = sourceBitmap.width.toFloat(),
+                                pageOriginalHeight = sourceBitmap.height.toFloat(),
+                                isDarkBubble = block.isDarkBubble,
+                                marginScale = 0.55f
+                            )
                         val clampedBubble = Rect(
                             bubbleBox.left.coerceIn(0, (sourceBitmap.width - 1).coerceAtLeast(0)),
                             bubbleBox.top.coerceIn(0, (sourceBitmap.height - 1).coerceAtLeast(0)),
@@ -2604,7 +2605,8 @@ class TranslationService(
                         cached.turkishText,
                         convertTurkishChars,
                         targetLangCode,
-                        normalizeCasing = false
+                        normalizeCasing = false,
+                        sourceText = clean
                     )
                 )
             } else {
@@ -2745,7 +2747,12 @@ class TranslationService(
                 results[originalIndex] = TranslationResult(request.id, null, error)
                 continue
             }
-            translated = postProcessTranslatedOutput(translated, convertTurkishChars, targetLangCode)
+            translated = postProcessTranslatedOutput(
+                translated,
+                convertTurkishChars,
+                targetLangCode,
+                sourceText = request.text
+            )
             results[originalIndex] = TranslationResult(request.id, translated)
         }
         TranslationOutcome(
@@ -3285,15 +3292,59 @@ class TranslationService(
         text: String,
         turkishConvertEnabled: Boolean,
         targetLangCode: String = "tr",
-        normalizeCasing: Boolean = true
+        normalizeCasing: Boolean = true,
+        sourceText: String = ""
     ): String {
         val preCleaned = cleanTranslatedOutput(text)
-        val cleaned = if (normalizeCasing) normalizeTranslatedCasing(preCleaned, targetLangCode) else preCleaned
+        val cleaned = if (normalizeCasing) {
+            normalizeTranslatedCasing(preCleaned, targetLangCode, sourceText)
+        } else {
+            preCleaned
+        }
         return if (turkishConvertEnabled) convertTurkishChars(cleaned) else cleaned
     }
 
-    private fun normalizeTranslatedCasing(text: String, targetLangCode: String): String {
+    private fun normalizeTranslatedCasing(
+        text: String,
+        targetLangCode: String,
+        sourceText: String = ""
+    ): String {
         if (text.isBlank()) return text
+        val isTurkish = targetLangCode.equals("tr", ignoreCase = true)
+        val locale = if (isTurkish) java.util.Locale("tr", "TR") else java.util.Locale.ROOT
+
+        // Capture ASCII foreign proper names from the source text (e.g. RIKUTO, HIRONORI)
+        // so Turkish Locale.lowercase() does not corrupt ASCII 'I' into dotless 'ı'.
+        val sourceForeignNames: Set<String> = if (sourceText.isNotBlank()) {
+            Regex("[A-Za-z]{3,}").findAll(sourceText)
+                .map { it.value.lowercase(java.util.Locale.ROOT) }
+                .toSet()
+        } else {
+            emptySet()
+        }
+
+        fun toAsciiKey(word: String): String = word
+            .replace('İ', 'i').replace('I', 'i').replace('ı', 'i')
+            .lowercase(java.util.Locale.ROOT)
+
+        fun restoreForeignProperNames(input: String): String {
+            if (sourceForeignNames.isEmpty()) return input
+            return Regex("[\\p{L}]+").replace(input) { match ->
+                val token = match.value
+                val asciiKey = toAsciiKey(token)
+                if (asciiKey.length >= 4 && asciiKey in sourceForeignNames) {
+                    val hasTurkishSpecific = token.any { it in "çÇğĞöÖşŞüÜ" }
+                    if (!hasTurkishSpecific) {
+                        asciiKey.replaceFirstChar { it.uppercase(java.util.Locale.ROOT) }
+                    } else {
+                        token
+                    }
+                } else {
+                    token
+                }
+            }
+        }
+
         var letterCount = 0
         var upperCount = 0
         for (ch in text) {
@@ -3308,14 +3359,13 @@ class TranslationService(
         val isShortShout = !trimmed.contains('.') &&
             wordCount <= 3 &&
             (trimmed.endsWith("!") || trimmed.endsWith("!?") || trimmed.endsWith("?!"))
-        if (isShortShout || letterCount < 4 || (wordCount < 2 && letterCount < 10)) return text
-        if (upperCount.toFloat() / letterCount.toFloat() < 0.85f) return text
-
-        val locale = if (targetLangCode.equals("tr", ignoreCase = true)) {
-            java.util.Locale("tr", "TR")
-        } else {
-            java.util.Locale.ROOT
+        if (isShortShout) return text
+        if (letterCount < 4 || (wordCount < 2 && letterCount < 10) ||
+            upperCount.toFloat() / letterCount.toFloat() < 0.85f
+        ) {
+            return restoreForeignProperNames(text)
         }
+
         val acronymPattern = Regex("""\b[A-Z0-9]{2,5}(?:'[A-Z]+)?\b""")
         val acronymMatches = acronymPattern.findAll(text).mapNotNull { m ->
             val core = m.value.substringBefore('\'')
@@ -3350,7 +3400,7 @@ class TranslationService(
                 }
             }
         }
-        return out.toString()
+        return restoreForeignProperNames(out.toString())
     }
 
     private fun convertTurkishChars(text: String): String {
